@@ -46,3 +46,7 @@ func (a *App) CreateNote(title string, templateKey string) (domain.Note, error) 
 func (a *App) SaveNote(note domain.Note) (domain.Note, error) {
 	return a.vault.SaveNote(note)
 }
+
+func (a *App) DeleteNote(relativePath string) error {
+	return a.vault.DeleteNote(relativePath)
+}

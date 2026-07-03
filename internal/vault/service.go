@@ -124,6 +124,17 @@ func (s *Service) SaveNote(note domain.Note) (domain.Note, error) {
 	return note, nil
 }
 
+func (s *Service) DeleteNote(relativePath string) error {
+	path, err := s.absoluteNotePath(relativePath)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("supprimer la note : %w", err)
+	}
+	return nil
+}
+
 func (s *Service) absoluteNotePath(relativePath string) (string, error) {
 	relativePath = filepath.Clean(filepath.FromSlash(relativePath))
 	if relativePath == "." || filepath.IsAbs(relativePath) || strings.HasPrefix(relativePath, "..") {

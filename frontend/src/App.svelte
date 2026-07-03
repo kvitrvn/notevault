@@ -3,12 +3,14 @@
   import Plus from '@lucide/svelte/icons/plus';
   import Save from '@lucide/svelte/icons/save';
   import Sun from '@lucide/svelte/icons/sun';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
   import NoteEditor from './components/NoteEditor.svelte';
   import { domain } from '../wailsjs/go/models';
 
   // Généré automatiquement par Wails lors du premier `wails dev`.
   import {
     CreateNote,
+    DeleteNote,
     ListNotes,
     OpenNote,
     SaveNote,
@@ -20,6 +22,8 @@
   let vaultPath = '';
   let loading = true;
   let saving = false;
+  let deleting = false;
+  let confirmingDelete = false;
   let error = '';
   let theme: 'dark' | 'light' =
     document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
@@ -93,6 +97,39 @@
       error = String(err);
     } finally {
       saving = false;
+    }
+  }
+
+  function requestDelete(): void {
+    if (!selected || deleting) return;
+
+    confirmingDelete = true;
+  }
+
+  function cancelDelete(): void {
+    if (deleting) return;
+
+    confirmingDelete = false;
+  }
+
+  async function confirmDelete(): Promise<void> {
+    if (!selected || deleting) return;
+
+    const relativePath = selected.relativePath;
+    deleting = true;
+    error = '';
+
+    try {
+      await DeleteNote(relativePath);
+      if (selected?.relativePath === relativePath) {
+        selected = null;
+      }
+      confirmingDelete = false;
+      await refresh();
+    } catch (err) {
+      error = String(err);
+    } finally {
+      deleting = false;
     }
   }
 
@@ -221,15 +258,26 @@
 
           <footer class="flex min-h-12 items-center justify-between gap-3 border-t border-border bg-panel px-4 text-xs text-faint">
             <span class="truncate" title={selected.relativePath}>{selected.relativePath}</span>
-            <button
-              class="inline-flex shrink-0 items-center gap-2 rounded-md border border-accent bg-accent px-3 py-1.5 text-sm font-medium text-accent-foreground hover:bg-accent-hover disabled:hover:bg-accent"
-              type="button"
-              onclick={saveSelected}
-              disabled={saving}
-            >
-              <Save size={15} strokeWidth={2} aria-hidden="true" />
-              {saving ? 'Enregistrement...' : 'Enregistrer'}
-            </button>
+            <div class="flex shrink-0 items-center gap-2">
+              <button
+                class="inline-flex items-center gap-2 rounded-md border border-danger/45 bg-transparent px-3 py-1.5 text-sm font-medium text-danger hover:bg-danger/10 disabled:hover:bg-transparent"
+                type="button"
+                onclick={requestDelete}
+                disabled={deleting || saving}
+              >
+                <Trash2 size={15} strokeWidth={2} aria-hidden="true" />
+                Supprimer
+              </button>
+              <button
+                class="inline-flex items-center gap-2 rounded-md border border-accent bg-accent px-3 py-1.5 text-sm font-medium text-accent-foreground hover:bg-accent-hover disabled:hover:bg-accent"
+                type="button"
+                onclick={saveSelected}
+                disabled={saving || deleting}
+              >
+                <Save size={15} strokeWidth={2} aria-hidden="true" />
+                {saving ? 'Enregistrement...' : 'Enregistrer'}
+              </button>
+            </div>
           </footer>
         </div>
       {:else}
@@ -245,3 +293,50 @@
     </section>
   </main>
 </div>
+
+{#if confirmingDelete && selected}
+  <div class="fixed inset-0 z-50 grid place-items-center px-4">
+    <button
+      class="absolute inset-0 bg-black/55"
+      type="button"
+      aria-label="Fermer la confirmation"
+      onclick={cancelDelete}
+      disabled={deleting}
+    ></button>
+    <div
+      class="relative w-full max-w-sm rounded-lg border border-border bg-panel p-4 shadow-xl"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="delete-note-title"
+    >
+      <h2 id="delete-note-title" class="text-base font-semibold text-foreground">
+        Supprimer cette note ?
+      </h2>
+      <p class="mt-2 text-sm leading-6 text-subtle">
+        Cette action supprimera le fichier Markdown du coffre local.
+      </p>
+      <p class="mt-3 truncate rounded-md bg-background px-2 py-1 text-xs text-faint" title={selected.relativePath}>
+        {selected.relativePath}
+      </p>
+      <div class="mt-4 flex justify-end gap-2">
+        <button
+          class="rounded-md border border-border bg-transparent px-3 py-1.5 text-sm text-subtle hover:bg-panel-muted hover:text-foreground"
+          type="button"
+          onclick={cancelDelete}
+          disabled={deleting}
+        >
+          Annuler
+        </button>
+        <button
+          class="inline-flex items-center gap-2 rounded-md border border-danger/45 bg-danger px-3 py-1.5 text-sm font-medium text-background hover:opacity-90"
+          type="button"
+          onclick={confirmDelete}
+          disabled={deleting}
+        >
+          <Trash2 size={15} strokeWidth={2} aria-hidden="true" />
+          {deleting ? 'Suppression...' : 'Supprimer'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
