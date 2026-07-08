@@ -3,9 +3,12 @@ package vault
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -241,5 +244,76 @@ func ensureDirs(root string) error {
 			return fmt.Errorf("créer %s : %w", dir, err)
 		}
 	}
+	return nil
+}
+
+// copyFileAtomic copie src vers dst en passant par un fichier temporaire
+// renommé à la fin. Garantit l'intégrité en cas d'interruption.
+func copyFileAtomic(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dst), filepath.Base(dst)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := io.Copy(tmp, in); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(info.Mode()); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, dst); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
+// openInOS ouvre une cible (fichier ou dossier) dans le gestionnaire
+// de fichiers natif. Sur Linux : xdg-open. Sur macOS : open. Sur Windows : explorer.
+func openInOS(target string) error {
+	if _, err := os.Stat(target); err != nil {
+		return fmt.Errorf("cible introuvable : %s", target)
+	}
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", target)
+	case "windows":
+		cmd = exec.Command("explorer", target)
+	default:
+		cmd = exec.Command("xdg-open", target)
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// Ne pas bloquer : détachement du process enfant.
+	go func() { _ = cmd.Wait() }()
 	return nil
 }

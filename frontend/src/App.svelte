@@ -10,6 +10,13 @@
   import CalendarDays from '@lucide/svelte/icons/calendar-days';
   import LayoutList from '@lucide/svelte/icons/layout-list';
   import FolderTree from '@lucide/svelte/icons/folder-tree';
+  import Hash from '@lucide/svelte/icons/hash';
+  import Pencil from '@lucide/svelte/icons/pencil';
+  import Copy from '@lucide/svelte/icons/copy';
+  import CopyPlus from '@lucide/svelte/icons/copy-plus';
+  import ExternalLink from '@lucide/svelte/icons/external-link';
+  import FolderInput from '@lucide/svelte/icons/folder-input';
+  import GripVertical from '@lucide/svelte/icons/grip-vertical';
 
   import NoteEditor from './components/NoteEditor.svelte';
   import SaveIndicator from './components/SaveIndicator.svelte';
@@ -17,12 +24,18 @@
   import QuickSwitcher from './components/QuickSwitcher.svelte';
   import FilterBar from './components/FilterBar.svelte';
   import SidebarTree from './components/SidebarTree.svelte';
+  import TagEditor from './components/TagEditor.svelte';
+  import ContextMenu from './components/ContextMenu.svelte';
+  import TagsView from './components/TagsView.svelte';
+  import TemplatePickerDialog from './components/TemplatePickerDialog.svelte';
+  import MoveDialog from './components/MoveDialog.svelte';
   import type { SaveState } from './components/SaveIndicator.svelte';
   import { domain, vault } from '../wailsjs/go/models';
 
   import {
     CreateNote,
     DeleteNote,
+    DuplicateNote,
     EnsureDailyNote,
     GetConfig,
     IsNotePinned,
@@ -31,9 +44,13 @@
     ListNotesFiltered,
     ListPinned,
     ListTags,
+    ListTemplates,
+    MoveNote,
     OpenDailyNote,
+    OpenInExplorer,
     OpenNote,
     PinNote,
+    RenameTitle,
     SaveNote,
     VaultPath
   } from '../wailsjs/go/main/App';
@@ -42,12 +59,22 @@
   type NoteSummary = domain.NoteSummary;
   type FolderInfo = vault.FolderInfo;
   type FilterQuery = vault.FilterQuery;
+  type TagCount = vault.TagCount;
+  type Template = vault.Template;
+  type ContextMenuItem = {
+    label: string;
+    icon?: typeof Pencil;
+    danger?: boolean;
+    onPick: () => void;
+  };
 
   const AUTO_SAVE_DEBOUNCE_MS = 1500;
 
   let notes: NoteSummary[] = $state([]);
   let pinned: NoteSummary[] = $state([]);
   let folders: FolderInfo[] = $state([]);
+  let tags: TagCount[] = $state([]);
+  let templates: Template[] = $state([]);
   let selected: Note | null = $state<Note | null>(null);
   let lastSavedSnapshot = '';
   let vaultPath = $state('');
@@ -86,11 +113,33 @@
   let quickSwitcherOpen = $state(false);
   let allEntries: { relativePath: string; title: string; updatedAt: string; score: number }[] = $state([]);
 
-  // Pin state pour la note courante
+  // Tags view
+  let tagsViewOpen = $state(false);
+
+  // Template picker (Cmd+N)
+  let templatePickerOpen = $state(false);
+
+  // Move dialog
+  let moveDialogOpen = $state(false);
+  let moveTarget = $state('');
+
+  // Pin state
   let isCurrentPinned = $state(false);
+
+  // Context menu (right-click on sidebar item)
+  let contextMenu = $state<{ x: number; y: number; items: ContextMenuItem[] } | null>(null);
+
+  // Inline rename state
+  let titleEditing = $state(false);
+  let titleDraft = $state('');
+
+  // Drag state
+  let dragSource = $state<string | null>(null);
+  let dragOverFolder = $state<string | null>(null);
 
   let filterBar = $state<FilterBar>();
   let sidebarEl: HTMLElement | undefined = $state();
+  let titleEl: HTMLInputElement | undefined = $state();
 
   const currentTitle = $derived(selected?.title?.trim() || 'Aucune note');
   const selectedPath = $derived(selected?.relativePath || '');
@@ -152,17 +201,20 @@
       const autoDaily = cfg?.autoDailyNote === true;
       const fq = buildQuery();
       const fetchAll = !activeFilter.trim() && activeChips.length === 0;
-      const [list, pin, fold, vp] = await Promise.all([
+      const [list, pin, fold, vp, tpl, tg] = await Promise.all([
         fetchAll ? ListNotes() : ListNotesFiltered(fq, 1000),
         ListPinned(),
         ListFolders(),
-        VaultPath()
+        VaultPath(),
+        ListTemplates(),
+        ListTags()
       ]);
       notes = list;
       pinned = pin;
       folders = fold;
       vaultPath = vp;
-      // Reconstruit les entrées pour le quick switcher (toutes les notes).
+      templates = tpl ?? [];
+      tags = tg ?? [];
       if (fetchAll) {
         allEntries = list.map((n) => ({
           relativePath: n.relativePath,
@@ -171,7 +223,6 @@
           score: 0
         }));
       } else {
-        // Re-fetch all pour le quick switcher (cheap).
         const all = await ListNotes();
         allEntries = all.map((n) => ({
           relativePath: n.relativePath,
@@ -180,7 +231,6 @@
           score: 0
         }));
       }
-      // Auto-daily : on s'assure que la note du jour existe (sans ouvrir).
       if (autoDaily) {
         try {
           await EnsureDailyNote();
@@ -197,9 +247,10 @@
 
   async function refreshPinnedAndFolders(): Promise<void> {
     try {
-      const [pin, fold] = await Promise.all([ListPinned(), ListFolders()]);
+      const [pin, fold, tg] = await Promise.all([ListPinned(), ListFolders(), ListTags()]);
       pinned = pin;
       folders = fold;
+      tags = tg;
     } catch {
       /* silencieux */
     }
@@ -208,7 +259,6 @@
   async function openNote(relativePath: string): Promise<void> {
     if (!(await flushSave())) return;
     error = '';
-
     try {
       const note = await OpenNote(relativePath);
       selected = note;
@@ -220,18 +270,22 @@
     }
   }
 
-  async function createNote(): Promise<void> {
+  function openTemplatePicker(): void {
+    templatePickerOpen = true;
+  }
+
+  async function createNoteFromTemplate(templateId: string, title: string): Promise<void> {
+    templatePickerOpen = false;
     if (!(await flushSave())) return;
     error = '';
-
     try {
-      const note = await CreateNote('Nouvelle note', '');
+      const note = await CreateNote(title, templateId);
       selected = note;
       lastSavedSnapshot = snapshot(note);
       saveState = 'clean';
       lastSavedAt = new Date();
-      await refresh();
       isCurrentPinned = false;
+      await refresh();
     } catch (err) {
       error = String(err);
     }
@@ -275,6 +329,13 @@
 
   function onTitleChange(): void {
     if (!selected) return;
+    selected = selected;
+    scheduleAutoSave();
+  }
+
+  function onTagsChange(next: string[]): void {
+    if (!selected) return;
+    selected.tags = next;
     selected = selected;
     scheduleAutoSave();
   }
@@ -330,6 +391,180 @@
     }
   }
 
+  // --- Inline rename -------------------------------------------------------
+  function startRename(): void {
+    if (!selected) return;
+    titleDraft = selected.title;
+    titleEditing = true;
+    requestAnimationFrame(() => titleEl?.focus());
+  }
+
+  async function commitRename(): Promise<void> {
+    titleEditing = false;
+    if (!selected) return;
+    const next = titleDraft.trim();
+    if (next === selected.title.trim()) return;
+    try {
+      const updated = await RenameTitle(selected.relativePath, next);
+      selected = updated;
+      lastSavedSnapshot = snapshot(updated);
+      saveState = 'clean';
+      lastSavedAt = new Date();
+      await refresh();
+    } catch (err) {
+      showToast('error', `Échec du renommage : ${err}`);
+    }
+  }
+
+  function cancelRename(): void {
+    titleEditing = false;
+    titleDraft = selected?.title ?? '';
+  }
+
+  // --- Move / duplicate / explorer / context menu -------------------------
+  function openMoveDialog(): void {
+    if (!selected) return;
+    moveTarget = selected.relativePath;
+    moveDialogOpen = true;
+  }
+
+  async function moveTo(newFolder: string): Promise<void> {
+    moveDialogOpen = false;
+    if (!selected) return;
+    if (!(await flushSave())) return;
+    const base = selected.relativePath.split('/').pop() ?? 'note.md';
+    const target = newFolder + base;
+    if (target === selected.relativePath) return;
+    try {
+      const moved = await MoveNote(selected.relativePath, target);
+      showToast('info', `Note déplacée vers ${newFolder}`);
+      await refresh();
+      // Sélectionne la note déplacée.
+      await openNote(moved.relativePath);
+    } catch (err) {
+      showToast('error', `Échec du déplacement : ${err}`);
+    }
+  }
+
+  async function duplicateCurrent(): Promise<void> {
+    if (!selected) return;
+    if (!(await flushSave())) return;
+    try {
+      const dup = await DuplicateNote(selected.relativePath);
+      showToast('info', 'Note dupliquée.');
+      await refresh();
+      await openNote(dup.relativePath);
+    } catch (err) {
+      showToast('error', `Échec de la duplication : ${err}`);
+    }
+  }
+
+  async function copyCurrentPath(): Promise<void> {
+    if (!selected) return;
+    try {
+      await navigator.clipboard.writeText(selected.relativePath);
+      showToast('info', 'Chemin copié dans le presse-papiers.');
+    } catch {
+      showToast('error', 'Impossible de copier le chemin.');
+    }
+  }
+
+  async function openInExplorerCurrent(): Promise<void> {
+    if (!selected) return;
+    try {
+      await OpenInExplorer(selected.relativePath, true);
+    } catch (err) {
+      showToast('error', `Impossible d'ouvrir le dossier : ${err}`);
+    }
+  }
+
+  function openContextMenu(event: MouseEvent, relPath: string): void {
+    event.preventDefault();
+    if (!selected || selected.relativePath !== relPath) {
+      void openNote(relPath).then(() => buildContextMenu(event));
+    } else {
+      buildContextMenu(event);
+    }
+  }
+
+  function buildContextMenu(event: MouseEvent): void {
+    if (!selected) return;
+    contextMenu = {
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        {
+          label: 'Renommer le titre',
+          icon: Pencil,
+          onPick: () => startRename()
+        },
+        {
+          label: 'Déplacer vers…',
+          icon: FolderInput,
+          onPick: () => openMoveDialog()
+        },
+        {
+          label: 'Dupliquer',
+          icon: CopyPlus,
+          onPick: () => void duplicateCurrent()
+        },
+        {
+          label: 'Copier le chemin',
+          icon: Copy,
+          onPick: () => void copyCurrentPath()
+        },
+        {
+          label: 'Ouvrir dans le Finder',
+          icon: ExternalLink,
+          onPick: () => void openInExplorerCurrent()
+        }
+      ]
+    };
+  }
+
+  // --- Drag & drop ---------------------------------------------------------
+  function onDragStart(event: DragEvent, relPath: string): void {
+    if (!event.dataTransfer) return;
+    dragSource = relPath;
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', relPath);
+  }
+
+  function onDragEnd(): void {
+    dragSource = null;
+    dragOverFolder = null;
+  }
+
+  function onFolderDragOver(event: DragEvent, folder: string): void {
+    if (!dragSource) return;
+    event.preventDefault();
+    event.dataTransfer && (event.dataTransfer.dropEffect = 'move');
+    dragOverFolder = folder;
+  }
+
+  function onFolderDragLeave(folder: string): void {
+    if (dragOverFolder === folder) dragOverFolder = null;
+  }
+
+  async function onFolderDrop(event: DragEvent, folder: string): Promise<void> {
+    event.preventDefault();
+    const src = dragSource ?? event.dataTransfer?.getData('text/plain') ?? '';
+    dragOverFolder = null;
+    dragSource = null;
+    if (!src || !src.startsWith('notes/')) return;
+    const base = src.split('/').pop() ?? 'note.md';
+    const target = 'notes/' + folder + '/' + base;
+    if (target === src) return;
+    try {
+      await MoveNote(src, target);
+      showToast('info', `Note déplacée vers ${folder}/`);
+      await refresh();
+    } catch (err) {
+      showToast('error', `Échec : ${err}`);
+    }
+  }
+
+  // --- Delete --------------------------------------------------------------
   function requestDelete(): void {
     if (!selected || deleting) return;
     confirmingDelete = true;
@@ -349,7 +584,6 @@
     const relativePath = selected.relativePath;
     deleting = true;
     error = '';
-
     try {
       await DeleteNote(relativePath);
       if (selected?.relativePath === relativePath) {
@@ -375,6 +609,7 @@
     window.localStorage.setItem('notevault-theme', theme);
   }
 
+  // --- Filter parser -------------------------------------------------------
   function parseDateRange(value: string): { from?: Date; to?: Date } {
     const v = value.trim();
     const now = new Date();
@@ -411,11 +646,7 @@
     }
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(rest);
     if (!m) return {};
-    const d = new Date(
-      Number(m[1]),
-      Number(m[2]) - 1,
-      Number(m[3])
-    ).getTime();
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime();
     switch (cmp) {
       case 'G':
       case 'g':
@@ -441,9 +672,7 @@
     } | null;
   } {
     const trimmed = input.trim();
-    if (!trimmed) {
-      return { chips: [], fq: null };
-    }
+    if (!trimmed) return { chips: [], fq: null };
     const fq = {
       Query: '',
       Tags: [] as string[],
@@ -493,7 +722,6 @@
   }
 
   function onRemoveChip(kind: string, text: string): void {
-    const current = parseFilter(activeFilter);
     let next = activeFilter;
     if (kind === 'tag') {
       next = activeFilter.replace(new RegExp(`(^|\\s)tag:${text}(\\s|$)`, 'g'), ' ').trim();
@@ -510,7 +738,7 @@
     onFilterChange('');
   }
 
-  // Navigation clavier dans la sidebar (j/k/Enter quand pas dans un input).
+  // --- Keyboard navigation -------------------------------------------------
   function onSidebarKey(event: KeyboardEvent): void {
     const target = event.target as HTMLElement | null;
     if (target && ['INPUT', 'TEXTAREA'].includes(target.tagName)) return;
@@ -533,8 +761,7 @@
     } else if (event.key === 'l') {
       event.preventDefault();
       sidebarFocused = false;
-      const title = document.querySelector<HTMLInputElement>('input[aria-label="Titre de la note"]');
-      title?.focus();
+      titleEl?.focus();
     }
   }
 
@@ -548,8 +775,17 @@
   function onGlobalKeydown(event: KeyboardEvent): void {
     const meta = event.ctrlKey || event.metaKey;
     const target = event.target as HTMLElement | null;
-    const inEditable =
-      target && ['INPUT', 'TEXTAREA'].includes(target.tagName);
+    const inEditable = target && ['INPUT', 'TEXTAREA'].includes(target.tagName);
+    if (event.key === 'Escape') {
+      if (contextMenu) {
+        contextMenu = null;
+        return;
+      }
+      if (quickSwitcherOpen) {
+        quickSwitcherOpen = false;
+        return;
+      }
+    }
     if (meta && event.shiftKey && event.key.toLowerCase() === 'p') {
       event.preventDefault();
       void togglePinCurrent();
@@ -560,9 +796,29 @@
       filterBar?.focus();
       return;
     }
+    if (meta && event.shiftKey && event.key.toLowerCase() === 'r') {
+      event.preventDefault();
+      startRename();
+      return;
+    }
+    if (meta && event.shiftKey && event.key.toLowerCase() === 'm') {
+      event.preventDefault();
+      openMoveDialog();
+      return;
+    }
+    if (meta && event.shiftKey && event.key.toLowerCase() === 'd') {
+      event.preventDefault();
+      void openTodayNote();
+      return;
+    }
     if (meta && event.key.toLowerCase() === 'p') {
       event.preventDefault();
       quickSwitcherOpen = !quickSwitcherOpen;
+      return;
+    }
+    if (meta && event.key.toLowerCase() === 't') {
+      event.preventDefault();
+      tagsViewOpen = !tagsViewOpen;
       return;
     }
     if (meta && event.key.toLowerCase() === 's') {
@@ -572,16 +828,7 @@
     }
     if (meta && event.key.toLowerCase() === 'n') {
       event.preventDefault();
-      void createNote();
-      return;
-    }
-    if (meta && event.shiftKey && event.key.toLowerCase() === 'd') {
-      event.preventDefault();
-      void openTodayNote();
-      return;
-    }
-    if (event.key === 'Escape' && quickSwitcherOpen) {
-      quickSwitcherOpen = false;
+      openTemplatePicker();
       return;
     }
     if (!inEditable && (event.key === 'j' || event.key === 'k' || event.key === 'h' || event.key === 'l')) {
@@ -603,6 +850,11 @@
   function pickEntry(entry: { relativePath: string }): void {
     quickSwitcherOpen = false;
     void openNote(entry.relativePath);
+  }
+
+  function pickTag(tag: string): void {
+    tagsViewOpen = false;
+    onFilterChange(`tag:${tag}`);
   }
 
   void refresh();
@@ -643,27 +895,27 @@
         <div class="inline-flex items-center rounded-md border border-border bg-panel p-0.5">
           <button
             class={view === 'flat'
-              ? 'inline-flex h-6 items-center gap-1 rounded px-2 text-xs font-medium text-foreground'
-              : 'inline-flex h-6 items-center gap-1 rounded px-2 text-xs text-subtle hover:text-foreground'}
+              ? 'inline-flex h-7 w-7 items-center justify-center rounded text-foreground'
+              : 'inline-flex h-7 w-7 items-center justify-center rounded text-subtle hover:text-foreground'}
             type="button"
             title="Vue à plat"
+            aria-label="Vue à plat"
             aria-pressed={view === 'flat'}
             onclick={() => setView('flat')}
           >
-            <LayoutList size={11} strokeWidth={2} aria-hidden="true" />
-            À plat
+            <LayoutList size={13} strokeWidth={2} aria-hidden="true" />
           </button>
           <button
             class={view === 'tree'
-              ? 'inline-flex h-6 items-center gap-1 rounded px-2 text-xs font-medium text-foreground'
-              : 'inline-flex h-6 items-center gap-1 rounded px-2 text-xs text-subtle hover:text-foreground'}
+              ? 'inline-flex h-7 w-7 items-center justify-center rounded text-foreground'
+              : 'inline-flex h-7 w-7 items-center justify-center rounded text-subtle hover:text-foreground'}
             type="button"
             title="Vue arborescente"
+            aria-label="Vue arborescente"
             aria-pressed={view === 'tree'}
             onclick={() => setView('tree')}
           >
-            <FolderTree size={11} strokeWidth={2} aria-hidden="true" />
-            Arborescence
+            <FolderTree size={13} strokeWidth={2} aria-hidden="true" />
           </button>
         </div>
         <div class="flex items-center gap-1">
@@ -679,6 +931,15 @@
           <button
             class="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-panel text-subtle hover:bg-panel-muted hover:text-foreground"
             type="button"
+            title="Tags (Ctrl+T)"
+            aria-label="Vue Tags"
+            onclick={() => (tagsViewOpen = true)}
+          >
+            <Hash size={13} strokeWidth={2} aria-hidden="true" />
+          </button>
+          <button
+            class="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-panel text-subtle hover:bg-panel-muted hover:text-foreground"
+            type="button"
             title="Note du jour (Ctrl+Shift+D)"
             aria-label="Note du jour"
             onclick={() => openTodayNote()}
@@ -690,7 +951,7 @@
             type="button"
             title="Nouvelle note (Ctrl+N)"
             aria-label="Nouvelle note"
-            onclick={() => createNote()}
+            onclick={() => openTemplatePicker()}
           >
             <Plus size={13} strokeWidth={2} aria-hidden="true" />
           </button>
@@ -721,17 +982,29 @@
             <div class="flex flex-col gap-0.5 px-1">
               {#each pinned as note (note.relativePath)}
                 {@const active = selected?.relativePath === note.relativePath}
-                <button
-                  type="button"
+                <div
                   class={active
-                    ? 'flex w-full items-center gap-1.5 rounded-md border border-accent bg-accent/15 px-2 py-1 text-left text-foreground'
-                    : 'flex w-full items-center gap-1.5 rounded-md border border-transparent px-2 py-1 text-left text-foreground hover:border-border hover:bg-panel-muted'}
+                    ? 'flex w-full items-center gap-1.5 rounded-md border border-accent bg-accent/15 px-2 py-1 text-foreground'
+                    : 'flex w-full items-center gap-1.5 rounded-md border border-transparent px-2 py-1 text-foreground hover:border-border hover:bg-panel-muted'}
+                  role="button"
+                  tabindex="0"
                   aria-current={active ? 'page' : undefined}
+                  draggable="true"
+                  ondragstart={(e) => onDragStart(e, note.relativePath)}
+                  ondragend={onDragEnd}
                   onclick={() => openNote(note.relativePath)}
+                  oncontextmenu={(e) => openContextMenu(e, note.relativePath)}
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      void openNote(note.relativePath);
+                    }
+                  }}
                 >
+                  <GripVertical size={10} strokeWidth={2} class="shrink-0 text-faint" aria-hidden="true" />
                   <Pin size={11} strokeWidth={2.5} class="shrink-0 text-accent" aria-hidden="true" />
                   <span class="min-w-0 flex-1 truncate text-sm">{note.title || 'Sans titre'}</span>
-                </button>
+                </div>
               {/each}
             </div>
           </section>
@@ -746,6 +1019,13 @@
               folders={folders}
               selectedPath={selectedPath}
               onOpen={openNote}
+              onDragStart={onDragStart}
+              onDragEnd={onDragEnd}
+              onFolderDragOver={onFolderDragOver}
+              onFolderDragLeave={onFolderDragLeave}
+              onFolderDrop={onFolderDrop}
+              onContextMenu={openContextMenu}
+              dragOverFolder={dragOverFolder}
               onTogglePin={(p) => {
                 if (selected?.relativePath === p) {
                   void togglePinCurrent();
@@ -766,13 +1046,24 @@
             >
               {#snippet children(note: NoteSummary)}
                 {@const active = selected?.relativePath === note.relativePath}
-                <button
-                  type="button"
+                <div
                   class={active
-                    ? 'grid w-full gap-1 rounded-lg border border-accent bg-panel px-3 py-2 text-left shadow-sm'
-                    : 'grid w-full gap-1 rounded-lg border border-transparent px-3 py-2 text-left hover:border-border hover:bg-panel-muted'}
+                    ? 'grid w-full cursor-grab gap-1 rounded-lg border border-accent bg-panel px-3 py-2 text-left text-foreground shadow-sm'
+                    : 'grid w-full cursor-grab gap-1 rounded-lg border border-transparent px-3 py-2 text-left text-foreground hover:border-border hover:bg-panel-muted'}
+                  role="button"
+                  tabindex="0"
                   aria-current={active ? 'page' : undefined}
+                  draggable="true"
+                  ondragstart={(e) => onDragStart(e, note.relativePath)}
+                  ondragend={onDragEnd}
                   onclick={() => openNote(note.relativePath)}
+                  oncontextmenu={(e) => openContextMenu(e, note.relativePath)}
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      void openNote(note.relativePath);
+                    }
+                  }}
                 >
                   <span class="flex min-w-0 items-center gap-1.5">
                     {#if pinnedSet.has(note.relativePath)}
@@ -788,7 +1079,7 @@
                       · <span class="text-faint">{note.relativePath.split('/').slice(1, -1).join('/')}</span>
                     {/if}
                   </span>
-                </button>
+                </div>
               {/snippet}
             </VirtualList>
           </div>
@@ -861,13 +1152,46 @@
 
       {#if selected}
         <div class="flex min-h-0 flex-1 flex-col">
-          <input
-            class="block w-full shrink-0 border-0 bg-transparent px-4 pb-3 pt-5 text-3xl font-semibold leading-tight text-foreground outline-none placeholder:text-faint focus:outline-none focus-visible:outline-none sm:text-4xl"
-            aria-label="Titre de la note"
-            bind:value={selected.title}
-            oninput={onTitleChange}
-            placeholder="Sans titre"
-          />
+          {#if titleEditing}
+            <input
+              bind:this={titleEl}
+              class="block w-full shrink-0 border-0 bg-transparent px-4 pb-3 pt-5 text-3xl font-semibold leading-tight text-foreground outline-none placeholder:text-faint focus:outline-none focus-visible:outline-none sm:text-4xl"
+              aria-label="Titre de la note"
+              bind:value={titleDraft}
+              onkeydown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  void commitRename();
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  cancelRename();
+                }
+              }}
+              onblur={() => commitRename()}
+              placeholder="Sans titre"
+            />
+          {:else}
+            <h1
+              class="block w-full shrink-0 cursor-text select-none border-0 bg-transparent px-4 pb-2 pt-5 text-3xl font-semibold leading-tight text-foreground sm:text-4xl"
+              ondblclick={startRename}
+              title="Double-cliquer pour renommer (Ctrl+Shift+R)"
+            >
+              {selected.title || 'Sans titre'}
+            </h1>
+          {/if}
+
+          <div class="flex shrink-0 flex-wrap items-center gap-3 border-b border-border/60 px-4 py-2">
+            <TagEditor
+              tags={selected.tags ?? []}
+              knownTags={tags}
+              onChange={onTagsChange}
+            />
+            {#if selected.relativePath.includes('/')}
+              <span class="text-xs text-faint">
+                Dossier : {selected.relativePath.split('/').slice(1, -1).join('/') || 'racine'}
+              </span>
+            {/if}
+          </div>
 
           <div class="min-h-0 flex-1">
             <NoteEditor markdown={selected.content} onChange={onEditorChange} />
@@ -884,12 +1208,22 @@
               <span class="truncate" title={selected.relativePath}>{selected.relativePath}</span>
               <div class="flex shrink-0 items-center gap-2">
                 <button
+                  class="inline-flex items-center gap-2 rounded-md border border-border bg-transparent px-3 py-1.5 text-sm font-medium text-subtle hover:bg-panel-muted hover:text-foreground"
+                  type="button"
+                  onclick={openMoveDialog}
+                  title="Déplacer (Ctrl+Shift+M)"
+                  disabled={saving || deleting}
+                >
+                  <FolderInput size={14} strokeWidth={2} aria-hidden="true" />
+                  Déplacer
+                </button>
+                <button
                   class="inline-flex items-center gap-2 rounded-md border border-danger/45 bg-transparent px-3 py-1.5 text-sm font-medium text-danger hover:bg-danger/10 disabled:hover:bg-transparent"
                   type="button"
                   onclick={requestDelete}
                   disabled={deleting || saving}
                 >
-                  <Trash2 size={15} strokeWidth={2} aria-hidden="true" />
+                  <Trash2 size={14} strokeWidth={2} aria-hidden="true" />
                   Supprimer
                 </button>
                 <button
@@ -898,7 +1232,7 @@
                   onclick={saveSelected}
                   disabled={saving || deleting}
                 >
-                  <Save size={15} strokeWidth={2} aria-hidden="true" />
+                  <Save size={14} strokeWidth={2} aria-hidden="true" />
                   {saving ? 'Enregistrement...' : 'Enregistrer'}
                 </button>
               </div>
@@ -914,11 +1248,13 @@
             </p>
             <p class="mt-4 text-xs text-faint">
               <kbd class="rounded border border-border-strong bg-background px-1.5 py-0.5">Ctrl+P</kbd>
-              recherche rapide ·
-              <kbd class="rounded border border-border-strong bg-background px-1.5 py-0.5">Ctrl+Shift+F</kbd>
-              filtres ·
-              <kbd class="rounded border border-border-strong bg-background px-1.5 py-0.5">Ctrl+Shift+P</kbd>
-              épingler
+              recherche ·
+              <kbd class="rounded border border-border-strong bg-background px-1.5 py-0.5">Ctrl+T</kbd>
+              tags ·
+              <kbd class="rounded border border-border-strong bg-background px-1.5 py-0.5">Ctrl+N</kbd>
+              nouvelle note ·
+              <kbd class="rounded border border-border-strong bg-background px-1.5 py-0.5">Ctrl+Shift+R</kbd>
+              renommer
             </p>
           </div>
         </div>
@@ -933,6 +1269,38 @@
   onPick={pickEntry}
   onClose={() => (quickSwitcherOpen = false)}
 />
+
+<TagsView
+  open={tagsViewOpen}
+  tags={tags}
+  onPick={pickTag}
+  onClose={() => (tagsViewOpen = false)}
+/>
+
+<TemplatePickerDialog
+  open={templatePickerOpen}
+  templates={templates}
+  onPick={createNoteFromTemplate}
+  onClose={() => (templatePickerOpen = false)}
+/>
+
+<MoveDialog
+  open={moveDialogOpen}
+  currentPath={moveTarget}
+  folders={folders}
+  onMove={moveTo}
+  onClose={() => (moveDialogOpen = false)}
+/>
+
+{#if contextMenu}
+  <ContextMenu
+    open={true}
+    x={contextMenu.x}
+    y={contextMenu.y}
+    items={contextMenu.items}
+    onClose={() => (contextMenu = null)}
+  />
+{/if}
 
 {#if toast}
   <div class="pointer-events-none fixed bottom-6 right-6 z-40 flex max-w-sm flex-col gap-2">

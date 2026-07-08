@@ -96,6 +96,37 @@ func (a *App) EnsureDailyNote() (string, error) {
 	return a.vault.EnsureDailyNote()
 }
 
+// ListTemplates retourne la liste des templates disponibles.
+func (a *App) ListTemplates() []vault.Template {
+	return a.vault.ListTemplates()
+}
+
+// CreateNoteFromTemplate crée une note avec un template nommé (id de Template).
+// Si templateID est vide ou "blank", la note est vide.
+func (a *App) CreateNoteFromTemplate(title, templateID string) (domain.Note, error) {
+	return a.vault.CreateNote(title, templateID)
+}
+
+// MoveNote déplace une note vers un nouveau chemin.
+func (a *App) MoveNote(oldPath, newPath string) (domain.Note, error) {
+	return a.vault.MoveNote(oldPath, newPath)
+}
+
+// DuplicateNote crée une copie d'une note.
+func (a *App) DuplicateNote(relativePath string) (domain.Note, error) {
+	return a.vault.DuplicateNote(relativePath)
+}
+
+// OpenInExplorer ouvre le fichier (ou son dossier) dans le gestionnaire natif.
+func (a *App) OpenInExplorer(relativePath string, reveal bool) error {
+	return a.vault.OpenInExplorer(relativePath, reveal)
+}
+
+// RenameTitle met à jour uniquement le titre d'une note.
+func (a *App) RenameTitle(relativePath, newTitle string) (domain.Note, error) {
+	return a.vault.RenameTitle(relativePath, newTitle)
+}
+
 func (a *App) OpenNote(relativePath string) (domain.Note, error) {
 	return a.vault.OpenNote(relativePath)
 }

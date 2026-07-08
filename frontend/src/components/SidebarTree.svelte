@@ -4,6 +4,7 @@
   import FileText from '@lucide/svelte/icons/file-text';
   import Pin from '@lucide/svelte/icons/pin';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import GripVertical from '@lucide/svelte/icons/grip-vertical';
 
   type NoteSummary = {
     relativePath: string;
@@ -20,6 +21,13 @@
     selectedPath: string;
     onOpen: (relativePath: string) => void;
     onTogglePin?: (relativePath: string) => void;
+    onDragStart?: (event: DragEvent, relativePath: string) => void;
+    onDragEnd?: () => void;
+    onFolderDragOver?: (event: DragEvent, folder: string) => void;
+    onFolderDragLeave?: (folder: string) => void;
+    onFolderDrop?: (event: DragEvent, folder: string) => void;
+    onContextMenu?: (event: MouseEvent, relativePath: string) => void;
+    dragOverFolder?: string | null;
   };
 
   let {
@@ -28,7 +36,14 @@
     folders,
     selectedPath,
     onOpen,
-    onTogglePin
+    onTogglePin,
+    onDragStart,
+    onDragEnd,
+    onFolderDragOver,
+    onFolderDragLeave,
+    onFolderDrop,
+    onContextMenu,
+    dragOverFolder
   }: Props = $props();
 
   type TreeNode = {
@@ -46,9 +61,8 @@
       const parts = note.relativePath.split('/');
       if (parts.length < 3) {
         root.notes.push(note);
-        continue
+        continue;
       }
-      // parts[0] = "notes", parts[1] = premier dossier, ...
       let cursor = root;
       let cumulative = 'notes';
       for (let i = 1; i < parts.length - 1; i++) {
@@ -83,6 +97,10 @@
   function isPinned(relPath: string): boolean {
     return pinned.some((p) => p.relativePath === relPath);
   }
+
+  function isDragOver(path: string): boolean {
+    return dragOverFolder === path;
+  }
 </script>
 
 {#snippet noteRow(note: NoteSummary, indent: number)}
@@ -95,7 +113,11 @@
     role="button"
     tabindex="0"
     aria-current={active ? 'page' : undefined}
+    draggable="true"
+    ondragstart={(e) => onDragStart?.(e, note.relativePath)}
+    ondragend={() => onDragEnd?.()}
     onclick={() => onOpen(note.relativePath)}
+    oncontextmenu={(e) => onContextMenu?.(e, note.relativePath)}
     onkeydown={(e) => {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
@@ -103,6 +125,7 @@
       }
     }}
   >
+    <GripVertical size={10} strokeWidth={2} class="shrink-0 text-faint" aria-hidden="true" />
     {#if isPinned(note.relativePath)}
       <Pin size={11} strokeWidth={2.5} class="shrink-0 text-accent" aria-label="épinglée" />
     {:else}
@@ -138,13 +161,19 @@
 
 {#snippet folderNode(node: TreeNode, depth: number)}
   {@const open = isOpen(node.path)}
+  {@const dragOver = isDragOver(node.path)}
   <div>
     <button
       type="button"
-      class="flex w-full items-center gap-1 rounded-md px-2 py-1 text-left text-sm font-medium text-subtle hover:bg-panel-muted hover:text-foreground"
+      class={dragOver
+        ? 'flex w-full items-center gap-1 rounded-md border border-accent bg-accent/15 px-2 py-1 text-left text-sm font-medium text-foreground'
+        : 'flex w-full items-center gap-1 rounded-md px-2 py-1 text-left text-sm font-medium text-subtle hover:bg-panel-muted hover:text-foreground'}
       style="padding-left: {0.5 + depth * 0.85}rem"
       onclick={() => toggle(node.path)}
       aria-expanded={open}
+      ondragover={(e) => onFolderDragOver?.(e, node.path)}
+      ondragleave={() => onFolderDragLeave?.(node.path)}
+      ondrop={(e) => onFolderDrop?.(e, node.path)}
     >
       <ChevronRight
         size={11}

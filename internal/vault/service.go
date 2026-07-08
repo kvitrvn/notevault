@@ -21,6 +21,7 @@ type Service struct {
 	index     Index
 	config    *config.Store
 	watcher   *Watcher
+	templates *TemplateLoader
 	indexCtx  context.Context
 	indexStop context.CancelFunc
 }
@@ -42,6 +43,9 @@ func New(opts Options) (*Service, error) {
 	if err := ensureDirs(root); err != nil {
 		return nil, err
 	}
+	if err := ensureTemplateDir(root); err != nil {
+		return nil, err
+	}
 	idx := opts.Index
 	if idx == nil {
 		idx, err = newSQLiteIndex(filepath.Join(root, ".notevault", "index.db"))
@@ -54,9 +58,10 @@ func New(opts Options) (*Service, error) {
 		cfg = config.NewStore(root)
 	}
 	s := &Service{
-		root:   root,
-		index:  idx,
-		config: cfg,
+		root:      root,
+		index:     idx,
+		config:    cfg,
+		templates: NewTemplateLoader(root),
 	}
 	// Purge de la corbeille au démarrage.
 	if loaded, err := cfg.Load(); err == nil {
@@ -280,7 +285,7 @@ func (s *Service) CreateNote(title string, templateKey string) (domain.Note, err
 	now := nowUTC()
 	filename := fmt.Sprintf("%s-%s.md", now.Format("20060102-150405"), slug(title))
 	relativePath := filepath.ToSlash(filepath.Join("notes", "inbox", filename))
-	content := template(templateKey)
+	content := s.resolveTemplateBody(templateKey)
 
 	note := domain.Note{
 		RelativePath: relativePath,
@@ -291,6 +296,18 @@ func (s *Service) CreateNote(title string, templateKey string) (domain.Note, err
 		Tags:         []string{},
 	}
 	return s.SaveNote(note)
+}
+
+// resolveTemplateBody retourne le contenu d'un template : d'abord le
+// TemplateLoader, puis fallback sur la fonction template() historique
+// pour les clés built-in (meeting, daily, blank).
+func (s *Service) resolveTemplateBody(key string) string {
+	if s.templates != nil && key != "" {
+		if t, err := s.templates.Get(key); err == nil {
+			return t.Body
+		}
+	}
+	return template(key)
 }
 
 func (s *Service) SaveNote(note domain.Note) (domain.Note, error) {
@@ -395,18 +412,152 @@ func (s *Service) UpdateConfig(cfg config.Config) error {
 	return s.config.Save(cfg)
 }
 
-// OpenDailyNote ouvre (ou crée si AutoDailyNote) la note du jour.
+// OpenDailyNote ouvre (ou crée) la note du jour.
+// La création est inconditionnelle : le clic sur l'icône calendrier doit
+// toujours produire une note, indépendamment de la config AutoDailyNote
+// (qui ne concerne que l'auto-création au démarrage).
 func (s *Service) OpenDailyNote() (domain.Note, error) {
-	rel, err := s.EnsureDailyNote()
+	rel, err := s.ensureDailyNoteImpl()
 	if err != nil {
 		return domain.Note{}, err
 	}
-	if rel == "" {
-		// AutoDailyNote désactivé : on calcule quand même le chemin du jour.
-		day := nowUTC().Format("2006-01-02")
-		rel = filepath.ToSlash(filepath.Join("notes", "daily", day+".md"))
-	}
 	return s.OpenNote(rel)
+}
+
+// ListTemplates retourne la liste des templates disponibles (built-in + user).
+func (s *Service) ListTemplates() []Template {
+	return s.templates.List()
+}
+
+// GetTemplate retourne un template par ID.
+func (s *Service) GetTemplate(id string) (Template, error) {
+	return s.templates.Get(id)
+}
+
+// MoveNote déplace (ou renomme) une note vers un nouveau chemin relatif.
+// Les dossiers manquants sont créés. Si newPath existe déjà, l'opération
+// échoue. Le contenu est déplacé atomiquement (os.Rename quand possible,
+// sinon copy + delete).
+func (s *Service) MoveNote(oldPath, newPath string) (domain.Note, error) {
+	oldPath = filepath.ToSlash(filepath.Clean(oldPath))
+	newPath = filepath.ToSlash(filepath.Clean(newPath))
+	if err := s.validateNoteRelPath(newPath); err != nil {
+		return domain.Note{}, err
+	}
+	if err := s.validateNoteRelPath(oldPath); err != nil {
+		return domain.Note{}, err
+	}
+	if oldPath == newPath {
+		return s.OpenNote(oldPath)
+	}
+	src := filepath.Join(s.root, filepath.FromSlash(oldPath))
+	dst := filepath.Join(s.root, filepath.FromSlash(newPath))
+	if _, err := os.Stat(src); err != nil {
+		return domain.Note{}, fmt.Errorf("note source introuvable : %s", oldPath)
+	}
+	if _, err := os.Stat(dst); err == nil {
+		return domain.Note{}, fmt.Errorf("un fichier existe déjà à %s", newPath)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return domain.Note{}, fmt.Errorf("préparer le dossier destination : %w", err)
+	}
+	if err := os.Rename(src, dst); err != nil {
+		// os.Rename échoue cross-device : fallback copy + delete.
+		if cerr := copyFileAtomic(src, dst); cerr != nil {
+			return domain.Note{}, fmt.Errorf("déplacer : %w", cerr)
+		}
+		_ = os.Remove(src)
+	}
+	// Réindexe : supprimer l'ancien, upsert le nouveau.
+	if err := s.index.Delete(oldPath); err != nil && !errors.Is(err, ErrNotFound) {
+		return domain.Note{}, err
+	}
+	note, err := s.OpenNote(newPath)
+	if err != nil {
+		return domain.Note{}, err
+	}
+	if err := s.index.Upsert(note); err != nil {
+		return domain.Note{}, err
+	}
+	return note, nil
+}
+
+// DuplicateNote crée une copie d'une note vers un nouveau chemin.
+// Le nom de fichier est suffixé par "-copie" si la cible existe déjà.
+// Les tags et la date de création sont remis à zéro.
+func (s *Service) DuplicateNote(relativePath string) (domain.Note, error) {
+	src := relativePath
+	if err := s.validateNoteRelPath(src); err != nil {
+		return domain.Note{}, err
+	}
+	note, err := s.OpenNote(src)
+	if err != nil {
+		return domain.Note{}, err
+	}
+	dir := filepath.Dir(src)
+	ext := filepath.Ext(src)
+	base := strings.TrimSuffix(filepath.Base(src), ext)
+	newBase := base + "-copie"
+	dst := filepath.ToSlash(filepath.Join(dir, newBase+ext))
+	for i := 2; ; i++ {
+		if _, err := os.Stat(filepath.Join(s.root, filepath.FromSlash(dst))); err != nil {
+			break
+		}
+		dst = filepath.ToSlash(filepath.Join(dir, fmt.Sprintf("%s-copie-%d%s", base, i, ext)))
+	}
+	now := nowUTC()
+	note.RelativePath = dst
+	note.Title = strings.TrimSpace(note.Title)
+	if note.Title != "" {
+		note.Title = note.Title + " (copie)"
+	}
+	note.CreatedAt = now
+	note.UpdatedAt = now
+	return s.SaveNote(note)
+}
+
+// OpenInExplorer ouvre le fichier (ou son dossier) dans le gestionnaire
+// de fichiers natif (Finder / Explorer / xdg-open).
+// Sur les plateformes supportées par le runtime de Wails, l'OS
+// est sélectionné automatiquement.
+func (s *Service) OpenInExplorer(relativePath string, reveal bool) error {
+	abs, err := s.absoluteNotePath(relativePath)
+	if err != nil {
+		return err
+	}
+	target := abs
+	if reveal {
+		target = filepath.Dir(abs)
+	}
+	return openInOS(target)
+}
+
+// RenameTitle met à jour uniquement le titre de la note (sans toucher
+// au chemin). Pratique pour le renommage inline.
+func (s *Service) RenameTitle(relativePath, newTitle string) (domain.Note, error) {
+	note, err := s.OpenNote(relativePath)
+	if err != nil {
+		return domain.Note{}, err
+	}
+	note.Title = strings.TrimSpace(newTitle)
+	if note.Title == "" {
+		note.Title = "Sans titre"
+	}
+	return s.SaveNote(note)
+}
+
+func (s *Service) validateNoteRelPath(p string) error {
+	p = filepath.Clean(filepath.FromSlash(p))
+	if p == "." || filepath.IsAbs(p) || strings.HasPrefix(p, "..") {
+		return errors.New("chemin de note invalide")
+	}
+	if filepath.Ext(p) != ".md" {
+		return errors.New("une note doit avoir l'extension .md")
+	}
+	if !strings.HasPrefix(filepath.ToSlash(p), "notes/") {
+		return errors.New("une note doit être rangée sous notes/")
+	}
+	return nil
 }
 
 func (s *Service) absoluteNotePath(relativePath string) (string, error) {

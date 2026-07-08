@@ -2,6 +2,7 @@ package vault
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -225,6 +226,37 @@ func TestServiceOpenDailyNoteAuto(t *testing.T) {
 	}
 	if note.Title == "" {
 		t.Fatal("titre vide")
+	}
+}
+
+// TestServiceOpenDailyNoteSansAuto : cliquer sur le bouton calendrier doit
+// toujours créer la note du jour, même si la config AutoDailyNote est
+// désactivée (régression : avant le fix, OpenDailyNote se contentait
+// d'ouvrir un fichier potentiellement inexistant).
+func TestServiceOpenDailyNoteSansAuto(t *testing.T) {
+	svc, _ := setupVault(t)
+	cfg, _ := svc.GetConfig()
+	cfg.AutoDailyNote = false
+	if err := svc.UpdateConfig(cfg); err != nil {
+		t.Fatalf("UpdateConfig: %v", err)
+	}
+	note, err := svc.OpenDailyNote()
+	if err != nil {
+		t.Fatalf("OpenDailyNote: %v", err)
+	}
+	if note.Title == "" {
+		t.Fatal("titre vide")
+	}
+	if !strings.HasPrefix(note.RelativePath, "notes/daily/") {
+		t.Fatalf("chemin inattendu : %s", note.RelativePath)
+	}
+	// Deuxième appel : ne doit pas écraser.
+	note2, err := svc.OpenDailyNote()
+	if err != nil {
+		t.Fatalf("OpenDailyNote 2: %v", err)
+	}
+	if note2.RelativePath != note.RelativePath {
+		t.Fatalf("chemin a changé : %s vs %s", note.RelativePath, note2.RelativePath)
 	}
 }
 
