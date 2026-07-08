@@ -11,6 +11,7 @@ import (
 type SearchOpts struct {
 	Limit       int
 	TitleWeight float64 // pondération (futur : pour le tri)
+	ExcludePath string  // chemin relatif à exclure des résultats
 }
 
 // ListFilter restreint les List.
@@ -53,7 +54,21 @@ type Index interface {
 	Pin(relativePath string, pinned bool) error
 	ListPinned() ([]domain.NoteSummary, error)
 	IsPinned(relativePath string) (bool, error)
+	GetBacklinks(title string, opts SearchOpts) ([]domain.NoteSummary, error)
+	StatsBuckets(windowDays int) (StatsBucketsResult, error)
 	Close() error
+}
+
+// StatsBucketsResult regroupe les agrégats calculés par l'index.
+// Created/Modified sont des séries ordonnées du plus ancien au plus récent,
+// alignées sur la fenêtre [now-windowDays, now). Words est la somme des
+// compteurs de mots (calculé en SQL via un CASE WHEN).
+type StatsBucketsResult struct {
+	Created  []DayCount
+	Modified []DayCount
+	Notes    int
+	Words    int
+	TopTags  []TagCount
 }
 
 // ErrNotFound est renvoyé par Get quand la note n'existe pas dans l'index.

@@ -128,4 +128,133 @@
   ::-webkit-scrollbar-track {
     background: transparent;
   }
+
+  /* Popup wiki-link (rendue dans document.body via WikiLinkSuggestion). */
+  .wiki-link-popup-host {
+    position: fixed;
+    z-index: 9999;
+  }
+
+  .wiki-link-popup {
+    display: flex;
+    flex-direction: column;
+    min-width: 12rem;
+    max-width: 22rem;
+    max-height: 16rem;
+    overflow-y: auto;
+    padding: 0.25rem;
+    background: var(--color-panel);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    outline: none;
+    font-size: 0.875rem;
+  }
+
+  .wiki-link-popup__empty {
+    padding: 0.5rem 0.75rem;
+    color: var(--color-faint);
+    font-style: italic;
+  }
+
+  .wiki-link-popup__item {
+    appearance: none;
+    text-align: left;
+    width: 100%;
+    padding: 0.35rem 0.6rem;
+    border: 0;
+    background: transparent;
+    color: var(--color-foreground);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font: inherit;
+  }
+
+  .wiki-link-popup__item.is-active {
+    background: var(--color-accent);
+    color: var(--color-accent-foreground);
+  }
+
+  /* Images dans l'éditeur Tiptap. */
+  .note-editor-content img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    margin: 0.75rem 0;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-panel-muted);
+  }
+
+  .note-editor-content img.ProseMirror-selectednode {
+    outline: 2px solid var(--color-focus);
+  }
+
+  /* Thème highlight.js (lowlight) confiné à l'éditeur. */
+  .note-editor-content pre {
+    color: var(--color-foreground);
+  }
+  .note-editor-content .hljs-comment,
+  .note-editor-content .hljs-quote {
+    color: var(--color-faint);
+    font-style: italic;
+  }
+  .note-editor-content .hljs-keyword,
+  .note-editor-content .hljs-selector-tag,
+  .note-editor-content .hljs-literal,
+  .note-editor-content .hljs-section,
+  .note-editor-content .hljs-link {
+    color: var(--color-accent);
+  }
+  .note-editor-content .hljs-string,
+  .note-editor-content .hljs-attr,
+  .note-editor-content .hljs-template-tag,
+  .note-editor-content .hljs-template-variable {
+    color: #c8a96a;
+  }
+  .note-editor-content [data-theme='light'] .hljs-string,
+  .note-editor-content [data-theme='light'] .hljs-attr,
+  .note-editor-content [data-theme='light'] .hljs-template-tag,
+  .note-editor-content [data-theme='light'] .hljs-template-variable {
+    color: #a36a18;
+  }
+  .note-editor-content .hljs-number,
+  .note-editor-content .hljs-symbol,
+  .note-editor-content .hljs-bullet,
+  .note-editor-content .hljs-meta {
+    color: #d28a7a;
+  }
+  .note-editor-content [data-theme='light'] .hljs-number,
+  .note-editor-content [data-theme='light'] .hljs-symbol,
+  .note-editor-content [data-theme='light'] .hljs-bullet,
+  .note-editor-content [data-theme='light'] .hljs-meta {
+    color: #b54d3a;
+  }
+  .note-editor-content .hljs-title,
+  .note-editor-content .hljs-name,
+  .note-editor-content .hljs-type,
+  .note-editor-content .hljs-built_in,
+  .note-editor-content .hljs-class .hljs-title,
+  .note-editor-content .hljs-tag {
+    color: #8fb6e0;
+  }
+  .note-editor-content [data-theme='light'] .hljs-title,
+  .note-editor-content [data-theme='light'] .hljs-name,
+  .note-editor-content [data-theme='light'] .hljs-type,
+  .note-editor-content [data-theme='light'] .hljs-built_in,
+  .note-editor-content [data-theme='light'] .hljs-class .hljs-title,
+  .note-editor-content [data-theme='light'] .hljs-tag {
+    color: #2a5a9a;
+  }
+  .note-editor-content .hljs-variable,
+  .note-editor-content .hljs-regexp,
+  .note-editor-content .hljs-deletion {
+    color: var(--color-danger);
+  }
+  .note-editor-content .hljs-addition {
+    color: #8ec07c;
+  }
 }

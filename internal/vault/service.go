@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/votre-compte/notevault/internal/config"
 	"github.com/votre-compte/notevault/internal/domain"
@@ -20,8 +21,10 @@ type Service struct {
 	root      string
 	index     Index
 	config    *config.Store
+	state     *stateStore
 	watcher   *Watcher
 	templates *TemplateLoader
+	themes    *ThemeLoader
 	indexCtx  context.Context
 	indexStop context.CancelFunc
 }
@@ -46,6 +49,9 @@ func New(opts Options) (*Service, error) {
 	if err := ensureTemplateDir(root); err != nil {
 		return nil, err
 	}
+	if err := ensureThemeDir(root); err != nil {
+		return nil, err
+	}
 	idx := opts.Index
 	if idx == nil {
 		idx, err = newSQLiteIndex(filepath.Join(root, ".notevault", "index.db"))
@@ -61,7 +67,9 @@ func New(opts Options) (*Service, error) {
 		root:      root,
 		index:     idx,
 		config:    cfg,
+		state:     newStateStore(root),
 		templates: NewTemplateLoader(root),
+		themes:    NewThemeLoader(root),
 	}
 	// Purge de la corbeille au démarrage.
 	if loaded, err := cfg.Load(); err == nil {
@@ -325,6 +333,18 @@ func (s *Service) SaveNote(note domain.Note) (domain.Note, error) {
 		note.Title = "Sans titre"
 	}
 
+	// Snapshot d'historique avant écrasement (best-effort).
+	cfg, _ := s.config.Load()
+	maxVersions := config.Default().HistoryPerNote
+	if cfg.HistoryPerNote > 0 {
+		maxVersions = cfg.HistoryPerNote
+	}
+	if maxVersions > 0 {
+		if _, err := os.Stat(path); err == nil {
+			_, _ = snapshotHistory(s.root, note.RelativePath, maxVersions)
+		}
+	}
+
 	if err := writeAtomic(path, []byte(serialize(note)), 0o644); err != nil {
 		return domain.Note{}, err
 	}
@@ -544,6 +564,160 @@ func (s *Service) RenameTitle(relativePath, newTitle string) (domain.Note, error
 		note.Title = "Sans titre"
 	}
 	return s.SaveNote(note)
+}
+
+// GetBacklinks retourne les notes qui référencent le titre donné
+// (en cherchant la phrase exacte dans l'index FTS5). Utilisé pour le
+// panneau de backlinks de l'éditeur. excludePath est ignoré dans les
+// résultats (la note courante ne se backlink pas elle-même).
+func (s *Service) GetBacklinks(title, excludePath string, limit int) ([]domain.NoteSummary, error) {
+	return s.index.GetBacklinks(title, SearchOpts{Limit: limit, ExcludePath: excludePath})
+}
+
+// SaveAssetWithMaxSize applique une limite de taille explicite.
+func (s *Service) SaveAssetWithMaxSize(data []byte, filename string, maxBytes int) (string, error) {
+	if maxBytes > 0 && len(data) > maxBytes {
+		return "", fmt.Errorf("asset trop volumineux : %d > %d octets", len(data), maxBytes)
+	}
+	return s.SaveAsset(data, filename)
+}
+
+// --- Phase 5 : thèmes, stats, recovery ------------------------------------
+
+// ListThemes retourne tous les thèmes disponibles (built-in + utilisateur).
+func (s *Service) ListThemes() []Theme {
+	if s.themes == nil {
+		return builtinThemes()
+	}
+	return s.themes.List()
+}
+
+// Theme retourne un thème par ID.
+func (s *Service) Theme(id string) (Theme, error) {
+	if s.themes == nil {
+		for _, t := range builtinThemes() {
+			if t.ID == id {
+				return t, nil
+			}
+		}
+		return Theme{}, fmt.Errorf("thème introuvable : %q", id)
+	}
+	return s.themes.Get(id)
+}
+
+// LoadState lit state.json (crash recovery + onboarding).
+func (s *Service) LoadState() (StateFile, error) {
+	if s.state == nil {
+		return StateFile{}, nil
+	}
+	return s.state.Load()
+}
+
+// SaveState écrit state.json de manière atomique.
+func (s *Service) SaveState(state StateFile) error {
+	if s.state == nil {
+		return fmt.Errorf("state store non initialisé")
+	}
+	return s.state.Save(state)
+}
+
+// MarkOnboardingCompleted persiste le drapeau d'onboarding et le snapshot
+// des choix de l'utilisateur. L'argument onboarding peut être nil pour
+// ne mettre à jour que le drapeau.
+func (s *Service) MarkOnboardingCompleted(onboarding *Onboarding) error {
+	state, err := s.LoadState()
+	if err != nil {
+		state = StateFile{}
+	}
+	state.OnboardingCompleted = true
+	if onboarding != nil {
+		onboarding.Skipped = false
+		if onboarding.CompletedAt.IsZero() {
+			onboarding.CompletedAt = nowUTC()
+		}
+		state.Onboarding = onboarding
+	}
+	return s.SaveState(state)
+}
+
+// SetDirtyBuffer enregistre un buffer en cours d'édition pour la
+// récupération après crash. Si diskMTime est non nulle, on la conserve
+// pour pouvoir comparer à la prochaine lecture.
+func (s *Service) SetDirtyBuffer(notePath, buffer string, diskMTime time.Time) error {
+	state, err := s.LoadState()
+	if err != nil {
+		state = StateFile{}
+	}
+	state.Dirty = true
+	state.NotePath = notePath
+	state.Buffer = buffer
+	state.BufferSavedAt = nowUTC()
+	if !diskMTime.IsZero() {
+		t := diskMTime.UTC()
+		state.DiskModifiedAt = &t
+	}
+	return s.SaveState(state)
+}
+
+// ClearDirtyBuffer efface le buffer en attente (après save réussi ou
+// récupération rejetée).
+func (s *Service) ClearDirtyBuffer() error {
+	state, err := s.LoadState()
+	if err != nil {
+		return nil
+	}
+	if !state.Dirty && state.Buffer == "" {
+		return nil
+	}
+	state.Dirty = false
+	state.Buffer = ""
+	state.BufferSavedAt = time.Time{}
+	state.NotePath = ""
+	state.DiskModifiedAt = nil
+	return s.SaveState(state)
+}
+
+// SnapshotForStartup combine l'état d'onboarding et la proposition de
+// récupération. À appeler au démarrage du frontend pour décider de
+// l'affichage initial.
+func (s *Service) SnapshotForStartup() (RecoverySnapshot, error) {
+	state, err := s.LoadState()
+	if err != nil {
+		return RecoverySnapshot{}, err
+	}
+	snap := RecoverySnapshot{
+		Onboarding: state.Onboarding,
+	}
+	if !state.OnboardingCompleted {
+		return snap, nil
+	}
+	if state.Dirty && state.NotePath != "" {
+		diskMTime, err := s.fileModified(state.NotePath)
+		if err == nil {
+			if ShouldOfferRecovery(state, diskMTime) {
+				snap.HasRecovery = true
+				snap.NotePath = state.NotePath
+				snap.Buffer = state.Buffer
+				snap.BufferSavedAt = state.BufferSavedAt
+				if state.DiskModifiedAt != nil {
+					snap.DiskModifiedAt = *state.DiskModifiedAt
+				}
+			}
+		}
+	}
+	return snap, nil
+}
+
+func (s *Service) fileModified(relPath string) (time.Time, error) {
+	abs, err := s.absoluteNotePath(relPath)
+	if err != nil {
+		return time.Time{}, err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return info.ModTime().UTC(), nil
 }
 
 func (s *Service) validateNoteRelPath(p string) error {

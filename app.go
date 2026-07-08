@@ -3,6 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/votre-compte/notevault/internal/config"
 	"github.com/votre-compte/notevault/internal/domain"
@@ -12,8 +16,10 @@ import (
 // App est la façade explicitement exposée au frontend Wails.
 // Garder cette couche mince : la logique métier doit rester dans internal/.
 type App struct {
-	ctx   context.Context
-	vault *vault.Service
+	ctx       context.Context
+	vault     *vault.Service
+	assetSrv  *vault.AssetServer
+	assetPort int
 }
 
 func NewApp() (*App, error) {
@@ -26,7 +32,15 @@ func NewApp() (*App, error) {
 	if err := service.IndexNow(service.BootstrapContext(), nil); err != nil {
 		return nil, fmt.Errorf("indexation initiale : %w", err)
 	}
-	return &App{vault: service}, nil
+
+	assetSrv := vault.NewAssetServer(service.Root())
+	port, err := assetSrv.Start()
+	if err != nil {
+		_ = service.Close()
+		return nil, fmt.Errorf("démarrer asset server : %w", err)
+	}
+
+	return &App{vault: service, assetSrv: assetSrv, assetPort: port}, nil
 }
 
 func (a *App) Startup(ctx context.Context) {
@@ -34,6 +48,9 @@ func (a *App) Startup(ctx context.Context) {
 }
 
 func (a *App) Shutdown(ctx context.Context) {
+	if a.assetSrv != nil {
+		_ = a.assetSrv.Stop()
+	}
 	_ = a.vault.Close()
 }
 
@@ -127,6 +144,68 @@ func (a *App) RenameTitle(relativePath, newTitle string) (domain.Note, error) {
 	return a.vault.RenameTitle(relativePath, newTitle)
 }
 
+// GetBacklinks retourne les notes qui mentionnent le titre donné.
+// excludePath permet d'ignorer la note courante des résultats.
+func (a *App) GetBacklinks(title, excludePath string, limit int) ([]domain.NoteSummary, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	return a.vault.GetBacklinks(title, excludePath, limit)
+}
+
+// SaveAsset enregistre un binaire (image, etc.) dans le coffre.
+// `filename` est utilisé pour deviner l'extension.
+func (a *App) SaveAsset(data []byte, filename string) (string, error) {
+	return a.vault.SaveAsset(data, filename)
+}
+
+// ImportAssetFromFilePath copie un fichier existant (par exemple dropé
+// depuis un explorateur de fichiers) dans le coffre. Voir
+// vault.Service.ImportAssetFromFilePath.
+func (a *App) ImportAssetFromFilePath(absolutePath string) (string, error) {
+	return a.vault.ImportAssetFromFilePath(absolutePath)
+}
+
+// ListHistory retourne les versions d'une note.
+func (a *App) ListHistory(relativePath string) ([]vault.HistoryEntry, error) {
+	return a.vault.ListHistory(relativePath)
+}
+
+// ReadHistoryVersion retourne le contenu brut d'une version d'historique.
+func (a *App) ReadHistoryVersion(relativePath, versionID string) (string, error) {
+	return a.vault.ReadHistoryVersion(relativePath, versionID)
+}
+
+// RestoreFromHistory restaure une version comme version courante.
+func (a *App) RestoreFromHistory(relativePath, versionID string) (domain.Note, error) {
+	return a.vault.RestoreFromHistory(relativePath, versionID)
+}
+
+// DiffHistory retourne le diff unifié entre deux versions.
+func (a *App) DiffHistory(relativePath, aID, bID string) (string, error) {
+	return a.vault.DiffHistory(relativePath, aID, bID)
+}
+
+// OpenAsset retourne le chemin absolu d'un asset (utilisable par le frontend
+// pour l'afficher via file:// ou équivalent Wails).
+func (a *App) OpenAsset(relativePath string) (string, error) {
+	if !strings.HasPrefix(relativePath, "assets/") {
+		return "", fmt.Errorf("chemin d'asset invalide")
+	}
+	abs := filepath.Join(a.vault.Root(), relativePath)
+	if _, err := os.Stat(abs); err != nil {
+		return "", err
+	}
+	return abs, nil
+}
+
+// AssetURL retourne l'URL HTTP locale à utiliser dans `<img src=...>` pour
+// afficher un asset. Le serveur HTTP interne est démarré dans NewApp et
+// confine les requêtes à <vault>/assets/ avec une whitelist d'extensions.
+func (a *App) AssetURL(relativePath string) string {
+	return fmt.Sprintf("http://127.0.0.1:%d/files/%s", a.assetPort, relativePath)
+}
+
 func (a *App) OpenNote(relativePath string) (domain.Note, error) {
 	return a.vault.OpenNote(relativePath)
 }
@@ -166,4 +245,46 @@ func (a *App) GetConfig() (config.Config, error) {
 // UpdateConfig enregistre la configuration.
 func (a *App) UpdateConfig(cfg config.Config) error {
 	return a.vault.UpdateConfig(cfg)
+}
+
+// --- Phase 5 : thèmes, export, stats, recovery ---------------------------
+
+// ListThemes retourne les thèmes disponibles (built-in + utilisateur).
+func (a *App) ListThemes() []vault.Theme {
+	return a.vault.ListThemes()
+}
+
+// Theme retourne un thème par ID.
+func (a *App) Theme(id string) (vault.Theme, error) {
+	return a.vault.Theme(id)
+}
+
+// ExportNotes écrit les notes fournies (+ assets) dans un fichier zip.
+func (a *App) ExportNotes(paths []string, destZip string) error {
+	return a.vault.ExportNotes(paths, destZip)
+}
+
+// Stats calcule les indicateurs d'activité locale.
+func (a *App) Stats() (vault.Stats, error) {
+	return a.vault.Stats()
+}
+
+// SnapshotForStartup renvoie l'état combiné onboarding + recovery.
+func (a *App) SnapshotForStartup() (vault.RecoverySnapshot, error) {
+	return a.vault.SnapshotForStartup()
+}
+
+// MarkOnboardingCompleted marque l'onboarding comme terminé.
+func (a *App) MarkOnboardingCompleted(onboarding *vault.Onboarding) error {
+	return a.vault.MarkOnboardingCompleted(onboarding)
+}
+
+// SetDirtyBuffer enregistre un buffer en cours d'édition (recovery).
+func (a *App) SetDirtyBuffer(notePath, buffer string, diskMTime time.Time) error {
+	return a.vault.SetDirtyBuffer(notePath, buffer, diskMTime)
+}
+
+// ClearDirtyBuffer efface le buffer de recovery.
+func (a *App) ClearDirtyBuffer() error {
+	return a.vault.ClearDirtyBuffer()
 }

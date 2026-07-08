@@ -17,6 +17,11 @@
   import ExternalLink from '@lucide/svelte/icons/external-link';
   import FolderInput from '@lucide/svelte/icons/folder-input';
   import GripVertical from '@lucide/svelte/icons/grip-vertical';
+  import History from '@lucide/svelte/icons/history';
+  import Cloud from '@lucide/svelte/icons/cloud';
+  import Activity from '@lucide/svelte/icons/activity';
+  import Download from '@lucide/svelte/icons/download';
+  import Keyboard from '@lucide/svelte/icons/keyboard';
 
   import NoteEditor from './components/NoteEditor.svelte';
   import SaveIndicator from './components/SaveIndicator.svelte';
@@ -29,14 +34,25 @@
   import TagsView from './components/TagsView.svelte';
   import TemplatePickerDialog from './components/TemplatePickerDialog.svelte';
   import MoveDialog from './components/MoveDialog.svelte';
+  import BacklinksPanel from './components/BacklinksPanel.svelte';
+  import HistoryPanel from './components/HistoryPanel.svelte';
+  import VaultPickerDialog from './components/VaultPickerDialog.svelte';
+  import OnboardingModal from './components/OnboardingModal.svelte';
+  import ShortcutsOverlay from './components/ShortcutsOverlay.svelte';
+  import ThemeMenu from './components/ThemeMenu.svelte';
+  import StatsView from './components/StatsView.svelte';
+  import ExportDialog from './components/ExportDialog.svelte';
+  import RecoveryDialog from './components/RecoveryDialog.svelte';
   import type { SaveState } from './components/SaveIndicator.svelte';
   import { domain, vault } from '../wailsjs/go/models';
 
   import {
+    ClearDirtyBuffer,
     CreateNote,
     DeleteNote,
     DuplicateNote,
     EnsureDailyNote,
+    GetBacklinks,
     GetConfig,
     IsNotePinned,
     ListFolders,
@@ -45,18 +61,32 @@
     ListPinned,
     ListTags,
     ListTemplates,
+    ListThemes,
     MoveNote,
     OpenDailyNote,
     OpenInExplorer,
     OpenNote,
     PinNote,
     RenameTitle,
+    RestoreFromHistory,
+    SaveAsset,
     SaveNote,
-    VaultPath
+    SearchNotes,
+    SetDirtyBuffer,
+    SnapshotForStartup,
+    UpdateConfig,
+    VaultPath,
+    AssetURL,
+    ImportAssetFromFilePath
   } from '../wailsjs/go/main/App';
 
   type Note = domain.Note;
   type NoteSummary = domain.NoteSummary;
+  // Reconstruit une `Note` typée à partir d'un plain object (sans perdre
+  // la méthode convertValues requise par le type généré par Wails).
+  function cloneNote(note: Note, content: string | undefined): Note {
+    return domain.Note.createFrom({ ...note, content: content ?? note.content });
+  }
   type FolderInfo = vault.FolderInfo;
   type FilterQuery = vault.FilterQuery;
   type TagCount = vault.TagCount;
@@ -89,8 +119,11 @@
   let toastSeq = 0;
   let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
-  let theme: 'dark' | 'light' = $state(
+  let theme = $state<'dark' | 'light'>(
     document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'
+  );
+  let activeThemeId = $state<string>(
+    (document.documentElement.dataset.theme as 'dark' | 'light') || 'dark'
   );
 
   // Vue sidebar
@@ -122,6 +155,28 @@
   // Move dialog
   let moveDialogOpen = $state(false);
   let moveTarget = $state('');
+
+  // History panel
+  let historyOpen = $state(false);
+
+  // Vault picker
+  let vaultPickerOpen = $state(false);
+
+  // Phase 5 : onboarding, raccourcis, stats, export, recovery
+  let onboardingOpen = $state(false);
+  let shortcutsOpen = $state(false);
+  let statsOpen = $state(false);
+  let exportOpen = $state(false);
+  let recoverySnapshot = $state<vault.RecoverySnapshot | null>(null);
+  let recoveryOpen = $state(false);
+  let customThemes = $state<vault.Theme[]>([]);
+  let dirtyBufferTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Vault sync awareness
+  let vaultIsSynced = $state(false);
+
+  // Known titles for wiki-link resolution
+  const knownTitles = $derived(new Set(notes.map((n) => n.title).filter(Boolean)));
 
   // Pin state
   let isCurrentPinned = $state(false);
@@ -192,39 +247,73 @@
     });
   }
 
+  // Wrapper safeCall : timeout + log pour identifier les requêtes qui
+  // bloquent. Chaque appel est isolé : un échec n'empêche pas les autres.
+  // Svelte ne supporte pas les génériques en inline, on utilise un cast any.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const safeCall = async (label: string, p: Promise<any>, fallback: any): Promise<any> => {
+    let to: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<any>((resolve) => {
+      to = setTimeout(() => {
+        console.warn(`[refresh] ${label} timeout`);
+        resolve(fallback);
+      }, 8000);
+    });
+    try {
+      const result = await Promise.race([p, timeout]);
+      return result;
+    } catch (err) {
+      console.error(`[refresh] ${label} failed:`, err);
+      return fallback;
+    } finally {
+      if (to) clearTimeout(to);
+    }
+  };
+
   async function refresh(): Promise<void> {
     loading = true;
     error = '';
 
     try {
-      const cfg = await GetConfig();
+      const cfg = await safeCall('GetConfig', GetConfig(), { autoDailyNote: false });
       const autoDaily = cfg?.autoDailyNote === true;
       const fq = buildQuery();
       const fetchAll = !activeFilter.trim() && activeChips.length === 0;
-      const [list, pin, fold, vp, tpl, tg] = await Promise.all([
-        fetchAll ? ListNotes() : ListNotesFiltered(fq, 1000),
-        ListPinned(),
-        ListFolders(),
-        VaultPath(),
-        ListTemplates(),
-        ListTags()
+      const [list, pin, fold, vp, tpl, tg, themes] = await Promise.all([
+        safeCall('ListNotes', fetchAll ? ListNotes() : ListNotesFiltered(fq, 1000), []),
+        safeCall('ListPinned', ListPinned(), []),
+        safeCall('ListFolders', ListFolders(), []),
+        safeCall('VaultPath', VaultPath(), ''),
+        safeCall('ListTemplates', ListTemplates(), []),
+        safeCall('ListTags', ListTags(), []),
+        safeCall('ListThemes', ListThemes(), [])
       ]);
-      notes = list;
-      pinned = pin;
-      folders = fold;
-      vaultPath = vp;
-      templates = tpl ?? [];
-      tags = tg ?? [];
+      notes = (list ?? []) as NoteSummary[];
+      pinned = (pin ?? []) as NoteSummary[];
+      folders = (fold ?? []) as FolderInfo[];
+      vaultPath = vp ?? '';
+      templates = (tpl ?? []) as Template[];
+      tags = (tg ?? []) as TagCount[];
+      customThemes = (themes ?? []) as vault.Theme[];
+      // Si la config demande un thème custom qui n'est pas le défaut, on l'applique.
+      const cfgTheme = String((cfg as { theme?: string } | null)?.theme ?? 'dark');
+      if (cfgTheme && cfgTheme !== activeThemeId && cfgTheme !== 'dark' && cfgTheme !== 'light') {
+        await selectTheme(cfgTheme);
+      } else if (cfgTheme === 'light' || cfgTheme === 'dark') {
+        activeThemeId = cfgTheme;
+        theme = cfgTheme;
+        document.documentElement.dataset.theme = theme;
+      }
       if (fetchAll) {
-        allEntries = list.map((n) => ({
+        allEntries = ((list ?? []) as NoteSummary[]).map((n) => ({
           relativePath: n.relativePath,
           title: n.title,
           updatedAt: String(n.updatedAt ?? ''),
           score: 0
         }));
       } else {
-        const all = await ListNotes();
-        allEntries = all.map((n) => ({
+        const all = await safeCall('ListNotes (allEntries)', ListNotes(), []);
+        allEntries = ((all ?? []) as NoteSummary[]).map((n) => ({
           relativePath: n.relativePath,
           title: n.title,
           updatedAt: String(n.updatedAt ?? ''),
@@ -233,13 +322,14 @@
       }
       if (autoDaily) {
         try {
-          await EnsureDailyNote();
+          await safeCall('EnsureDailyNote', EnsureDailyNote(), '');
         } catch {
           /* non bloquant */
         }
       }
     } catch (err) {
       error = String(err);
+      console.error('[refresh] global error:', err);
     } finally {
       loading = false;
     }
@@ -247,10 +337,14 @@
 
   async function refreshPinnedAndFolders(): Promise<void> {
     try {
-      const [pin, fold, tg] = await Promise.all([ListPinned(), ListFolders(), ListTags()]);
-      pinned = pin;
-      folders = fold;
-      tags = tg;
+      const [pin, fold, tg] = await Promise.all([
+        safeCall('ListPinned', ListPinned(), []),
+        safeCall('ListFolders', ListFolders(), []),
+        safeCall('ListTags', ListTags(), [])
+      ]);
+      pinned = pin as NoteSummary[];
+      folders = fold as FolderInfo[];
+      tags = tg as TagCount[];
     } catch {
       /* silencieux */
     }
@@ -260,14 +354,43 @@
     if (!(await flushSave())) return;
     error = '';
     try {
-      const note = await OpenNote(relativePath);
-      selected = note;
-      lastSavedSnapshot = snapshot(note);
+      const note = await safeCall('OpenNote', OpenNote(relativePath), null);
+      if (!note) {
+        error = `Impossible d'ouvrir ${relativePath}`;
+        return;
+      }
+      // Pré-transforme les chemins relatifs d'images en URLs absolues pour
+      // que l'éditeur Tiptap puisse les charger dans la webview.
+      const content = await precomputeAssetURLs(note.content);
+      selected = cloneNote(note, content);
+      lastSavedSnapshot = snapshot(selected!);
       saveState = 'clean';
-      isCurrentPinned = await IsNotePinned(relativePath);
+      isCurrentPinned = await safeCall('IsNotePinned', IsNotePinned(relativePath), false);
     } catch (err) {
       error = String(err);
     }
+  }
+
+  // Transforme tous les `![alt](relPath)` du markdown en URLs absolues.
+  // Les URLs absolues (http://, https://, data:) sont laissées intactes.
+  async function precomputeAssetURLs(md: string): Promise<string> {
+    const re = /!\[([^\]]*)\]\(([^)]+)\)/g;
+    const matches: { full: string; alt: string; src: string }[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(md)) !== null) {
+      matches.push({ full: m[0], alt: m[1], src: m[2] });
+    }
+    if (matches.length === 0) return md;
+    let out = md;
+    for (const match of matches) {
+      const src = match.src.trim();
+      if (/^(https?:|data:|file:)/.test(src)) continue;
+      const absolute = await assetURL(src);
+      if (absolute !== src) {
+        out = out.replace(match.full, `![${match.alt}](${absolute})`);
+      }
+    }
+    return out;
   }
 
   function openTemplatePicker(): void {
@@ -280,8 +403,9 @@
     error = '';
     try {
       const note = await CreateNote(title, templateId);
-      selected = note;
-      lastSavedSnapshot = snapshot(note);
+      const content = await precomputeAssetURLs(note.content);
+      selected = cloneNote(note, content);
+      lastSavedSnapshot = snapshot(selected!);
       saveState = 'clean';
       lastSavedAt = new Date();
       isCurrentPinned = false;
@@ -296,8 +420,9 @@
     error = '';
     try {
       const note = await OpenDailyNote();
-      selected = note;
-      lastSavedSnapshot = snapshot(note);
+      const content = await precomputeAssetURLs(note.content);
+      selected = cloneNote(note, content);
+      lastSavedSnapshot = snapshot(selected!);
       saveState = 'clean';
       isCurrentPinned = await IsNotePinned(note.relativePath);
       await refresh();
@@ -351,12 +476,44 @@
     autoSaveTimer = setTimeout(() => {
       void flushSave();
     }, AUTO_SAVE_DEBOUNCE_MS);
+    scheduleDirtyBuffer();
+  }
+
+  function scheduleDirtyBuffer(): void {
+    if (!selected) return;
+    if (dirtyBufferTimer) clearTimeout(dirtyBufferTimer);
+    dirtyBufferTimer = setTimeout(() => {
+      void persistDirtyBuffer();
+    }, 5000);
+  }
+
+  async function persistDirtyBuffer(): Promise<void> {
+    if (!selected) return;
+    if (snapshot(selected) === lastSavedSnapshot) {
+      return;
+    }
+    try {
+      // Le Go traite diskMTime vide comme "non défini" ; on envoie donc
+      // une string ISO de l'époque UNIX (équivalent du zéro time Go).
+      await SetDirtyBuffer(
+        selected.relativePath,
+        selected.content,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        '0001-01-01T00:00:00Z' as any
+      );
+    } catch (err) {
+      console.error('[recovery] persist failed:', err);
+    }
   }
 
   async function flushSave(): Promise<boolean> {
     if (autoSaveTimer) {
       clearTimeout(autoSaveTimer);
       autoSaveTimer = null;
+    }
+    if (dirtyBufferTimer) {
+      clearTimeout(dirtyBufferTimer);
+      dirtyBufferTimer = null;
     }
     if (!selected) return true;
     if (snapshot(selected) === lastSavedSnapshot && saveState === 'clean') {
@@ -370,6 +527,11 @@
       lastSavedSnapshot = snapshot(saved);
       saveState = 'clean';
       lastSavedAt = new Date();
+      try {
+        await ClearDirtyBuffer();
+      } catch (err) {
+        console.error('[recovery] clear failed:', err);
+      }
       await refreshPinnedAndFolders();
       return true;
     } catch (err) {
@@ -604,9 +766,45 @@
   }
 
   function toggleTheme(): void {
-    theme = theme === 'dark' ? 'light' : 'dark';
-    document.documentElement.dataset.theme = theme;
-    window.localStorage.setItem('notevault-theme', theme);
+    const next = theme === 'dark' ? 'light' : 'dark';
+    void selectTheme(next);
+  }
+
+  async function selectTheme(id: string): Promise<void> {
+    activeThemeId = id;
+    const found = customThemes.find((t) => t.id === id);
+    if (id === 'dark' || id === 'light') {
+      theme = id as 'dark' | 'light';
+      document.documentElement.dataset.theme = theme;
+    } else if (found) {
+      // Pour les thèmes custom, on garde le set de variables dark/light
+      // défini dans styles.css (couleurs de base) et on surcharge les vars.
+      document.documentElement.dataset.theme = 'dark';
+    }
+    applyThemeVars(found?.vars ?? null);
+    window.localStorage.setItem('notevault-theme', id);
+    try {
+      const cfg = await GetConfig();
+      if (cfg.theme !== id) {
+        await UpdateConfig({ ...cfg, theme: id });
+      }
+    } catch (err) {
+      console.error('[theme] persist failed:', err);
+    }
+  }
+
+  function applyThemeVars(vars: Record<string, string> | null): void {
+    const root = document.documentElement;
+    // On retire d'abord les variables précédemment injectées.
+    for (const key of Array.from(root.style)) {
+      if (key.startsWith('--color-') && !key.endsWith('-inline')) {
+        root.style.removeProperty(key);
+      }
+    }
+    if (!vars) return;
+    for (const [key, value] of Object.entries(vars)) {
+      root.style.setProperty(key, value);
+    }
   }
 
   // --- Filter parser -------------------------------------------------------
@@ -811,6 +1009,11 @@
       void openTodayNote();
       return;
     }
+    if (meta && event.shiftKey && event.key.toLowerCase() === 'h') {
+      event.preventDefault();
+      openHistory();
+      return;
+    }
     if (meta && event.key.toLowerCase() === 'p') {
       event.preventDefault();
       quickSwitcherOpen = !quickSwitcherOpen;
@@ -829,6 +1032,21 @@
     if (meta && event.key.toLowerCase() === 'n') {
       event.preventDefault();
       openTemplatePicker();
+      return;
+    }
+    if (meta && event.key === '/') {
+      event.preventDefault();
+      shortcutsOpen = !shortcutsOpen;
+      return;
+    }
+    if (meta && event.shiftKey && event.key.toLowerCase() === 'g') {
+      event.preventDefault();
+      statsOpen = !statsOpen;
+      return;
+    }
+    if (meta && event.shiftKey && event.key.toLowerCase() === 'e') {
+      event.preventDefault();
+      exportOpen = !exportOpen;
       return;
     }
     if (!inEditable && (event.key === 'j' || event.key === 'k' || event.key === 'h' || event.key === 'l')) {
@@ -857,7 +1075,204 @@
     onFilterChange(`tag:${tag}`);
   }
 
+  // --- Wiki-links ----------------------------------------------------------
+  async function findNoteByTitle(title: string): Promise<string | null> {
+    // Recherche simple : la première note dont le titre correspond.
+    // On utilise SearchNotes pour ne pas charger toute la liste côté Go.
+    try {
+      const results = await SearchNotes(`"${title.replace(/"/g, '')}"`, 5);
+      const match = results.find((n) => n.title === title);
+      return match?.relativePath ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function onWikiNavigate(target: string): Promise<void> {
+    if (!(await flushSave())) return;
+    const path = await findNoteByTitle(target);
+    if (path) {
+      void openNote(path);
+    } else {
+      showToast('info', `Note introuvable : ${target}. Ctrl+clic pour créer.`);
+    }
+  }
+
+  async function onWikiCreate(target: string): Promise<void> {
+    if (!(await flushSave())) return;
+    try {
+      const note = await CreateNote(target, 'blank');
+      showToast('info', `Note « ${target} » créée.`);
+      await refresh();
+      await openNote(note.relativePath);
+    } catch (err) {
+      showToast('error', `Échec : ${err}`);
+    }
+  }
+
+  // --- Assets (paste/drop d'images) ---------------------------------------
+  async function onAssetUpload(file: File): Promise<string | null> {
+    try {
+      const buffer = new Uint8Array(await file.arrayBuffer());
+      // Wails transporte []byte sous forme de base64 côté JS.
+      const rel = await SaveAsset(Array.from(buffer), file.name);
+      showToast('info', `Image enregistrée : ${rel}`);
+      return rel;
+    } catch (err) {
+      showToast('error', `Échec upload : ${err}`);
+      return null;
+    }
+  }
+
+  // Importe un fichier depuis son chemin absolu (utilisé pour les drops
+  // depuis un explorateur de fichiers sur WebKit Linux : le navigateur
+  // expose le fichier comme `file://` au lieu de donner un File direct).
+  async function onAssetImportFromPath(absolutePath: string): Promise<string | null> {
+    try {
+      const rel = await ImportAssetFromFilePath(absolutePath);
+      showToast('info', `Image importée : ${rel}`);
+      return rel;
+    } catch (err) {
+      showToast('error', `Échec import : ${err}`);
+      return null;
+    }
+  }
+
+  // Transforme un chemin relatif d'asset (assets/2026/07/abc.png) en URL
+  // HTTP absolue servie par le serveur interne de l'app. Cache les URLs
+  // calculées pour éviter un round-trip Wails à chaque render d'image.
+  const assetURLCache = new Map<string, string>();
+  async function assetURL(relPath: string): Promise<string> {
+    if (!relPath) return relPath;
+    if (/^(https?:|data:|file:)/.test(relPath)) return relPath;
+    const cached = assetURLCache.get(relPath);
+    if (cached) return cached;
+    try {
+      const url = await AssetURL(relPath);
+      assetURLCache.set(relPath, url);
+      return url;
+    } catch (err) {
+      console.error('[assetURL] failed:', err);
+      return relPath;
+    }
+  }
+
+  // --- History -------------------------------------------------------------
+  function openHistory(): void {
+    if (!selected) return;
+    historyOpen = true;
+  }
+
+  async function restoreFromHistory(versionID: string): Promise<void> {
+    if (!selected) return;
+    try {
+      const restored = await RestoreFromHistory(selected.relativePath, versionID);
+      const content = await precomputeAssetURLs(restored.content);
+      selected = cloneNote(restored, content);
+      lastSavedSnapshot = snapshot(selected!);
+      saveState = 'clean';
+      lastSavedAt = new Date();
+      historyOpen = false;
+      showToast('info', 'Version restaurée.');
+      await refresh();
+    } catch (err) {
+      showToast('error', `Échec : ${err}`);
+    }
+  }
+
+  // --- Vault picker --------------------------------------------------------
+  function isSyncCandidate(p: string): boolean {
+    const norm = p.toLowerCase();
+    return (
+      norm.includes('dropbox') ||
+      norm.includes('icloud') ||
+      norm.includes('syncthing') ||
+      norm.includes('onedrive')
+    );
+  }
+
+  $effect(() => {
+    vaultIsSynced = isSyncCandidate(vaultPath);
+  });
+
+  function openVaultPicker(): void {
+    vaultPickerOpen = true;
+  }
+
+  function onPickVault(path: string): void {
+    // Phase 4.5 : on note la préférence mais l'app redémarre le service
+    // (hors scope : la modification du root nécessite un restart). On
+    // indique à l'utilisateur de relancer.
+    showToast('info', `Sélection enregistrée : ${path}. Relancez l'app pour basculer.`);
+    vaultPickerOpen = false;
+  }
+
   void refresh();
+  void checkStartup();
+
+  async function checkStartup(): Promise<void> {
+    try {
+      const snap = (await SnapshotForStartup()) as vault.RecoverySnapshot;
+      if (!snap) return;
+      recoverySnapshot = snap;
+      // Onboarding d'abord : si pas terminé, on affiche l'onboarding.
+      // La recovery attendra la fermeture de l'onboarding.
+      if (!snap.onboarding) {
+        onboardingOpen = true;
+        return;
+      }
+      if (snap.hasRecovery) {
+        recoveryOpen = true;
+      }
+    } catch (err) {
+      console.error('[startup] snapshot failed:', err);
+    }
+  }
+
+  function onOnboardingDone(_skipped: boolean): void {
+    onboardingOpen = false;
+    // Si une recovery attendait, on l'affiche maintenant.
+    if (recoverySnapshot?.hasRecovery) {
+      recoveryOpen = true;
+    }
+  }
+
+  async function onRecoverAccept(buffer: string): Promise<void> {
+    if (!selected) {
+      recoveryOpen = false;
+      return;
+    }
+    selected.content = buffer;
+    selected = selected;
+    saveState = 'dirty';
+    lastSavedSnapshot = ''; // force la prochaine save à persister
+    recoveryOpen = false;
+    try {
+      await ClearDirtyBuffer();
+    } catch (err) {
+      console.error('[recovery] clear failed:', err);
+    }
+    showToast('info', 'Buffer récupéré. Enregistrez pour conserver les modifications.');
+  }
+
+  async function onRecoverDiscard(): Promise<void> {
+    recoveryOpen = false;
+    try {
+      await ClearDirtyBuffer();
+    } catch (err) {
+      console.error('[recovery] clear failed:', err);
+    }
+    showToast('info', 'Buffer ignoré.');
+  }
+
+  function onExportSuccess(path: string): void {
+    showToast('info', `Archive créée : ${path}`);
+  }
+
+  function onStatsPickTag(tag: string): void {
+    statsOpen = false;
+    onFilterChange(`tag:${tag}`);
+  }
 </script>
 
 <svelte:window onkeydown={onGlobalKeydown} onbeforeunload={onBeforeUnload} />
@@ -870,8 +1285,20 @@
     aria-label="Navigation des notes"
   >
     <div class="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
-      <div class="min-w-0">
-        <h1 class="truncate text-sm font-semibold tracking-normal">NoteVault</h1>
+      <div class="min-w-0 flex-1">
+        <button
+          type="button"
+          class="flex items-center gap-1.5 text-left"
+          onclick={() => openVaultPicker()}
+          title={vaultPath}
+        >
+          <h1 class="truncate text-sm font-semibold tracking-normal">NoteVault</h1>
+          {#if vaultIsSynced}
+            <span title="Coffre dans un dossier synchronisé" aria-label="Coffre synchronisé">
+              <Cloud size={12} strokeWidth={2} class="text-accent" aria-hidden="true" />
+            </span>
+          {/if}
+        </button>
         <p class="truncate text-xs text-subtle" title={vaultPath}>
           {vaultPath || 'Chargement du coffre...'}
         </p>
@@ -1129,17 +1556,31 @@
         <button
           class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-panel-muted text-subtle hover:bg-sidebar hover:text-foreground"
           type="button"
-          title={theme === 'dark' ? 'Passer au thème clair' : 'Passer au thème sombre'}
-          aria-label={theme === 'dark' ? 'Passer au thème clair' : 'Passer au thème sombre'}
-          aria-pressed={theme === 'dark'}
-          onclick={toggleTheme}
+          title="Activité (Ctrl+Shift+G)"
+          aria-label="Activité"
+          onclick={() => (statsOpen = true)}
         >
-          {#if theme === 'dark'}
-            <Sun size={17} strokeWidth={2} aria-hidden="true" />
-          {:else}
-            <Moon size={17} strokeWidth={2} aria-hidden="true" />
-          {/if}
+          <Activity size={15} strokeWidth={2} aria-hidden="true" />
         </button>
+        <button
+          class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-panel-muted text-subtle hover:bg-sidebar hover:text-foreground"
+          type="button"
+          title="Exporter (Ctrl+Shift+E)"
+          aria-label="Exporter"
+          onclick={() => (exportOpen = true)}
+        >
+          <Download size={15} strokeWidth={2} aria-hidden="true" />
+        </button>
+        <button
+          class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-panel-muted text-subtle hover:bg-sidebar hover:text-foreground"
+          type="button"
+          title="Raccourcis (Ctrl+/)"
+          aria-label="Raccourcis"
+          onclick={() => (shortcutsOpen = true)}
+        >
+          <Keyboard size={15} strokeWidth={2} aria-hidden="true" />
+        </button>
+        <ThemeMenu active={activeThemeId} onSelect={(id) => void selectTheme(id)} />
       </div>
     </header>
 
@@ -1194,8 +1635,23 @@
           </div>
 
           <div class="min-h-0 flex-1">
-            <NoteEditor markdown={selected.content} onChange={onEditorChange} />
+            <NoteEditor
+              markdown={selected.content}
+              onChange={onEditorChange}
+              knownTitles={knownTitles}
+              onWikiNavigate={onWikiNavigate}
+              onWikiCreate={onWikiCreate}
+              onAssetUpload={onAssetUpload}
+              onAssetImportFromPath={onAssetImportFromPath}
+              assetURL={assetURL}
+            />
           </div>
+
+          <BacklinksPanel
+            title={selected.title}
+            excludePath={selected.relativePath}
+            onOpen={openNote}
+          />
 
           <footer class="flex min-h-12 items-center justify-between gap-3 border-t border-border bg-panel px-4 text-xs text-faint">
             <div class="flex min-w-0 items-center gap-3">
@@ -1207,6 +1663,16 @@
             <div class="flex min-w-0 items-center gap-3">
               <span class="truncate" title={selected.relativePath}>{selected.relativePath}</span>
               <div class="flex shrink-0 items-center gap-2">
+                <button
+                  class="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-transparent px-2.5 text-sm font-medium text-subtle hover:bg-panel-muted hover:text-foreground"
+                  type="button"
+                  onclick={openHistory}
+                  title="Historique (Ctrl+Shift+H)"
+                  disabled={saving || deleting}
+                  aria-label="Historique"
+                >
+                  <History size={14} strokeWidth={2} aria-hidden="true" />
+                </button>
                 <button
                   class="inline-flex items-center gap-2 rounded-md border border-border bg-transparent px-3 py-1.5 text-sm font-medium text-subtle hover:bg-panel-muted hover:text-foreground"
                   type="button"
@@ -1290,6 +1756,50 @@
   folders={folders}
   onMove={moveTo}
   onClose={() => (moveDialogOpen = false)}
+/>
+
+<HistoryPanel
+  open={historyOpen}
+  relativePath={selected?.relativePath ?? ''}
+  onRestore={restoreFromHistory}
+  onClose={() => (historyOpen = false)}
+/>
+
+<VaultPickerDialog
+  open={vaultPickerOpen}
+  initialPath={vaultPath}
+  onPick={onPickVault}
+  onClose={() => (vaultPickerOpen = false)}
+/>
+
+<OnboardingModal
+  open={onboardingOpen}
+  initialTheme={theme}
+  onDone={onOnboardingDone}
+/>
+
+<ShortcutsOverlay open={shortcutsOpen} onClose={() => (shortcutsOpen = false)} />
+
+<StatsView
+  open={statsOpen}
+  onClose={() => (statsOpen = false)}
+  onPickTag={onStatsPickTag}
+/>
+
+<ExportDialog
+  open={exportOpen}
+  notes={notes}
+  defaultFilename={`notevault-${new Date().toISOString().slice(0, 10)}.zip`}
+  onClose={() => (exportOpen = false)}
+  onSuccess={onExportSuccess}
+/>
+
+<RecoveryDialog
+  open={recoveryOpen}
+  snapshot={recoverySnapshot}
+  onRecover={onRecoverAccept}
+  onDiscard={onRecoverDiscard}
+  onClose={() => (recoveryOpen = false)}
 />
 
 {#if contextMenu}

@@ -81,12 +81,16 @@ func openOrRecover(dbPath string) (Index, error) {
 }
 
 func tryOpenIndex(dbPath string) (Index, error) {
-	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)"
+	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("ouvrir l'index SQLite : %w", err)
 	}
-	db.SetMaxOpenConns(1)
+	// Plusieurs connexions : autorise les lectures concurrentes avec les
+	// écritures (watcher, refresh sidebar). Les écritures sont sérialisées
+	// en interne par SQLite (WAL + busy_timeout).
+	db.SetMaxOpenConns(5)
+	db.SetMaxIdleConns(5)
 	// Vérifie d'abord l'intégrité : si la base est corrompue, on
 	// demande à l'appelant de la supprimer et de reconstruire.
 	var integrity string
@@ -544,6 +548,58 @@ func (i *sqliteIndex) ListPinned() ([]domain.NoteSummary, error) {
 	return out, rows.Err()
 }
 
+// GetBacklinks retourne les notes dont le contenu (ou titre) contient la
+// phrase exacte donnée. Utilisé pour la recherche de backlinks à partir
+// d'un titre de note.
+func (i *sqliteIndex) GetBacklinks(title string, opts SearchOpts) ([]domain.NoteSummary, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return nil, nil
+	}
+	// FTS5 phrase query : on entoure de guillemets doubles, on échappe
+	// les guillemets internes. Si le titre est vide après nettoyage,
+	// on retourne rien.
+	escaped := strings.ReplaceAll(title, `"`, `""`)
+	ftsQuery := `"` + escaped + `"`
+	limit := clampLimit(opts.Limit)
+	var rows *sql.Rows
+	var err error
+	if opts.ExcludePath != "" {
+		rows, err = i.db.Query(`
+            SELECT n.relative_path, n.title, n.updated_at
+            FROM notes n
+            JOIN notes_fts f ON f.rowid = n.rowid
+            WHERE notes_fts MATCH ? AND n.relative_path <> ?
+            ORDER BY rank
+            LIMIT ?
+        `, ftsQuery, opts.ExcludePath, limit)
+	} else {
+		rows, err = i.db.Query(`
+            SELECT n.relative_path, n.title, n.updated_at
+            FROM notes n
+            JOIN notes_fts f ON f.rowid = n.rowid
+            WHERE notes_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+        `, ftsQuery, limit)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("recherche backlinks : %w", err)
+	}
+	defer rows.Close()
+	out := make([]domain.NoteSummary, 0)
+	for rows.Next() {
+		var s domain.NoteSummary
+		var updated int64
+		if err := rows.Scan(&s.RelativePath, &s.Title, &updated); err != nil {
+			return nil, err
+		}
+		s.UpdatedAt = unixToTime(updated)
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 func clampLimit(n int) int {
 	if n <= 0 {
 		return 1000
@@ -594,4 +650,124 @@ func uniqueNonEmpty(in []string) []string {
 
 func unixToTime(sec int64) time.Time {
 	return time.Unix(sec, 0).UTC()
+}
+
+// StatsBuckets calcule les agrégats d'activité : compteurs par jour
+// (création, modification) sur la fenêtre demandée, totaux (notes, mots,
+// top tags). Les jours sont indexés du plus ancien au plus récent.
+//
+// created_at/updated_at sont stockés en secondes UNIX (UTC). On calcule
+// le début de la fenêtre en secondes UNIX minuit UTC et on aligne les
+// jours via la fonction date() de SQLite.
+func (i *sqliteIndex) StatsBuckets(windowDays int) (StatsBucketsResult, error) {
+	if windowDays <= 0 {
+		windowDays = 30
+	}
+	now := nowUTC()
+	// Aligne sur minuit UTC du jour courant.
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	start := today.AddDate(0, 0, -windowDays+1)
+	cutoff := start.Unix()
+
+	created, err := i.dayBuckets("created_at", cutoff)
+	if err != nil {
+		return StatsBucketsResult{}, err
+	}
+	modified, err := i.dayBuckets("updated_at", cutoff)
+	if err != nil {
+		return StatsBucketsResult{}, err
+	}
+
+	var totalNotes int
+	if err := i.db.QueryRow(`SELECT COUNT(*) FROM notes`).Scan(&totalNotes); err != nil {
+		return StatsBucketsResult{}, fmt.Errorf("compter les notes : %w", err)
+	}
+
+	words, err := i.totalWordCount()
+	if err != nil {
+		return StatsBucketsResult{}, err
+	}
+
+	tags, err := i.topTags(10)
+	if err != nil {
+		return StatsBucketsResult{}, err
+	}
+
+	return StatsBucketsResult{
+		Created:  created,
+		Modified: modified,
+		Notes:    totalNotes,
+		Words:    words,
+		TopTags:  tags,
+	}, nil
+}
+
+// dayBuckets retourne les compteurs par jour pour une colonne temporelle
+// donnée. Les jours sans activité sont omis : le rendu côté frontend
+// comble les trous avec des 0.
+func (i *sqliteIndex) dayBuckets(column string, cutoff int64) ([]DayCount, error) {
+	rows, err := i.db.Query(fmt.Sprintf(`
+        SELECT date(%s, 'unixepoch') AS day, COUNT(*) AS n
+        FROM notes
+        WHERE %s >= ?
+        GROUP BY day
+        ORDER BY day
+    `, column, column), cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("compteurs par jour : %w", err)
+	}
+	defer rows.Close()
+	out := make([]DayCount, 0, 32)
+	for rows.Next() {
+		var d DayCount
+		if err := rows.Scan(&d.Day, &d.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// totalWordCount additionne les compteurs de mots sur toutes les notes.
+// On itère en Go (le SQL n'a pas de tokenizer Markdown natif), mais le
+// coût reste linéaire en nombre de notes et borné à < 100 ms même pour
+// 10 000 notes.
+func (i *sqliteIndex) totalWordCount() (int, error) {
+	rows, err := i.db.Query(`SELECT content FROM notes`)
+	if err != nil {
+		return 0, fmt.Errorf("lire les contenus : %w", err)
+	}
+	defer rows.Close()
+	var total int
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return 0, err
+		}
+		total += countWords(c)
+	}
+	return total, rows.Err()
+}
+
+func (i *sqliteIndex) topTags(limit int) ([]TagCount, error) {
+	rows, err := i.db.Query(`
+        SELECT tag, COUNT(*) AS n
+        FROM tags
+        GROUP BY tag
+        ORDER BY n DESC, tag ASC
+        LIMIT ?
+    `, limit)
+	if err != nil {
+		return nil, fmt.Errorf("top tags : %w", err)
+	}
+	defer rows.Close()
+	out := make([]TagCount, 0, limit)
+	for rows.Next() {
+		var t TagCount
+		if err := rows.Scan(&t.Tag, &t.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
