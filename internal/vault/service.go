@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -8,66 +9,167 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
+	"github.com/votre-compte/notevault/internal/config"
 	"github.com/votre-compte/notevault/internal/domain"
 )
 
+// Service est la façade métier du coffre. Elle combine un index SQLite
+// (cache requêtable), un Store de configuration et des opérations fichiers
+// atomiques. Toute mutation doit passer par elle pour rester cohérente.
 type Service struct {
-	root string
+	root      string
+	index     Index
+	config    *config.Store
+	watcher   *Watcher
+	indexCtx  context.Context
+	indexStop context.CancelFunc
 }
 
+// Options configure la construction du service.
+type Options struct {
+	Root         string
+	Index        Index         // si nil, un index SQLite est créé
+	Config       *config.Store // si nil, un Store est créé
+	StartWatcher bool
+}
+
+// New construit un service à partir d'options explicites (utilisé par les tests).
+func New(opts Options) (*Service, error) {
+	root, err := filepath.Abs(opts.Root)
+	if err != nil {
+		return nil, fmt.Errorf("résoudre la racine du coffre : %w", err)
+	}
+	if err := ensureDirs(root); err != nil {
+		return nil, err
+	}
+	idx := opts.Index
+	if idx == nil {
+		idx, err = newSQLiteIndex(filepath.Join(root, ".notevault", "index.db"))
+		if err != nil {
+			return nil, err
+		}
+	}
+	cfg := opts.Config
+	if cfg == nil {
+		cfg = config.NewStore(root)
+	}
+	s := &Service{
+		root:   root,
+		index:  idx,
+		config: cfg,
+	}
+	// Purge de la corbeille au démarrage.
+	if loaded, err := cfg.Load(); err == nil {
+		_ = purgeTrash(root, loaded.TrashRetentionDays)
+	} else {
+		_ = purgeTrash(root, config.Default().TrashRetentionDays)
+	}
+	if opts.StartWatcher {
+		s.indexCtx, s.indexStop = context.WithCancel(context.Background())
+		w, err := NewWatcher(s.indexCtx, root, idx, s.reindexFromPath)
+		if err != nil {
+			idx.Close()
+			return nil, err
+		}
+		s.watcher = w
+	}
+	return s, nil
+}
+
+// NewDefaultService crée le service avec les options par défaut.
+// Lance l'indexation initiale en arrière-plan puis le watcher.
 func NewDefaultService() (*Service, error) {
 	root, err := defaultVaultPath()
 	if err != nil {
 		return nil, err
 	}
-	return NewService(root)
-}
-
-func NewService(root string) (*Service, error) {
-	root, err := filepath.Abs(root)
+	svc, err := New(Options{Root: root, StartWatcher: true})
 	if err != nil {
-		return nil, fmt.Errorf("résoudre la racine du coffre : %w", err)
+		return nil, fmt.Errorf("initialiser le coffre : %w", err)
 	}
-	for _, dir := range []string{"notes", "assets", "templates", ".notevault"} {
-		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
-			return nil, fmt.Errorf("créer %s : %w", dir, err)
-		}
-	}
-	return &Service{root: root}, nil
+	return svc, nil
 }
 
+// Root retourne la racine absolue du coffre.
 func (s *Service) Root() string { return s.root }
 
-func (s *Service) ListNotes() ([]domain.NoteSummary, error) {
-	notesRoot := filepath.Join(s.root, "notes")
-	notes := make([]domain.NoteSummary, 0)
+// BootstrapContext retourne un contexte lié à la durée de vie du service.
+// Utilisé pour les opérations longues (indexation initiale) qui doivent
+// pouvoir être annulées par Close().
+func (s *Service) BootstrapContext() context.Context {
+	if s.indexCtx != nil {
+		return s.indexCtx
+	}
+	return context.Background()
+}
 
-	err := filepath.WalkDir(notesRoot, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+// Close ferme les ressources ouvertes.
+func (s *Service) Close() error {
+	if s.watcher != nil {
+		_ = s.watcher.Close()
+	}
+	if s.indexStop != nil {
+		s.indexStop()
+	}
+	if s.index != nil {
+		return s.index.Close()
+	}
+	return nil
+}
+
+// IndexNow déclenche une réindexation complète du dossier notes/.
+// Synchrone : utilisé au bootstrap si l'index est vide ou en cas de
+// récupération après crash. Ne fait rien si l'index contient déjà des
+// entrées (le watcher fsnotify prend le relais).
+func (s *Service) IndexNow(ctx context.Context, reporter progressReporter) error {
+	existing, err := s.index.List(ListFilter{Limit: 1})
+	if err != nil {
+		return err
+	}
+	if len(existing) > 0 {
+		if reporter != nil {
+			reporter.OnProgress("index", 0, 0)
 		}
-		if entry.IsDir() || strings.ToLower(filepath.Ext(path)) != ".md" {
-			return nil
-		}
-		note, err := s.readAbsolute(path)
-		if err != nil {
-			return err
-		}
-		notes = append(notes, domain.NoteSummary{
-			RelativePath: note.RelativePath,
-			Title:        note.Title,
-			UpdatedAt:    note.UpdatedAt,
-		})
 		return nil
-	})
+	}
+	return IndexExisting(ctx, s.root, s.index, reporter)
+}
+
+func (s *Service) reindexFromPath(absPath string) {
+	// Détermine le chemin relatif à la racine du coffre.
+	rel, err := filepath.Rel(s.root, absPath)
+	if err != nil {
+		return
+	}
+	rel = filepath.ToSlash(rel)
+	if !strings.HasPrefix(rel, "notes/") {
+		// Hors de la zone indexée : on supprime si c'était une note connue.
+		_ = s.index.Delete(rel)
+		return
+	}
+	if strings.ToLower(filepath.Ext(absPath)) != ".md" {
+		return
+	}
+	if _, err := os.Stat(absPath); err != nil {
+		// Fichier supprimé.
+		_ = s.index.Delete(rel)
+		return
+	}
+	note, err := readAbsoluteFile(s.root, absPath)
+	if err != nil {
+		return
+	}
+	_ = s.index.Upsert(note)
+}
+
+func (s *Service) ListNotes() ([]domain.NoteSummary, error) {
+	summaries, err := s.index.List(ListFilter{Limit: 5000})
 	if err != nil {
 		return nil, fmt.Errorf("lister les notes : %w", err)
 	}
-
-	sort.Slice(notes, func(i, j int) bool { return notes[i].UpdatedAt.After(notes[j].UpdatedAt) })
-	return notes, nil
+	sort.Slice(summaries, func(i, j int) bool { return summaries[i].UpdatedAt.After(summaries[j].UpdatedAt) })
+	return summaries, nil
 }
 
 func (s *Service) OpenNote(relativePath string) (domain.Note, error) {
@@ -84,7 +186,7 @@ func (s *Service) CreateNote(title string, templateKey string) (domain.Note, err
 		title = "Nouvelle note"
 	}
 
-	now := time.Now().UTC()
+	now := nowUTC()
 	filename := fmt.Sprintf("%s-%s.md", now.Format("20060102-150405"), slug(title))
 	relativePath := filepath.ToSlash(filepath.Join("notes", "inbox", filename))
 	content := template(templateKey)
@@ -105,7 +207,7 @@ func (s *Service) SaveNote(note domain.Note) (domain.Note, error) {
 	if err != nil {
 		return domain.Note{}, err
 	}
-	now := time.Now().UTC()
+	now := nowUTC()
 	if note.CreatedAt.IsZero() {
 		note.CreatedAt = now
 	}
@@ -115,24 +217,96 @@ func (s *Service) SaveNote(note domain.Note) (domain.Note, error) {
 		note.Title = "Sans titre"
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return domain.Note{}, fmt.Errorf("créer le dossier de la note : %w", err)
+	if err := writeAtomic(path, []byte(serialize(note)), 0o644); err != nil {
+		return domain.Note{}, err
 	}
-	if err := os.WriteFile(path, []byte(serialize(note)), 0o644); err != nil {
-		return domain.Note{}, fmt.Errorf("écrire la note : %w", err)
+	if err := s.index.Upsert(note); err != nil {
+		return domain.Note{}, fmt.Errorf("mettre à jour l'index : %w", err)
 	}
 	return note, nil
 }
 
+// DeleteNote fait un soft-delete : la note est déplacée vers la corbeille.
 func (s *Service) DeleteNote(relativePath string) error {
 	path, err := s.absoluteNotePath(relativePath)
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(path); err != nil {
-		return fmt.Errorf("supprimer la note : %w", err)
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// Synchroniser l'index si le fichier a disparu hors app.
+			_ = s.index.Delete(relativePath)
+			return nil
+		}
+		return fmt.Errorf("vérifier la note : %w", err)
+	}
+	if _, err := softDelete(s.root, path); err != nil {
+		return err
+	}
+	return s.index.Delete(relativePath)
+}
+
+// ListTrash retourne les entrées actuellement en corbeille.
+func (s *Service) ListTrash() ([]TrashEntry, error) {
+	return listTrash(s.root)
+}
+
+// RestoreFromTrash remet en place une note précédemment supprimée.
+func (s *Service) RestoreFromTrash(id string) (domain.Note, error) {
+	entries, err := listTrash(s.root)
+	if err != nil {
+		return domain.Note{}, err
+	}
+	var target *TrashEntry
+	for i, e := range entries {
+		if e.ID == id {
+			target = &entries[i]
+			break
+		}
+	}
+	if target == nil {
+		return domain.Note{}, fmt.Errorf("entrée de corbeille introuvable : %s", id)
+	}
+	originalPath, err := restoreFromTrash(s.root, *target)
+	if err != nil {
+		return domain.Note{}, err
+	}
+	note, err := s.OpenNote(originalPath)
+	if err != nil {
+		return domain.Note{}, err
+	}
+	if err := s.index.Upsert(note); err != nil {
+		return domain.Note{}, err
+	}
+	return note, nil
+}
+
+// EmptyTrash vide la corbeille.
+func (s *Service) EmptyTrash() error {
+	entries, err := listTrash(s.root)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		_ = os.Remove(e.TrashPath)
+		_ = os.Remove(e.TrashPath + ".meta")
 	}
 	return nil
+}
+
+// GetConfig retourne la configuration courante.
+func (s *Service) GetConfig() (config.Config, error) {
+	return s.config.Load()
+}
+
+// UpdateConfig enregistre la configuration.
+func (s *Service) UpdateConfig(cfg config.Config) error {
+	return s.config.Save(cfg)
+}
+
+// Search interroge l'index full-text.
+func (s *Service) Search(query string, limit int) ([]domain.NoteSummary, error) {
+	return s.index.Search(query, SearchOpts{Limit: limit})
 }
 
 func (s *Service) absoluteNotePath(relativePath string) (string, error) {
@@ -141,7 +315,7 @@ func (s *Service) absoluteNotePath(relativePath string) (string, error) {
 		return "", errors.New("chemin de note invalide")
 	}
 	if filepath.Ext(relativePath) != ".md" {
-		return "", errors.New("une note doit avoir l’extension .md")
+		return "", errors.New("une note doit avoir l'extension .md")
 	}
 	if !strings.HasPrefix(filepath.ToSlash(relativePath), "notes/") {
 		return "", errors.New("une note doit être rangée sous notes/")
