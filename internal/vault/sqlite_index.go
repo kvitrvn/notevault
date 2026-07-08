@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -42,6 +43,11 @@ CREATE TABLE IF NOT EXISTS tags (
   PRIMARY KEY (relative_path, tag)
 );
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
+
+CREATE TABLE IF NOT EXISTS pinned (
+  relative_path TEXT PRIMARY KEY,
+  pinned_at     INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
@@ -298,34 +304,74 @@ func (i *sqliteIndex) List(filter ListFilter) ([]domain.NoteSummary, error) {
 }
 
 func (i *sqliteIndex) queryList(filter ListFilter) (*sql.Rows, error) {
-	if filter.Tag != "" {
-		limit := clampLimit(filter.Limit)
-		return i.db.Query(`
-            SELECT n.relative_path, n.title, n.updated_at
-            FROM notes n
-            INNER JOIN tags t ON t.relative_path = n.relative_path
-            WHERE t.tag = ?
-            ORDER BY n.updated_at DESC
-            LIMIT ?
-        `, filter.Tag, limit)
-	}
 	limit := clampLimit(filter.Limit)
+	conds := make([]string, 0, 6)
+	args := make([]any, 0, 8)
+
+	// Préfixe de dossier (notes/projects/...).
 	if filter.Folder != "" {
 		prefix := strings.TrimSuffix(filter.Folder, "/") + "/"
-		return i.db.Query(`
-            SELECT relative_path, title, updated_at
-            FROM notes
-            WHERE relative_path LIKE ? OR relative_path = ?
-            ORDER BY updated_at DESC
-            LIMIT ?
-        `, prefix+"%", strings.TrimSuffix(filter.Folder, "/"), limit)
+		conds = append(conds, "(n.relative_path LIKE ? OR n.relative_path = ?)")
+		args = append(args, prefix+"%", strings.TrimSuffix(filter.Folder, "/"))
 	}
-	return i.db.Query(`
-        SELECT relative_path, title, updated_at
-        FROM notes
-        ORDER BY updated_at DESC
-        LIMIT ?
-    `, limit)
+
+	// Tag unique (legacy).
+	if filter.Tag != "" {
+		conds = append(conds, "EXISTS (SELECT 1 FROM tags t WHERE t.relative_path = n.relative_path AND t.tag = ?)")
+		args = append(args, filter.Tag)
+	}
+
+	// Plusieurs tags requis (AND).
+	for _, tag := range filter.Tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		conds = append(conds, "EXISTS (SELECT 1 FROM tags t WHERE t.relative_path = n.relative_path AND t.tag = ?)")
+		args = append(args, tag)
+	}
+
+	// Tags exclus (NOT EXISTS pour chaque).
+	for _, tag := range filter.ExcludeTags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		conds = append(conds, "NOT EXISTS (SELECT 1 FROM tags t WHERE t.relative_path = n.relative_path AND t.tag = ?)")
+		args = append(args, tag)
+	}
+
+	// Filtre temporel updated_at.
+	if !filter.UpdatedFrom.IsZero() {
+		conds = append(conds, "n.updated_at >= ?")
+		args = append(args, filter.UpdatedFrom.UTC().Unix())
+	}
+	if !filter.UpdatedTo.IsZero() {
+		conds = append(conds, "n.updated_at < ?")
+		args = append(args, filter.UpdatedTo.UTC().Unix())
+	}
+
+	// Recherche full-text (jointure FTS5 si Query).
+	joinFTS := ""
+	if q := sanitizeFTSQuery(filter.Query); q != "" {
+		joinFTS = "JOIN notes_fts f ON f.rowid = n.rowid"
+		conds = append(conds, "notes_fts MATCH ?")
+		args = append(args, q)
+	}
+
+	where := ""
+	if len(conds) > 0 {
+		where = "WHERE " + strings.Join(conds, " AND ")
+	}
+	args = append(args, limit)
+
+	q := `SELECT n.relative_path, n.title, n.updated_at
+        FROM notes n
+        ` + joinFTS + `
+        ` + where + `
+        ORDER BY n.updated_at DESC
+        LIMIT ?`
+	return i.db.Query(q, args...)
 }
 
 func (i *sqliteIndex) Search(query string, opts SearchOpts) ([]domain.NoteSummary, error) {
@@ -376,6 +422,124 @@ func (i *sqliteIndex) ListTags() ([]TagCount, error) {
 			return nil, err
 		}
 		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (i *sqliteIndex) ListFolders() ([]FolderInfo, error) {
+	rows, err := i.db.Query(`
+        SELECT relative_path FROM notes ORDER BY relative_path
+    `)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := make(map[string]int)
+	parents := make(map[string]struct{})
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		// p = "notes/projects/web/index.md" → dossier = "projects/web"
+		parts := strings.SplitN(p, "/", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		dir := parts[1]
+		// Retire le nom de fichier final.
+		if idx := strings.LastIndex(dir, "/"); idx >= 0 {
+			dir = dir[:idx]
+		} else {
+			dir = ""
+		}
+		if dir == "" {
+			continue
+		}
+		counts[dir]++
+		// Conserve les dossiers parents aussi.
+		for {
+			parent := dir
+			if idx := strings.LastIndex(parent, "/"); idx >= 0 {
+				parent = parent[:idx]
+			} else {
+				break
+			}
+			if parent == "" {
+				break
+			}
+			parents[parent] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Tous les dossiers connus : ceux qui contiennent des notes + leurs parents.
+	all := make(map[string]struct{}, len(counts)+len(parents))
+	for k := range counts {
+		all[k] = struct{}{}
+	}
+	for k := range parents {
+		all[k] = struct{}{}
+	}
+	out := make([]FolderInfo, 0, len(all))
+	for p := range all {
+		name := p
+		if idx := strings.LastIndex(p, "/"); idx >= 0 {
+			name = p[idx+1:]
+		}
+		out = append(out, FolderInfo{Path: p, Name: name, Count: counts[p]})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out, nil
+}
+
+func (i *sqliteIndex) Pin(relativePath string, pinned bool) error {
+	if pinned {
+		_, err := i.db.Exec(`
+            INSERT INTO pinned(relative_path, pinned_at) VALUES(?, ?)
+            ON CONFLICT(relative_path) DO UPDATE SET pinned_at = excluded.pinned_at
+        `, relativePath, nowUTC().Unix())
+		if err != nil {
+			return fmt.Errorf("épingler : %w", err)
+		}
+		return nil
+	}
+	if _, err := i.db.Exec(`DELETE FROM pinned WHERE relative_path = ?`, relativePath); err != nil {
+		return fmt.Errorf("désépingler : %w", err)
+	}
+	return nil
+}
+
+func (i *sqliteIndex) IsPinned(relativePath string) (bool, error) {
+	var n int
+	err := i.db.QueryRow(`SELECT COUNT(*) FROM pinned WHERE relative_path = ?`, relativePath).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (i *sqliteIndex) ListPinned() ([]domain.NoteSummary, error) {
+	rows, err := i.db.Query(`
+        SELECT n.relative_path, n.title, n.updated_at
+        FROM notes n
+        INNER JOIN pinned p ON p.relative_path = n.relative_path
+        ORDER BY p.pinned_at DESC
+    `)
+	if err != nil {
+		return nil, fmt.Errorf("lister les épinglées : %w", err)
+	}
+	defer rows.Close()
+	out := make([]domain.NoteSummary, 0)
+	for rows.Next() {
+		var s domain.NoteSummary
+		var updated int64
+		if err := rows.Scan(&s.RelativePath, &s.Title, &updated); err != nil {
+			return nil, err
+		}
+		s.UpdatedAt = unixToTime(updated)
+		out = append(out, s)
 	}
 	return out, rows.Err()
 }

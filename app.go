@@ -45,11 +45,55 @@ func (a *App) ListNotes() ([]domain.NoteSummary, error) {
 	return a.vault.ListNotes()
 }
 
+// ListNotesFiltered applique une requête structurée (filtre sidebar).
+func (a *App) ListNotesFiltered(filter vault.FilterQuery, limit int) ([]domain.NoteSummary, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	return a.vault.ListNotesFiltered(filter, limit)
+}
+
+// ListPinned retourne les notes épinglées.
+func (a *App) ListPinned() ([]domain.NoteSummary, error) {
+	return a.vault.ListPinned()
+}
+
+// ListFolders retourne les dossiers connus du coffre.
+func (a *App) ListFolders() ([]vault.FolderInfo, error) {
+	return a.vault.ListFolders()
+}
+
+// PinNote épingle ou désépingle une note.
+func (a *App) PinNote(relativePath string, pinned bool) error {
+	return a.vault.Pin(relativePath, pinned)
+}
+
+// IsNotePinned indique si une note est épinglée.
+func (a *App) IsNotePinned(relativePath string) (bool, error) {
+	return a.vault.IsPinned(relativePath)
+}
+
+// ListTags retourne les tags connus.
+func (a *App) ListTags() ([]vault.TagCount, error) {
+	return a.vault.ListTags()
+}
+
 func (a *App) SearchNotes(query string, limit int) ([]domain.NoteSummary, error) {
 	if limit <= 0 {
 		limit = 200
 	}
 	return a.vault.Search(query, limit)
+}
+
+// OpenDailyNote ouvre (ou crée) la note du jour.
+func (a *App) OpenDailyNote() (domain.Note, error) {
+	return a.vault.OpenDailyNote()
+}
+
+// EnsureDailyNote crée la note du jour si AutoDailyNote=true.
+// Retourne le chemin relatif ou "" si la fonction est désactivée.
+func (a *App) EnsureDailyNote() (string, error) {
+	return a.vault.EnsureDailyNote()
 }
 
 func (a *App) OpenNote(relativePath string) (domain.Note, error) {

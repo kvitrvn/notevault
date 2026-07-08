@@ -9,20 +9,35 @@ import (
 
 // SearchOpts paramètre une recherche full-text.
 type SearchOpts struct {
-	Limit int
+	Limit       int
+	TitleWeight float64 // pondération (futur : pour le tri)
 }
 
 // ListFilter restreint les List.
+//
+// Zero value valide : équivaut à "toutes les notes triées par updated_at DESC".
 type ListFilter struct {
-	Folder string
-	Tag    string
-	Limit  int
+	Folder      string    // préfixe de chemin (notes/projects/)
+	Tag         string    // tag unique (legacy, conservé pour compat)
+	Tags        []string  // tous ces tags doivent être présents (AND)
+	ExcludeTags []string  // aucun de ces tags ne doit être présent (NOT)
+	UpdatedFrom time.Time // updated_at >= UpdatedFrom (si non zéro)
+	UpdatedTo   time.Time // updated_at < UpdatedTo (si non zéro)
+	Query       string    // expression FTS5 sur titre + contenu
+	Limit       int
 }
 
 // TagCount est une étiquette avec son nombre d'occurrences.
 type TagCount struct {
 	Tag   string `json:"tag"`
 	Count int    `json:"count"`
+}
+
+// FolderInfo décrit un dossier du coffre pour la vue arborescente.
+type FolderInfo struct {
+	Path  string `json:"path"`  // chemin relatif à notes/ ("projects/web")
+	Name  string `json:"name"`  // dernier segment ("web")
+	Count int    `json:"count"` // nombre de notes dans ce dossier
 }
 
 // Index est l'interface de stockage secondaire (cache requêtable).
@@ -34,6 +49,10 @@ type Index interface {
 	List(filter ListFilter) ([]domain.NoteSummary, error)
 	Search(query string, opts SearchOpts) ([]domain.NoteSummary, error)
 	ListTags() ([]TagCount, error)
+	ListFolders() ([]FolderInfo, error)
+	Pin(relativePath string, pinned bool) error
+	ListPinned() ([]domain.NoteSummary, error)
+	IsPinned(relativePath string) (bool, error)
 	Close() error
 }
 

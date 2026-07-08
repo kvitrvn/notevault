@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/votre-compte/notevault/internal/config"
@@ -79,6 +78,8 @@ func New(opts Options) (*Service, error) {
 
 // NewDefaultService crée le service avec les options par défaut.
 // Lance l'indexation initiale en arrière-plan puis le watcher.
+// Si AutoDailyNote est activé, crée la note du jour si absente et
+// retourne son chemin via BootstrapDailyNote().
 func NewDefaultService() (*Service, error) {
 	root, err := defaultVaultPath()
 	if err != nil {
@@ -89,6 +90,45 @@ func NewDefaultService() (*Service, error) {
 		return nil, fmt.Errorf("initialiser le coffre : %w", err)
 	}
 	return svc, nil
+}
+
+// EnsureDailyNote crée la note du jour (notes/daily/YYYY-MM-DD.md) si
+// la config AutoDailyNote est vraie et qu'elle n'existe pas encore.
+// Retourne le chemin relatif de la note du jour.
+func (s *Service) EnsureDailyNote() (string, error) {
+	cfg, err := s.config.Load()
+	if err != nil {
+		return "", err
+	}
+	if !cfg.AutoDailyNote {
+		return "", nil
+	}
+	return s.ensureDailyNoteImpl()
+}
+
+func (s *Service) ensureDailyNoteImpl() (string, error) {
+	now := nowUTC()
+	day := now.Format("2006-01-02")
+	rel := filepath.ToSlash(filepath.Join("notes", "daily", day+".md"))
+	path, err := s.absoluteNotePath(rel)
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(path); err == nil {
+		return rel, nil
+	}
+	note := domain.Note{
+		RelativePath: rel,
+		Title:        "Journal — " + day,
+		Content:      template("daily"),
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		Tags:         []string{"daily"},
+	}
+	if _, err := s.SaveNote(note); err != nil {
+		return "", err
+	}
+	return rel, nil
 }
 
 // Root retourne la racine absolue du coffre.
@@ -164,12 +204,63 @@ func (s *Service) reindexFromPath(absPath string) {
 }
 
 func (s *Service) ListNotes() ([]domain.NoteSummary, error) {
-	summaries, err := s.index.List(ListFilter{Limit: 5000})
+	return s.ListNotesFiltered(FilterQuery{}, 5000)
+}
+
+// ListNotesFiltered applique une requête structurée et retourne les
+// résumés de notes correspondants. Si la requête est vide, équivaut
+// à ListNotes().
+func (s *Service) ListNotesFiltered(q FilterQuery, limit int) ([]domain.NoteSummary, error) {
+	if limit <= 0 {
+		limit = 5000
+	}
+	summaries, err := s.index.List(q.ToListFilter(limit))
 	if err != nil {
 		return nil, fmt.Errorf("lister les notes : %w", err)
 	}
-	sort.Slice(summaries, func(i, j int) bool { return summaries[i].UpdatedAt.After(summaries[j].UpdatedAt) })
+	if q.IsEmpty() {
+		// Tri stable déjà assuré par SQL.
+		return summaries, nil
+	}
+	// Tri mémoire stable par updated_at DESC (le SQL fait déjà le tri).
 	return summaries, nil
+}
+
+// ListPinned retourne les notes épinglées (par ordre d'épinglage).
+func (s *Service) ListPinned() ([]domain.NoteSummary, error) {
+	out, err := s.index.ListPinned()
+	if err != nil {
+		return nil, fmt.Errorf("lister les épinglées : %w", err)
+	}
+	return out, nil
+}
+
+// ListFolders retourne les dossiers connus du coffre pour la vue arbre.
+func (s *Service) ListFolders() ([]FolderInfo, error) {
+	return s.index.ListFolders()
+}
+
+// Pin épingle ou désépingle une note.
+func (s *Service) Pin(relativePath string, pinned bool) error {
+	if _, err := s.absoluteNotePath(relativePath); err != nil {
+		return err
+	}
+	return s.index.Pin(relativePath, pinned)
+}
+
+// IsPinned retourne l'état d'épinglage d'une note.
+func (s *Service) IsPinned(relativePath string) (bool, error) {
+	return s.index.IsPinned(relativePath)
+}
+
+// ListTags retourne tous les tags avec leur compte.
+func (s *Service) ListTags() ([]TagCount, error) {
+	return s.index.ListTags()
+}
+
+// Search interroge l'index full-text.
+func (s *Service) Search(query string, limit int) ([]domain.NoteSummary, error) {
+	return s.index.Search(query, SearchOpts{Limit: limit})
 }
 
 func (s *Service) OpenNote(relativePath string) (domain.Note, error) {
@@ -304,9 +395,18 @@ func (s *Service) UpdateConfig(cfg config.Config) error {
 	return s.config.Save(cfg)
 }
 
-// Search interroge l'index full-text.
-func (s *Service) Search(query string, limit int) ([]domain.NoteSummary, error) {
-	return s.index.Search(query, SearchOpts{Limit: limit})
+// OpenDailyNote ouvre (ou crée si AutoDailyNote) la note du jour.
+func (s *Service) OpenDailyNote() (domain.Note, error) {
+	rel, err := s.EnsureDailyNote()
+	if err != nil {
+		return domain.Note{}, err
+	}
+	if rel == "" {
+		// AutoDailyNote désactivé : on calcule quand même le chemin du jour.
+		day := nowUTC().Format("2006-01-02")
+		rel = filepath.ToSlash(filepath.Join("notes", "daily", day+".md"))
+	}
+	return s.OpenNote(rel)
 }
 
 func (s *Service) absoluteNotePath(relativePath string) (string, error) {
