@@ -102,9 +102,14 @@ function buildDecorations(doc: PMNode, resolve: WikiLinkResolve): DecorationSet 
   return DecorationSet.create(doc, decorations);
 }
 
-// setWikiLinkResolve met à jour le getter utilisé par le plugin via une
-// transaction factice (force un re-apply des décorations).
+// refreshWikiLinkDecorations force le plugin `wikiLink` à recalculer ses
+// décorations après un changement de `knownTitles`. On dispatch une
+// transaction meta-only ; sans `addToHistory: false`, prosemirror-history
+// empile ces transactions dans la pile d'undo et un Ctrl+Z défait d'abord
+// ces entrées invisibles avant d'atteindre la saisie de l'utilisateur.
 export function refreshWikiLinkDecorations(editor: Editor): void {
   if (!editor) return;
-  editor.view.dispatch(editor.state.tr.setMeta('wiki-link-refresh', true));
+  editor.view.dispatch(
+    editor.state.tr.setMeta('wiki-link-refresh', true).setMeta('addToHistory', false)
+  );
 }

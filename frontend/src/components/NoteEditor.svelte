@@ -1,6 +1,11 @@
 <script lang="ts">
   import Bold from '@lucide/svelte/icons/bold';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import ChevronLeft from '@lucide/svelte/icons/chevron-left';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import ChevronUp from '@lucide/svelte/icons/chevron-up';
   import Code from '@lucide/svelte/icons/code';
+  import Columns3 from '@lucide/svelte/icons/columns-3';
   import Heading1 from '@lucide/svelte/icons/heading-1';
   import Heading2 from '@lucide/svelte/icons/heading-2';
   import Heading3 from '@lucide/svelte/icons/heading-3';
@@ -13,8 +18,10 @@
   import Pilcrow from '@lucide/svelte/icons/pilcrow';
   import Quote from '@lucide/svelte/icons/quote';
   import Redo2 from '@lucide/svelte/icons/redo-2';
+  import Rows3 from '@lucide/svelte/icons/rows-3';
   import Strikethrough from '@lucide/svelte/icons/strikethrough';
   import TableIcon from '@lucide/svelte/icons/table';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
   import Undo2 from '@lucide/svelte/icons/undo-2';
   import { onDestroy, onMount } from 'svelte';
   import { Editor } from '@tiptap/core';
@@ -45,11 +52,34 @@
   let host: HTMLDivElement;
   let editor: Editor | null = null;
   let lastMarkdown = markdown;
-  let editorVersion = 0;
+  // Suit la dernière valeur de la prop `markdown` que NoteEditor a vue.
+  // Sert à distinguer un vrai changement externe (autre note ouverte,
+  // restore historique, recovery) d'une simple réassignation Svelte avec
+  // contenu byte-égal (ex. `selected = saved` dans `flushSave`). Sans ce
+  // tracker, le bloc réactif `markdown !== lastMarkdown` se déclenchait
+  // sporadiquement pendant le cycle save et dispatchait un `replaceWith`
+  // complet qui démontait/remontait les décorations wiki-link → flicker.
+  let lastSeenPropMarkdown = markdown;
   let editorReady = false;
   let editorEditable = false;
+  // Compteur incrémenté à chaque transaction ProseMirror. C'est lui qui
+  // sert de signal à Svelte 5 pour re-évaluer les expressions du template
+  // dépendant de l'état de l'éditeur (`canUndo`, `canRedo`, `isActive`,
+  // etc.). Sans ça, `editor = editor` était un no-op : Svelte compare
+  // l'identité des objets en `===` strict, donc une réassignation vers
+  // la même référence n'invalide rien et les boutons restent figés.
+  let editorTick = 0;
   let pendingChangeTimer: ReturnType<typeof setTimeout> | null = null;
   let hasPendingChange = false;
+
+  // Menu flottant ancré au curseur, visible uniquement quand le curseur
+  // est dans une cellule de tableau. Positionné en `fixed` à partir des
+  // coords écran fournies par `editor.view.coordsAtPos`.
+  let tableMenuVisible = false;
+  let tableMenuX = 0;
+  let tableMenuY = 0;
+  let tableMenuPlacement: 'top' | 'bottom' = 'top';
+  const TABLE_MENU_HEIGHT = 36;
 
   const lowlight = createLowlight(common);
   const MARKDOWN_CHANGE_DEBOUNCE_MS = 200;
@@ -60,10 +90,16 @@
   const selectBase =
     'h-8 rounded-md border border-transparent bg-transparent px-2 text-sm text-foreground hover:bg-panel-muted focus:bg-panel-muted';
 
-  function bumpEditorState(): void {
-    editorVersion += 1;
-    editorEditable = editor?.isEditable ?? false;
-  }
+// Toute transaction ProseMirror (saisie, sélection, meta) passe par
+// `onTransaction`, donc on centralise la notification ici. On incrémente
+// `editorTick` plutôt que `editor = editor` parce que Svelte 5 utilise
+// `===` strict pour décider d'invalider une variable legacy : deux
+// références identiques vers le même objet ne déclenchent rien, donc les
+// expressions du template (`canUndo`, `isActive`, etc.) ne se réévalueraient
+// jamais. Le tick est une valeur primitive qui change forcément.
+function notifyEditorChange(): void {
+  editorTick++;
+}
 
   function iconButtonClass(active = false): string {
     return active
@@ -72,28 +108,51 @@
   }
 
   function canUndo(): boolean {
-    editorVersion;
+    // Lecture de `editorTick` pour que Svelte enregistre la dépendance
+    // et re-évalue cette fonction à chaque transaction.
+    editorTick;
     return editor?.can().undo() ?? false;
   }
 
   function canRedo(): boolean {
-    editorVersion;
+    editorTick;
     return editor?.can().redo() ?? false;
   }
 
   function isActive(name: string, attributes: Record<string, unknown> | undefined = undefined): boolean {
-    editorVersion;
+    editorTick;
     return editor?.isActive(name, attributes) ?? false;
   }
 
   function currentBlock(): BlockValue {
-    editorVersion;
-
+    editorTick;
     if (editor?.isActive('heading', { level: 1 })) return 'heading-1';
     if (editor?.isActive('heading', { level: 2 })) return 'heading-2';
     if (editor?.isActive('heading', { level: 3 })) return 'heading-3';
 
     return 'paragraph';
+  }
+
+  // Recalcule la position du menu flottant. Appelée à chaque transaction
+  // (sélection, frappe, etc.). Le menu se place au-dessus du curseur par
+  // défaut, et bascule en dessous s'il n'y a pas la place.
+  function updateTableMenu(): void {
+    if (!editor || !editor.isActive('table')) {
+      tableMenuVisible = false;
+      return;
+    }
+    const { from } = editor.state.selection;
+    const coords = editor.view.coordsAtPos(from);
+    const spaceAbove = coords.top;
+    tableMenuPlacement = spaceAbove > TABLE_MENU_HEIGHT + 12 ? 'top' : 'bottom';
+    tableMenuX = coords.left;
+    tableMenuY =
+      tableMenuPlacement === 'top' ? coords.top - TABLE_MENU_HEIGHT - 6 : coords.bottom + 6;
+    tableMenuVisible = true;
+  }
+
+  function hideTableMenu(): void {
+    tableMenuVisible = false;
   }
 
   onMount(() => {
@@ -215,14 +274,17 @@
           editorReady = true;
           editorEditable = ed.isEditable;
           onReady({ isEditable: ed.isEditable, isFocused: ed.isFocused });
-          bumpEditorState();
         },
-        onSelectionUpdate: bumpEditorState,
-        onTransaction: bumpEditorState,
+        onTransaction: () => {
+          updateTableMenu();
+          notifyEditorChange();
+        },
+        onBlur: () => {
+          hideTableMenu();
+        },
         onUpdate: ({ editor: updatedEditor }) => {
           onDirty();
           schedulePendingChange(updatedEditor);
-          bumpEditorState();
         }
       });
     } catch (err) {
@@ -387,21 +449,51 @@
     }
   }
 
-  // Ne recharge l'éditeur que lorsqu'une autre note est ouverte ou que le
-  // contenu est remplacé depuis App.svelte. `emitUpdate: false` empêche une
-  // boucle de mises à jour entre le parent et Tiptap.
-  $: if (editor && markdown !== lastMarkdown) {
-    if (pendingChangeTimer) {
-      clearTimeout(pendingChangeTimer);
-      pendingChangeTimer = null;
+  // Recharge le contenu de l'éditeur quand la prop `markdown` arrive de
+  // l'extérieur (ouverture d'une autre note, restauration d'historique,
+  // recovery buffer, etc.). Tiptap n'expose pas `addToHistory` sur
+  // `setContent` ; on dispatch donc la transaction à la main avec le meta
+  // `addToHistory: false` pour ne PAS empiler un "remplace tout le doc"
+  // dans la pile d'undo à chaque sauvegarde côté backend. `preventUpdate`
+  // évite la boucle avec le callback `onUpdate`.
+  //
+  // On compare `markdown` à `lastSeenPropMarkdown` (pas à `lastMarkdown`)
+  // pour distinguer :
+  //   - vrai changement externe → on recharge le doc ;
+  //   - réassignation Svelte byte-égale (`selected = saved` après save) →
+  //     on ne fait rien, sinon le `replaceWith` démonte les décorations
+  //     wiki-link et provoque un flicker visuel du texte pendant ~100 ms.
+  // Si la prop correspond déjà à l'état sérialisé de l'éditeur, on n'a
+  // rien à faire non plus (cas du restore où la prop arrive identique).
+  // Si la prop diffère au niveau string mais que le JSON parsé est
+  // structurellement identique au doc courant, on aligne les références
+  // sans dispatcher de transaction (évite un re-instantiate de décorations).
+  $: if (editor && markdown !== lastSeenPropMarkdown) {
+    lastSeenPropMarkdown = markdown;
+    if (markdown !== lastMarkdown) {
+      const ed = editor;
+      if (pendingChangeTimer) {
+        clearTimeout(pendingChangeTimer);
+        pendingChangeTimer = null;
+      }
+      hasPendingChange = false;
+      try {
+        const json = ed.markdown?.parse(markdown) ?? { type: 'doc', content: [] };
+        const nextDoc = ed.schema.nodeFromJSON(json);
+        const currentJSON = ed.state.doc.toJSON();
+        if (JSON.stringify(currentJSON) !== JSON.stringify(nextDoc.toJSON())) {
+          ed.view.dispatch(
+            ed.state.tr
+              .replaceWith(0, ed.state.doc.content.size, nextDoc)
+              .setMeta('addToHistory', false)
+              .setMeta('preventUpdate', true)
+          );
+        }
+      } catch (err) {
+        console.error('[editor] setContent failed:', err);
+      }
+      lastMarkdown = markdown;
     }
-    hasPendingChange = false;
-    editor.commands.setContent(markdown, {
-      contentType: 'markdown',
-      emitUpdate: false
-    });
-    lastMarkdown = markdown;
-    bumpEditorState();
   }
 
   // Rafraîchit les décorations wiki-link quand la liste des titres connus
@@ -490,6 +582,34 @@
         withHeaderRow: true
       })
       .run();
+  }
+
+  function deleteTable(): void {
+    editor?.chain().focus().deleteTable().run();
+  }
+
+  function addRowBefore(): void {
+    editor?.chain().focus().addRowBefore().run();
+  }
+
+  function addRowAfter(): void {
+    editor?.chain().focus().addRowAfter().run();
+  }
+
+  function addColumnBefore(): void {
+    editor?.chain().focus().addColumnBefore().run();
+  }
+
+  function addColumnAfter(): void {
+    editor?.chain().focus().addColumnAfter().run();
+  }
+
+  function deleteRow(): void {
+    editor?.chain().focus().deleteRow().run();
+  }
+
+  function deleteColumn(): void {
+    editor?.chain().focus().deleteColumn().run();
   }
 
   function insertHorizontalRule(): void {
@@ -630,7 +750,145 @@
   </div>
 </div>
 
+<!-- Menu flottant ancré au curseur, visible uniquement quand le curseur
+     est dans une cellule de tableau. `position: fixed` + coords écran
+     évite d'être coupé par l'overflow du conteneur. -->
+{#if tableMenuVisible}
+  <div
+    class="note-table-menu"
+    data-placement={tableMenuPlacement}
+    style:left="{tableMenuX}px"
+    style:top="{tableMenuY}px"
+    role="toolbar"
+    aria-label="Actions du tableau"
+  >
+    <button
+      type="button"
+      title="Ligne au-dessus"
+      aria-label="Ligne au-dessus"
+      onmousedown={(e) => e.preventDefault()}
+      onclick={addRowBefore}
+    >
+      <ChevronUp size={14} strokeWidth={2} aria-hidden="true" />
+    </button>
+    <button
+      type="button"
+      title="Ligne en-dessous"
+      aria-label="Ligne en-dessous"
+      onmousedown={(e) => e.preventDefault()}
+      onclick={addRowAfter}
+    >
+      <ChevronDown size={14} strokeWidth={2} aria-hidden="true" />
+    </button>
+    <span class="note-table-menu__sep" aria-hidden="true"></span>
+    <button
+      type="button"
+      title="Colonne à gauche"
+      aria-label="Colonne à gauche"
+      onmousedown={(e) => e.preventDefault()}
+      onclick={addColumnBefore}
+    >
+      <ChevronLeft size={14} strokeWidth={2} aria-hidden="true" />
+    </button>
+    <button
+      type="button"
+      title="Colonne à droite"
+      aria-label="Colonne à droite"
+      onmousedown={(e) => e.preventDefault()}
+      onclick={addColumnAfter}
+    >
+      <ChevronRight size={14} strokeWidth={2} aria-hidden="true" />
+    </button>
+    <span class="note-table-menu__sep" aria-hidden="true"></span>
+    <button
+      type="button"
+      title="Supprimer la ligne"
+      aria-label="Supprimer la ligne"
+      onmousedown={(e) => e.preventDefault()}
+      onclick={deleteRow}
+    >
+      <Rows3 size={14} strokeWidth={2} aria-hidden="true" />
+    </button>
+    <button
+      type="button"
+      title="Supprimer la colonne"
+      aria-label="Supprimer la colonne"
+      onmousedown={(e) => e.preventDefault()}
+      onclick={deleteColumn}
+    >
+      <Columns3 size={14} strokeWidth={2} aria-hidden="true" />
+    </button>
+    <span class="note-table-menu__sep" aria-hidden="true"></span>
+    <button
+      type="button"
+      title="Supprimer le tableau"
+      aria-label="Supprimer le tableau"
+      onmousedown={(e) => e.preventDefault()}
+      onclick={deleteTable}
+    >
+      <Trash2 size={14} strokeWidth={2} aria-hidden="true" />
+    </button>
+  </div>
+{/if}
+
 <style>
+  .note-table-menu {
+    position: fixed;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    gap: 0.125rem;
+    padding: 0.25rem;
+    background: var(--color-panel);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  }
+  .note-table-menu[data-placement='top']::after,
+  .note-table-menu[data-placement='bottom']::after {
+    content: '';
+    position: absolute;
+    left: 8px;
+    width: 8px;
+    height: 8px;
+    background: var(--color-panel);
+    border-right: 1px solid var(--color-border);
+    border-bottom: 1px solid var(--color-border);
+    transform: rotate(45deg);
+  }
+  .note-table-menu[data-placement='top']::after {
+    bottom: -5px;
+    border-top: none;
+    border-left: none;
+  }
+  .note-table-menu[data-placement='bottom']::after {
+    top: -5px;
+    border-bottom: none;
+    border-left: none;
+  }
+  .note-table-menu button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: var(--radius-sm);
+    color: var(--color-subtle);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    transition: background-color 120ms, color 120ms;
+  }
+  .note-table-menu button:hover {
+    background: var(--color-panel-muted);
+    color: var(--color-foreground);
+  }
+  .note-table-menu__sep {
+    width: 1px;
+    align-self: stretch;
+    background: var(--color-border);
+    margin: 0.25rem 0.125rem;
+  }
   :global(.note-editor-content) {
     min-height: 100%;
     width: 100%;
