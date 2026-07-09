@@ -155,6 +155,8 @@
   // Move dialog
   let moveDialogOpen = $state(false);
   let moveTarget = $state('');
+  let foldersLoaded = $state(false);
+  let foldersLoading = $state(false);
 
   // History panel
   let historyOpen = $state(false);
@@ -202,6 +204,32 @@
     selected !== null && snapshot(selected) !== lastSavedSnapshot
   );
   const pinnedSet = $derived(new Set(pinned.map((p) => p.relativePath)));
+  const isDev = Boolean((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV);
+  let refreshSeq = 0;
+  let perfSeq = 0;
+
+  function startPerf(label: string): string {
+    if (!isDev) return '';
+    const id = `${label}:${++perfSeq}`;
+    console.time(id);
+    return id;
+  }
+
+  function endPerf(id: string): void {
+    if (!id || !isDev) return;
+    console.timeEnd(id);
+  }
+
+  function scheduleIdle(task: () => void): void {
+    const win = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+    };
+    if (typeof win.requestIdleCallback === 'function') {
+      win.requestIdleCallback(task, { timeout: 1000 });
+      return;
+    }
+    window.setTimeout(task, 0);
+  }
 
   function snapshot(note: Note): string {
     return JSON.stringify({
@@ -271,39 +299,24 @@
   };
 
   async function refresh(): Promise<void> {
+    const seq = ++refreshSeq;
+    const criticalPerf = startPerf('refresh:critical');
     loading = true;
     error = '';
 
     try {
       const cfg = await safeCall('GetConfig', GetConfig(), { autoDailyNote: false });
-      const autoDaily = cfg?.autoDailyNote === true;
       const fq = buildQuery();
       const fetchAll = !activeFilter.trim() && activeChips.length === 0;
-      const [list, pin, fold, vp, tpl, tg, themes] = await Promise.all([
+      const [list, pin, vp] = await Promise.all([
         safeCall('ListNotes', fetchAll ? ListNotes() : ListNotesFiltered(fq, 1000), []),
         safeCall('ListPinned', ListPinned(), []),
-        safeCall('ListFolders', ListFolders(), []),
-        safeCall('VaultPath', VaultPath(), ''),
-        safeCall('ListTemplates', ListTemplates(), []),
-        safeCall('ListTags', ListTags(), []),
-        safeCall('ListThemes', ListThemes(), [])
+        safeCall('VaultPath', VaultPath(), '')
       ]);
+      if (seq !== refreshSeq) return;
       notes = (list ?? []) as NoteSummary[];
       pinned = (pin ?? []) as NoteSummary[];
-      folders = (fold ?? []) as FolderInfo[];
       vaultPath = vp ?? '';
-      templates = (tpl ?? []) as Template[];
-      tags = (tg ?? []) as TagCount[];
-      customThemes = (themes ?? []) as vault.Theme[];
-      // Si la config demande un thème custom qui n'est pas le défaut, on l'applique.
-      const cfgTheme = String((cfg as { theme?: string } | null)?.theme ?? 'dark');
-      if (cfgTheme && cfgTheme !== activeThemeId && cfgTheme !== 'dark' && cfgTheme !== 'light') {
-        await selectTheme(cfgTheme);
-      } else if (cfgTheme === 'light' || cfgTheme === 'dark') {
-        activeThemeId = cfgTheme;
-        theme = cfgTheme;
-        document.documentElement.dataset.theme = theme;
-      }
       if (fetchAll) {
         allEntries = ((list ?? []) as NoteSummary[]).map((n) => ({
           relativePath: n.relativePath,
@@ -311,8 +324,37 @@
           updatedAt: String(n.updatedAt ?? ''),
           score: 0
         }));
-      } else {
-        const all = await safeCall('ListNotes (allEntries)', ListNotes(), []);
+      }
+      // Si la config demande un thème custom qui n'est pas le défaut, on l'applique.
+      const cfgTheme = String((cfg as { theme?: string } | null)?.theme ?? 'dark');
+      if (cfgTheme === 'light' || cfgTheme === 'dark') {
+        applyThemeLocally(cfgTheme);
+      }
+      loading = false;
+      scheduleIdle(() => void refreshDeferred(seq, cfg, fetchAll));
+    } catch (err) {
+      error = String(err);
+      console.error('[refresh] global error:', err);
+    } finally {
+      if (seq === refreshSeq) loading = false;
+      endPerf(criticalPerf);
+    }
+  }
+
+  async function refreshDeferred(seq: number, cfg: unknown, fetchAll: boolean): Promise<void> {
+    const deferredPerf = startPerf('refresh:deferred');
+    try {
+      const [tpl, tg, themes, all] = await Promise.all([
+        safeCall('ListTemplates', ListTemplates(), []),
+        safeCall('ListTags', ListTags(), []),
+        safeCall('ListThemes', ListThemes(), []),
+        fetchAll ? Promise.resolve(null) : safeCall('ListNotes (allEntries)', ListNotes(), [])
+      ]);
+      if (seq !== refreshSeq) return;
+      templates = (tpl ?? []) as Template[];
+      tags = (tg ?? []) as TagCount[];
+      customThemes = (themes ?? []) as vault.Theme[];
+      if (!fetchAll) {
         allEntries = ((all ?? []) as NoteSummary[]).map((n) => ({
           relativePath: n.relativePath,
           title: n.title,
@@ -320,33 +362,51 @@
           score: 0
         }));
       }
-      if (autoDaily) {
+      const cfgTheme = String((cfg as { theme?: string } | null)?.theme ?? 'dark');
+      if (cfgTheme && cfgTheme !== 'dark' && cfgTheme !== 'light') {
+        applyThemeLocally(cfgTheme, customThemes);
+      }
+      if ((cfg as { autoDailyNote?: boolean } | null)?.autoDailyNote === true) {
         try {
           await safeCall('EnsureDailyNote', EnsureDailyNote(), '');
+          invalidateFolders();
         } catch {
           /* non bloquant */
         }
       }
-    } catch (err) {
-      error = String(err);
-      console.error('[refresh] global error:', err);
     } finally {
-      loading = false;
+      endPerf(deferredPerf);
     }
   }
 
-  async function refreshPinnedAndFolders(): Promise<void> {
+  async function refreshPinnedAndTags(): Promise<void> {
     try {
-      const [pin, fold, tg] = await Promise.all([
+      const [pin, tg] = await Promise.all([
         safeCall('ListPinned', ListPinned(), []),
-        safeCall('ListFolders', ListFolders(), []),
         safeCall('ListTags', ListTags(), [])
       ]);
       pinned = pin as NoteSummary[];
-      folders = fold as FolderInfo[];
       tags = tg as TagCount[];
     } catch {
       /* silencieux */
+    }
+  }
+
+  function invalidateFolders(): void {
+    foldersLoaded = false;
+  }
+
+  async function loadFolders(force = false): Promise<void> {
+    if (foldersLoading || (foldersLoaded && !force)) return;
+    const foldersPerf = startPerf('ListFolders:lazy');
+    foldersLoading = true;
+    try {
+      const fold = await safeCall('ListFolders', ListFolders(), []);
+      folders = (fold ?? []) as FolderInfo[];
+      foldersLoaded = true;
+    } finally {
+      foldersLoading = false;
+      endPerf(foldersPerf);
     }
   }
 
@@ -409,6 +469,7 @@
       saveState = 'clean';
       lastSavedAt = new Date();
       isCurrentPinned = false;
+      invalidateFolders();
       await refresh();
     } catch (err) {
       error = String(err);
@@ -425,6 +486,7 @@
       lastSavedSnapshot = snapshot(selected!);
       saveState = 'clean';
       isCurrentPinned = await IsNotePinned(note.relativePath);
+      invalidateFolders();
       await refresh();
     } catch (err) {
       error = String(err);
@@ -438,7 +500,7 @@
     try {
       await PinNote(path, newState);
       isCurrentPinned = newState;
-      await refreshPinnedAndFolders();
+      await refreshPinnedAndTags();
       showToast('info', newState ? 'Note épinglée.' : 'Note désépinglée.');
     } catch (err) {
       showToast('error', `Échec : ${err}`);
@@ -532,7 +594,7 @@
       } catch (err) {
         console.error('[recovery] clear failed:', err);
       }
-      await refreshPinnedAndFolders();
+      await refreshPinnedAndTags();
       return true;
     } catch (err) {
       saveState = 'error';
@@ -588,6 +650,7 @@
     if (!selected) return;
     moveTarget = selected.relativePath;
     moveDialogOpen = true;
+    void loadFolders();
   }
 
   async function moveTo(newFolder: string): Promise<void> {
@@ -600,6 +663,7 @@
     try {
       const moved = await MoveNote(selected.relativePath, target);
       showToast('info', `Note déplacée vers ${newFolder}`);
+      invalidateFolders();
       await refresh();
       // Sélectionne la note déplacée.
       await openNote(moved.relativePath);
@@ -614,6 +678,7 @@
     try {
       const dup = await DuplicateNote(selected.relativePath);
       showToast('info', 'Note dupliquée.');
+      invalidateFolders();
       await refresh();
       await openNote(dup.relativePath);
     } catch (err) {
@@ -715,11 +780,13 @@
     dragSource = null;
     if (!src || !src.startsWith('notes/')) return;
     const base = src.split('/').pop() ?? 'note.md';
-    const target = 'notes/' + folder + '/' + base;
+    const targetFolder = (folder.startsWith('notes/') ? folder : 'notes/' + folder).replace(/\/+$/, '');
+    const target = targetFolder + '/' + base;
     if (target === src) return;
     try {
       await MoveNote(src, target);
-      showToast('info', `Note déplacée vers ${folder}/`);
+      showToast('info', `Note déplacée vers ${targetFolder}/`);
+      invalidateFolders();
       await refresh();
     } catch (err) {
       showToast('error', `Échec : ${err}`);
@@ -756,6 +823,7 @@
         isCurrentPinned = false;
       }
       confirmingDelete = false;
+      invalidateFolders();
       await refresh();
       showToast('info', 'Note déplacée dans la corbeille.');
     } catch (err) {
@@ -770,9 +838,9 @@
     void selectTheme(next);
   }
 
-  async function selectTheme(id: string): Promise<void> {
+  function applyThemeLocally(id: string, availableThemes: vault.Theme[] = customThemes): void {
     activeThemeId = id;
-    const found = customThemes.find((t) => t.id === id);
+    const found = availableThemes.find((t) => t.id === id);
     if (id === 'dark' || id === 'light') {
       theme = id as 'dark' | 'light';
       document.documentElement.dataset.theme = theme;
@@ -783,6 +851,10 @@
     }
     applyThemeVars(found?.vars ?? null);
     window.localStorage.setItem('notevault-theme', id);
+  }
+
+  async function selectTheme(id: string): Promise<void> {
+    applyThemeLocally(id);
     try {
       const cfg = await GetConfig();
       if (cfg.theme !== id) {
@@ -1103,6 +1175,7 @@
     try {
       const note = await CreateNote(target, 'blank');
       showToast('info', `Note « ${target} » créée.`);
+      invalidateFolders();
       await refresh();
       await openNote(note.relativePath);
     } catch (err) {
@@ -1174,6 +1247,7 @@
       lastSavedAt = new Date();
       historyOpen = false;
       showToast('info', 'Version restaurée.');
+      invalidateFolders();
       await refresh();
     } catch (err) {
       showToast('error', `Échec : ${err}`);
@@ -1443,7 +1517,6 @@
             <SidebarTree
               notes={notes}
               pinned={pinned}
-              folders={folders}
               selectedPath={selectedPath}
               onOpen={openNote}
               onDragStart={onDragStart}
@@ -1457,7 +1530,7 @@
                 if (selected?.relativePath === p) {
                   void togglePinCurrent();
                 } else {
-                  void PinNote(p, !pinnedSet.has(p)).then(() => refreshPinnedAndFolders());
+                  void PinNote(p, !pinnedSet.has(p)).then(() => refreshPinnedAndTags());
                 }
               }}
             />
@@ -1635,16 +1708,18 @@
           </div>
 
           <div class="min-h-0 flex-1">
-            <NoteEditor
-              markdown={selected.content}
-              onChange={onEditorChange}
-              knownTitles={knownTitles}
-              onWikiNavigate={onWikiNavigate}
-              onWikiCreate={onWikiCreate}
-              onAssetUpload={onAssetUpload}
-              onAssetImportFromPath={onAssetImportFromPath}
-              assetURL={assetURL}
-            />
+            {#key selected.relativePath}
+              <NoteEditor
+                markdown={selected.content}
+                onChange={onEditorChange}
+                knownTitles={knownTitles}
+                onWikiNavigate={onWikiNavigate}
+                onWikiCreate={onWikiCreate}
+                onAssetUpload={onAssetUpload}
+                onAssetImportFromPath={onAssetImportFromPath}
+                assetURL={assetURL}
+              />
+            {/key}
           </div>
 
           <BacklinksPanel

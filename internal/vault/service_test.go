@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/votre-compte/notevault/internal/domain"
 )
 
 func setupVault(t *testing.T) (*Service, string) {
@@ -108,6 +110,114 @@ func TestServiceSearch(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Fatalf("Search crumble: %d résultats", len(got))
+	}
+}
+
+func TestServiceIndexNowReconcilesPartialIndex(t *testing.T) {
+	svc, dir := setupVault(t)
+	writeNoteFile(t, dir, domain.Note{
+		RelativePath: "notes/inbox/alpha.md",
+		Title:        "Alpha",
+		Content:      "alpha content",
+		CreatedAt:    time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC),
+		UpdatedAt:    time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC),
+	})
+	beta := domain.Note{
+		RelativePath: "notes/inbox/beta.md",
+		Title:        "Beta",
+		Content:      "beta content",
+		CreatedAt:    time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC),
+		UpdatedAt:    time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC),
+	}
+	writeNoteFile(t, dir, beta)
+
+	if err := svc.index.Upsert(beta); err != nil {
+		t.Fatalf("seed partial index: %v", err)
+	}
+	if err := svc.IndexNow(context.Background(), nil); err != nil {
+		t.Fatalf("IndexNow: %v", err)
+	}
+
+	notes, err := svc.ListNotes()
+	if err != nil {
+		t.Fatalf("ListNotes: %v", err)
+	}
+	got := summaryPaths(notes)
+	if !got["notes/inbox/alpha.md"] || !got["notes/inbox/beta.md"] {
+		t.Fatalf("index incomplet après réconciliation: %#v", got)
+	}
+	assertLastFullIndexAt(t, svc)
+}
+
+func TestServiceIndexNowRemovesStaleIndexRows(t *testing.T) {
+	svc, dir := setupVault(t)
+	stale := domain.Note{
+		RelativePath: "notes/inbox/stale.md",
+		Title:        "Stale",
+		Content:      "stale content",
+		CreatedAt:    time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC),
+		UpdatedAt:    time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC),
+	}
+	live := domain.Note{
+		RelativePath: "notes/inbox/live.md",
+		Title:        "Live",
+		Content:      "live content",
+		CreatedAt:    time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC),
+		UpdatedAt:    time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC),
+	}
+	writeNoteFile(t, dir, live)
+	if err := svc.index.Upsert(stale); err != nil {
+		t.Fatalf("seed stale index: %v", err)
+	}
+	if err := svc.index.Upsert(live); err != nil {
+		t.Fatalf("seed live index: %v", err)
+	}
+
+	if err := svc.IndexNow(context.Background(), nil); err != nil {
+		t.Fatalf("IndexNow: %v", err)
+	}
+
+	notes, err := svc.ListNotes()
+	if err != nil {
+		t.Fatalf("ListNotes: %v", err)
+	}
+	got := summaryPaths(notes)
+	if got["notes/inbox/stale.md"] {
+		t.Fatalf("entrée fantôme conservée après réconciliation: %#v", got)
+	}
+	if !got["notes/inbox/live.md"] {
+		t.Fatalf("entrée réelle absente après réconciliation: %#v", got)
+	}
+}
+
+func TestServiceIndexNowRefreshesModifiedFiles(t *testing.T) {
+	svc, dir := setupVault(t)
+	note := domain.Note{
+		RelativePath: "notes/inbox/edit.md",
+		Title:        "Before",
+		Content:      "old content",
+		CreatedAt:    time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC),
+		UpdatedAt:    time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC),
+	}
+	writeNoteFile(t, dir, note)
+	if err := svc.IndexNow(context.Background(), nil); err != nil {
+		t.Fatalf("IndexNow initial: %v", err)
+	}
+
+	note.Title = "After"
+	note.Content = "new content"
+	note.UpdatedAt = time.Date(2026, 1, 3, 10, 0, 0, 0, time.UTC)
+	writeNoteFile(t, dir, note)
+	if err := svc.IndexNow(context.Background(), nil); err != nil {
+		t.Fatalf("IndexNow refresh: %v", err)
+	}
+
+	got, err := svc.index.Get(note.RelativePath)
+	if err != nil {
+		t.Fatalf("index.Get: %v", err)
+	}
+	if got.Title != "After" || got.Content != "new content\n" {
+		t.Fatalf("note indexée non rafraîchie: title=%q content=%q", got.Title, got.Content)
 	}
 }
 
@@ -242,4 +352,38 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+func writeNoteFile(t *testing.T, root string, note domain.Note) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(note.RelativePath))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir note parent: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(serialize(note)), 0o644); err != nil {
+		t.Fatalf("write note file: %v", err)
+	}
+}
+
+func summaryPaths(notes []domain.NoteSummary) map[string]bool {
+	out := make(map[string]bool, len(notes))
+	for _, note := range notes {
+		out[note.RelativePath] = true
+	}
+	return out
+}
+
+func assertLastFullIndexAt(t *testing.T, svc *Service) {
+	t.Helper()
+	idx, ok := svc.index.(*sqliteIndex)
+	if !ok {
+		t.Fatalf("index type = %T, want *sqliteIndex", svc.index)
+	}
+	var value string
+	if err := idx.db.QueryRow(`SELECT value FROM meta WHERE key = ?`, indexMetaLastFullIndexAt).Scan(&value); err != nil {
+		t.Fatalf("last_full_index_at absent: %v", err)
+	}
+	if _, err := time.Parse(time.RFC3339, value); err != nil {
+		t.Fatalf("last_full_index_at invalide %q: %v", value, err)
+	}
 }

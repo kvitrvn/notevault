@@ -171,20 +171,14 @@ func (s *Service) Close() error {
 	return nil
 }
 
-// IndexNow déclenche une réindexation complète du dossier notes/.
-// Synchrone : utilisé au bootstrap si l'index est vide ou en cas de
-// récupération après crash. Ne fait rien si l'index contient déjà des
-// entrées (le watcher fsnotify prend le relais).
+// IndexNow réconcilie l'index avec le contenu réel du dossier notes/.
+// Synchrone : utilisé au bootstrap et en cas de récupération après crash.
+// L'opération ajoute les fichiers absents de l'index, met à jour les entrées
+// existantes, supprime les chemins dont le fichier a disparu et enregistre
+// meta.last_full_index_at quand le backend d'index le permet.
 func (s *Service) IndexNow(ctx context.Context, reporter progressReporter) error {
-	existing, err := s.index.List(ListFilter{Limit: 1})
-	if err != nil {
-		return err
-	}
-	if len(existing) > 0 {
-		if reporter != nil {
-			reporter.OnProgress("index", 0, 0)
-		}
-		return nil
+	if idx, ok := s.index.(reconcileIndex); ok {
+		return ReconcileExisting(ctx, s.root, idx, reporter)
 	}
 	return IndexExisting(ctx, s.root, s.index, reporter)
 }

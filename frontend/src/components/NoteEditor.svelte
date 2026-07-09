@@ -36,6 +36,8 @@
   export let onAssetUpload: (file: File) => Promise<string | null> = async () => null;
   export let onAssetImportFromPath: (absolutePath: string) => Promise<string | null> = async () => null;
   export let assetURL: (relPath: string) => Promise<string> = async (rel) => rel;
+  export let onReady: (state: { isEditable: boolean; isFocused: boolean }) => void = () => {};
+  export let onError: (error: unknown) => void = () => {};
 
   type BlockValue = 'paragraph' | 'heading-1' | 'heading-2' | 'heading-3';
 
@@ -43,6 +45,8 @@
   let editor: Editor | null = null;
   let lastMarkdown = markdown;
   let editorVersion = 0;
+  let editorReady = false;
+  let editorEditable = false;
 
   const lowlight = createLowlight(common);
 
@@ -53,6 +57,7 @@
 
   function bumpEditorState(): void {
     editorVersion += 1;
+    editorEditable = editor?.isEditable ?? false;
   }
 
   function iconButtonClass(active = false): string {
@@ -87,130 +92,139 @@
   }
 
   onMount(() => {
-    editor = new Editor({
-      element: host,
-      extensions: [
-        StarterKit.configure({
-          codeBlock: false
-        }),
-        CodeBlockLowlight.configure({ lowlight }),
-        Image.configure({
-          inline: false,
-          allowBase64: false
-        }),
-        TableKit,
-        TaskList,
-        TaskItem.configure({
-          nested: true
-        }),
-        Markdown,
-        WikiLink.configure({
-          onNavigate: (t) => onWikiNavigate(t),
-          onCreate: (t) => onWikiCreate(t),
-          resolve: () => (target: string) => knownTitles.has(target)
-        }),
-        WikiLinkSuggestion.configure({
-          knownTitles: () => [...knownTitles]
-        })
-      ],
-      content: markdown,
-      contentType: 'markdown',
-      editorProps: {
-        attributes: {
-          class: 'note-editor-content',
-          spellcheck: 'true'
-        },
-        handlePaste: (view, event) => {
-          const items = Array.from(event.clipboardData?.items ?? []);
-          const imageItem = items.find((it) => it.type.startsWith('image/'));
-          if (!imageItem) return false;
-          const file = imageItem.getAsFile();
-          if (!file) return false;
-          event.preventDefault();
-          void handleAssetInsert(file);
-          return true;
-        },
-        handleDrop: (view, event) => {
-          if (!event.dataTransfer) return false;
-
-          // 1) Fichier image (drop depuis filesystem ou explorateur).
-          //    On accepte aussi les fichiers sans MIME déclaré.
-          const IMAGE_EXTS = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
-          const file = Array.from(event.dataTransfer.files).find((f) =>
-            f.type.startsWith('image/') || IMAGE_EXTS.test(f.name)
-          );
-          if (file) {
+    try {
+      editor = new Editor({
+        element: host,
+        editable: true,
+        extensions: [
+          StarterKit.configure({
+            codeBlock: false
+          }),
+          CodeBlockLowlight.configure({ lowlight }),
+          Image.configure({
+            inline: false,
+            allowBase64: false
+          }),
+          TableKit,
+          TaskList,
+          TaskItem.configure({
+            nested: true
+          }),
+          Markdown,
+          WikiLink.configure({
+            onNavigate: (t) => onWikiNavigate(t),
+            onCreate: (t) => onWikiCreate(t),
+            resolve: () => (target: string) => knownTitles.has(target)
+          }),
+          WikiLinkSuggestion.configure({
+            knownTitles: () => [...knownTitles]
+          })
+        ],
+        content: markdown,
+        contentType: 'markdown',
+        editorProps: {
+          attributes: {
+            class: 'note-editor-content',
+            spellcheck: 'true'
+          },
+          handlePaste: (view, event) => {
+            const items = Array.from(event.clipboardData?.items ?? []);
+            const imageItem = items.find((it) => it.type.startsWith('image/'));
+            if (!imageItem) return false;
+            const file = imageItem.getAsFile();
+            if (!file) return false;
             event.preventDefault();
             void handleAssetInsert(file);
             return true;
-          }
+          },
+          handleDrop: (view, event) => {
+            if (!event.dataTransfer) return false;
 
-          // 2) URL d'image (drop depuis un onglet browser, signet, extension).
-          //    Si text/uri-list contient une URL, on l'utilise directement.
-          //    Sinon, on tente d'extraire un <img src="..."> du text/html.
-          const items = Array.from(event.dataTransfer.items ?? []);
-          const urlItem = items.find((it) => it.kind === 'string' && it.type === 'text/uri-list');
-          const htmlItem = items.find((it) => it.kind === 'string' && it.type === 'text/html');
-          if (urlItem || htmlItem) {
-            event.preventDefault();
-            urlItem?.getAsString((uri) => {
-              const trimmed = uri.trim();
-              if (trimmed) {
-                if (/^https?:\/\//i.test(trimmed)) {
-                  const alt = trimmed.split('/').pop()?.replace(/\?.*$/, '') || 'image';
-                  editor?.chain().focus().setImage({ src: trimmed, alt }).run();
-                } else if (/^file:\/\//i.test(trimmed)) {
-                  const absPath = decodeURIComponent(trimmed.replace(/^file:\/\//i, ''));
-                  void handleRemoteImage(absPath);
-                } else {
-                  void handleRemoteImage(trimmed);
-                }
-                return;
-              }
-              htmlItem?.getAsString((html) => {
-                const match = html.match(/<img[^>]+src=["']([^"']+)["']/i);
-                if (match && match[1]) {
-                  if (/^https?:\/\//i.test(match[1])) {
-                    const alt = match[1].split('/').pop()?.replace(/\?.*$/, '') || 'image';
-                    editor?.chain().focus().setImage({ src: match[1], alt }).run();
+            // 1) Fichier image (drop depuis filesystem ou explorateur).
+            //    On accepte aussi les fichiers sans MIME déclaré.
+            const IMAGE_EXTS = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
+            const file = Array.from(event.dataTransfer.files).find((f) =>
+              f.type.startsWith('image/') || IMAGE_EXTS.test(f.name)
+            );
+            if (file) {
+              event.preventDefault();
+              void handleAssetInsert(file);
+              return true;
+            }
+
+            // 2) URL d'image (drop depuis un onglet browser, signet, extension).
+            //    Si text/uri-list contient une URL, on l'utilise directement.
+            //    Sinon, on tente d'extraire un <img src="..."> du text/html.
+            const items = Array.from(event.dataTransfer.items ?? []);
+            const urlItem = items.find((it) => it.kind === 'string' && it.type === 'text/uri-list');
+            const htmlItem = items.find((it) => it.kind === 'string' && it.type === 'text/html');
+            if (urlItem || htmlItem) {
+              event.preventDefault();
+              urlItem?.getAsString((uri) => {
+                const trimmed = uri.trim();
+                if (trimmed) {
+                  if (/^https?:\/\//i.test(trimmed)) {
+                    const alt = trimmed.split('/').pop()?.replace(/\?.*$/, '') || 'image';
+                    editor?.chain().focus().setImage({ src: trimmed, alt }).run();
+                  } else if (/^file:\/\//i.test(trimmed)) {
+                    const absPath = decodeURIComponent(trimmed.replace(/^file:\/\//i, ''));
+                    void handleRemoteImage(absPath);
                   } else {
-                    void handleRemoteImage(match[1]);
+                    void handleRemoteImage(trimmed);
                   }
+                  return;
                 }
+                htmlItem?.getAsString((html) => {
+                  const match = html.match(/<img[^>]+src=["']([^"']+)["']/i);
+                  if (match && match[1]) {
+                    if (/^https?:\/\//i.test(match[1])) {
+                      const alt = match[1].split('/').pop()?.replace(/\?.*$/, '') || 'image';
+                      editor?.chain().focus().setImage({ src: match[1], alt }).run();
+                    } else {
+                      void handleRemoteImage(match[1]);
+                    }
+                  }
+                });
               });
-            });
-            return true;
-          }
+              return true;
+            }
 
-          // 3) Texte plain : on l'insère tel quel (wikilink, snippet, etc.).
-          const textItem = items.find((it) => it.kind === 'string' && it.type === 'text/plain');
-          if (textItem) {
-            event.preventDefault();
-            textItem.getAsString((text) => {
-              if (text) editor?.chain().focus().insertContent(text).run();
-            });
-            return true;
-          }
+            // 3) Texte plain : on l'insère tel quel (wikilink, snippet, etc.).
+            const textItem = items.find((it) => it.kind === 'string' && it.type === 'text/plain');
+            if (textItem) {
+              event.preventDefault();
+              textItem.getAsString((text) => {
+                if (text) editor?.chain().focus().insertContent(text).run();
+              });
+              return true;
+            }
 
-          return false;
+            return false;
+          }
+        },
+        onCreate: ({ editor: ed }) => {
+          // Au load, le doc contient déjà des `src` absolus (pré-transformés
+          // par App.svelte via assetURL). On installe juste le scrubber pour
+          // remettre les chemins relatifs au save.
+          installMarkdownScrubber(ed);
+          editorReady = true;
+          editorEditable = ed.isEditable;
+          onReady({ isEditable: ed.isEditable, isFocused: ed.isFocused });
+          bumpEditorState();
+        },
+        onSelectionUpdate: bumpEditorState,
+        onTransaction: bumpEditorState,
+        onUpdate: ({ editor: updatedEditor }) => {
+          const value = scrubAbsoluteAssetURLs(updatedEditor.getMarkdown());
+          lastMarkdown = value;
+          onChange(value);
+          bumpEditorState();
         }
-      },
-      onCreate: ({ editor: ed }) => {
-        // Au load, le doc contient déjà des `src` absolus (pré-transformés
-        // par App.svelte via assetURL). On installe juste le scrubber pour
-        // remettre les chemins relatifs au save.
-        installMarkdownScrubber(ed);
-        bumpEditorState();
-      },
-      onSelectionUpdate: bumpEditorState,
-      onTransaction: bumpEditorState,
-      onUpdate: ({ editor: updatedEditor }) => {
-        const value = scrubAbsoluteAssetURLs(updatedEditor.getMarkdown());
-        lastMarkdown = value;
-        onChange(value);
-        bumpEditorState();
-      }
-    });
+      });
+    } catch (err) {
+      onError(err);
+      console.error('[editor] init failed:', err);
+    }
   });
 
   // Remplace l'URL absolue `http://127.0.0.1:port/files/<rel>` par `<rel>`
@@ -538,6 +552,8 @@
     role="textbox"
     tabindex="-1"
     aria-label="Éditeur de note"
+    data-editor-ready={editorReady}
+    data-editor-editable={editorEditable}
     ondragenter={onHostDragEnter}
     ondragleave={onHostDragLeave}
     ondragover={onHostDragOver}

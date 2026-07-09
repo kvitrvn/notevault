@@ -20,6 +20,14 @@ type progressReporter interface {
 	OnProgress(stage string, current, total int)
 }
 
+type reconcileIndex interface {
+	Index
+	ListPaths() ([]string, error)
+	SetMeta(key, value string) error
+}
+
+const indexMetaLastFullIndexAt = "last_full_index_at"
+
 // Watcher observe les changements dans le coffre et synchronise l'index.
 type Watcher struct {
 	root    string
@@ -150,6 +158,53 @@ func isIgnored(path string) bool {
 // IndexExisting scanne le dossier notes/ et alimente l'index.
 // Émet la progression via reporter.
 func IndexExisting(ctx context.Context, root string, idx Index, reporter progressReporter) error {
+	files, err := markdownFiles(root)
+	if err != nil {
+		return err
+	}
+	return indexFiles(ctx, root, idx, files, reporter)
+}
+
+func ReconcileExisting(ctx context.Context, root string, idx reconcileIndex, reporter progressReporter) error {
+	files, err := markdownFiles(root)
+	if err != nil {
+		return err
+	}
+
+	diskPaths := make(map[string]struct{}, len(files))
+	for _, path := range files {
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		diskPaths[filepath.ToSlash(rel)] = struct{}{}
+	}
+
+	indexed, err := idx.ListPaths()
+	if err != nil {
+		return err
+	}
+	for _, rel := range indexed {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if _, ok := diskPaths[rel]; ok {
+			continue
+		}
+		if err := idx.Delete(rel); err != nil && !errors.Is(err, ErrNotFound) {
+			return fmt.Errorf("supprimer l'entrée d'index obsolète %s : %w", rel, err)
+		}
+	}
+
+	if err := indexFiles(ctx, root, idx, files, reporter); err != nil {
+		return err
+	}
+	return idx.SetMeta(indexMetaLastFullIndexAt, nowUTC().Format(time.RFC3339))
+}
+
+func markdownFiles(root string) ([]string, error) {
 	notesRoot := filepath.Join(root, "notes")
 	files := make([]string, 0)
 	err := filepath.WalkDir(notesRoot, func(path string, d fs.DirEntry, walkErr error) error {
@@ -169,8 +224,12 @@ func IndexExisting(ctx context.Context, root string, idx Index, reporter progres
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("lister les notes existantes : %w", err)
+		return nil, fmt.Errorf("lister les notes existantes : %w", err)
 	}
+	return files, nil
+}
+
+func indexFiles(ctx context.Context, root string, idx Index, files []string, reporter progressReporter) error {
 	total := len(files)
 	if reporter != nil {
 		reporter.OnProgress("index", 0, total)

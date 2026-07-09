@@ -12,12 +12,9 @@
     updatedAt: string;
   };
 
-  type FolderInfo = { path: string; name: string; count: number };
-
   type Props = {
     notes: NoteSummary[];
     pinned: NoteSummary[];
-    folders: FolderInfo[];
     selectedPath: string;
     onOpen: (relativePath: string) => void;
     onTogglePin?: (relativePath: string) => void;
@@ -33,7 +30,6 @@
   let {
     notes,
     pinned,
-    folders,
     selectedPath,
     onOpen,
     onTogglePin,
@@ -53,10 +49,18 @@
     notes: NoteSummary[];
   };
 
-  let openFolders = $state<Record<string, boolean>>({ inbox: true });
+  const isDev = Boolean((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV);
+  let buildSeq = 0;
+  let openFolders = $state<Record<string, boolean>>({});
+  const selectedAncestors = $derived(folderAncestors(selectedPath));
+  const pinnedPaths = $derived(new Set(pinned.map((p) => p.relativePath)));
 
   const tree = $derived.by(() => {
+    const label = isDev ? `SidebarTree:build:${++buildSeq}` : '';
+    if (label) console.time(label);
     const root: TreeNode = { name: '', path: '', children: [], notes: [] };
+    const childMaps = new WeakMap<TreeNode, Map<string, TreeNode>>();
+
     for (const note of notes) {
       const parts = note.relativePath.split('/');
       if (parts.length < 3) {
@@ -67,9 +71,15 @@
       let cumulative = 'notes';
       for (let i = 1; i < parts.length - 1; i++) {
         cumulative = cumulative + '/' + parts[i];
-        let child = cursor.children.find((c) => c.path === cumulative);
+        let map = childMaps.get(cursor);
+        if (!map) {
+          map = new Map<string, TreeNode>();
+          childMaps.set(cursor, map);
+        }
+        let child = map.get(cumulative);
         if (!child) {
           child = { name: parts[i], path: cumulative, children: [], notes: [] };
+          map.set(cumulative, child);
           cursor.children.push(child);
         }
         cursor = child;
@@ -77,6 +87,7 @@
       cursor.notes.push(note);
     }
     sortTree(root);
+    if (label) console.timeEnd(label);
     return root;
   });
 
@@ -87,19 +98,33 @@
   }
 
   function toggle(path: string): void {
-    openFolders = { ...openFolders, [path]: !openFolders[path] };
+    openFolders = { ...openFolders, [path]: !isOpen(path) };
   }
 
   function isOpen(path: string): boolean {
-    return openFolders[path] !== false;
+    if (selectedAncestors.has(path)) return true;
+    const userValue = openFolders[path];
+    if (userValue !== undefined) return userValue;
+    return path === 'notes/inbox';
   }
 
   function isPinned(relPath: string): boolean {
-    return pinned.some((p) => p.relativePath === relPath);
+    return pinnedPaths.has(relPath);
   }
 
   function isDragOver(path: string): boolean {
     return dragOverFolder === path;
+  }
+
+  function folderAncestors(path: string): Set<string> {
+    const ancestors = new Set<string>();
+    const parts = path.split('/');
+    let cumulative = 'notes';
+    for (let i = 1; i < parts.length - 1; i++) {
+      cumulative = cumulative + '/' + parts[i];
+      ancestors.add(cumulative);
+    }
+    return ancestors;
   }
 </script>
 

@@ -255,10 +255,42 @@ func (i *sqliteIndex) Delete(relativePath string) error {
 	if _, err := tx.Exec(`DELETE FROM tags WHERE relative_path = ?`, relativePath); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`DELETE FROM pinned WHERE relative_path = ?`, relativePath); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM notes WHERE rowid = ?`, rowID); err != nil {
 		return fmt.Errorf("supprimer la note : %w", err)
 	}
 	return tx.Commit()
+}
+
+func (i *sqliteIndex) ListPaths() ([]string, error) {
+	rows, err := i.db.Query(`SELECT relative_path FROM notes ORDER BY relative_path`)
+	if err != nil {
+		return nil, fmt.Errorf("lister les chemins indexés : %w", err)
+	}
+	defer rows.Close()
+
+	paths := make([]string, 0)
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		paths = append(paths, p)
+	}
+	return paths, rows.Err()
+}
+
+func (i *sqliteIndex) SetMeta(key, value string) error {
+	_, err := i.db.Exec(`
+        INSERT INTO meta(key, value) VALUES(?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `, key, value)
+	if err != nil {
+		return fmt.Errorf("écrire meta %s : %w", key, err)
+	}
+	return nil
 }
 
 func (i *sqliteIndex) Get(relativePath string) (domain.Note, error) {
@@ -462,8 +494,8 @@ func (i *sqliteIndex) ListFolders() ([]FolderInfo, error) {
 		}
 		counts[dir]++
 		// Conserve les dossiers parents aussi.
+		parent := dir
 		for {
-			parent := dir
 			if idx := strings.LastIndex(parent, "/"); idx >= 0 {
 				parent = parent[:idx]
 			} else {
