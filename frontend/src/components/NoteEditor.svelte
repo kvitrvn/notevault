@@ -30,6 +30,7 @@
 
   export let markdown = '';
   export let onChange: (value: string) => void = () => {};
+  export let onDirty: () => void = () => {};
   export let knownTitles: Set<string> = new Set();
   export let onWikiNavigate: (target: string) => void = () => {};
   export let onWikiCreate: (target: string) => void = () => {};
@@ -47,8 +48,12 @@
   let editorVersion = 0;
   let editorReady = false;
   let editorEditable = false;
+  let pendingChangeTimer: ReturnType<typeof setTimeout> | null = null;
+  let hasPendingChange = false;
 
   const lowlight = createLowlight(common);
+  const MARKDOWN_CHANGE_DEBOUNCE_MS = 200;
+  const isDev = Boolean((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV);
 
   const iconButtonBase =
     'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border text-subtle transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-40';
@@ -215,9 +220,8 @@
         onSelectionUpdate: bumpEditorState,
         onTransaction: bumpEditorState,
         onUpdate: ({ editor: updatedEditor }) => {
-          const value = scrubAbsoluteAssetURLs(updatedEditor.getMarkdown());
-          lastMarkdown = value;
-          onChange(value);
+          onDirty();
+          schedulePendingChange(updatedEditor);
           bumpEditorState();
         }
       });
@@ -238,6 +242,39 @@
   function installMarkdownScrubber(ed: Editor): void {
     const original = ed.getMarkdown.bind(ed);
     ed.getMarkdown = () => scrubAbsoluteAssetURLs(original());
+  }
+
+  function serializeMarkdown(ed: Editor): string {
+    if (isDev) console.time('NoteEditor:getMarkdown');
+    try {
+      return scrubAbsoluteAssetURLs(ed.getMarkdown());
+    } finally {
+      if (isDev) console.timeEnd('NoteEditor:getMarkdown');
+    }
+  }
+
+  function schedulePendingChange(ed: Editor): void {
+    hasPendingChange = true;
+    if (pendingChangeTimer) clearTimeout(pendingChangeTimer);
+    pendingChangeTimer = setTimeout(() => {
+      if (editor === ed) emitPendingChange();
+    }, MARKDOWN_CHANGE_DEBOUNCE_MS);
+  }
+
+  function emitPendingChange(): void {
+    if (!editor || !hasPendingChange) return;
+    if (pendingChangeTimer) {
+      clearTimeout(pendingChangeTimer);
+      pendingChangeTimer = null;
+    }
+    hasPendingChange = false;
+    const value = serializeMarkdown(editor);
+    lastMarkdown = value;
+    onChange(value);
+  }
+
+  export function flushPendingChange(): void {
+    emitPendingChange();
   }
 
   let isUploading = false;
@@ -354,6 +391,11 @@
   // contenu est remplacé depuis App.svelte. `emitUpdate: false` empêche une
   // boucle de mises à jour entre le parent et Tiptap.
   $: if (editor && markdown !== lastMarkdown) {
+    if (pendingChangeTimer) {
+      clearTimeout(pendingChangeTimer);
+      pendingChangeTimer = null;
+    }
+    hasPendingChange = false;
     editor.commands.setContent(markdown, {
       contentType: 'markdown',
       emitUpdate: false
@@ -455,6 +497,10 @@
   }
 
   onDestroy(() => {
+    if (pendingChangeTimer) {
+      clearTimeout(pendingChangeTimer);
+      pendingChangeTimer = null;
+    }
     editor?.destroy();
   });
 

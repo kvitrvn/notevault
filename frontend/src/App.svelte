@@ -43,6 +43,7 @@
   import StatsView from './components/StatsView.svelte';
   import ExportDialog from './components/ExportDialog.svelte';
   import RecoveryDialog from './components/RecoveryDialog.svelte';
+  import WindowTitleBar from './components/WindowTitleBar.svelte';
   import type { SaveState } from './components/SaveIndicator.svelte';
   import { domain, vault } from '../wailsjs/go/models';
 
@@ -197,6 +198,11 @@
   let filterBar = $state<FilterBar>();
   let sidebarEl: HTMLElement | undefined = $state();
   let titleEl: HTMLInputElement | undefined = $state();
+  let noteEditor:
+    | {
+        flushPendingChange: () => void;
+      }
+    | undefined = $state();
 
   const currentTitle = $derived(selected?.title?.trim() || 'Aucune note');
   const selectedPath = $derived(selected?.relativePath || '');
@@ -514,6 +520,12 @@
     scheduleAutoSave();
   }
 
+  function onEditorDirty(): void {
+    if (!selected) return;
+    saveState = 'dirty';
+    scheduleAutoSave({ compareSnapshot: false });
+  }
+
   function onTitleChange(): void {
     if (!selected) return;
     selected = selected;
@@ -527,10 +539,22 @@
     scheduleAutoSave();
   }
 
-  function scheduleAutoSave(): void {
+  function clearSaveTimers(): void {
+    if (autoSaveTimer) {
+      clearTimeout(autoSaveTimer);
+      autoSaveTimer = null;
+    }
+    if (dirtyBufferTimer) {
+      clearTimeout(dirtyBufferTimer);
+      dirtyBufferTimer = null;
+    }
+  }
+
+  function scheduleAutoSave(options: { compareSnapshot?: boolean } = {}): void {
     if (!selected) return;
-    if (snapshot(selected) === lastSavedSnapshot) {
+    if (options.compareSnapshot !== false && snapshot(selected) === lastSavedSnapshot) {
       saveState = 'clean';
+      clearSaveTimers();
       return;
     }
     saveState = 'dirty';
@@ -551,6 +575,7 @@
 
   async function persistDirtyBuffer(): Promise<void> {
     if (!selected) return;
+    noteEditor?.flushPendingChange();
     if (snapshot(selected) === lastSavedSnapshot) {
       return;
     }
@@ -569,30 +594,36 @@
   }
 
   async function flushSave(): Promise<boolean> {
-    if (autoSaveTimer) {
-      clearTimeout(autoSaveTimer);
-      autoSaveTimer = null;
-    }
-    if (dirtyBufferTimer) {
-      clearTimeout(dirtyBufferTimer);
-      dirtyBufferTimer = null;
-    }
+    noteEditor?.flushPendingChange();
+    clearSaveTimers();
     if (!selected) return true;
     if (snapshot(selected) === lastSavedSnapshot && saveState === 'clean') {
       return true;
     }
     saveState = 'saving';
     error = '';
+    const noteToSave = domain.Note.createFrom({ ...selected });
+    const saveSnapshot = snapshot(noteToSave);
+    const savePath = noteToSave.relativePath;
     try {
-      const saved = await SaveNote(selected);
-      selected = saved;
+      const saved = await SaveNote(noteToSave);
+      const currentSnapshot = selected?.relativePath === savePath ? snapshot(selected) : '';
+      const changedDuringSave = currentSnapshot !== '' && currentSnapshot !== saveSnapshot;
+
+      if (!changedDuringSave) {
+        selected = saved;
+      }
       lastSavedSnapshot = snapshot(saved);
-      saveState = 'clean';
+      saveState = changedDuringSave ? 'dirty' : 'clean';
       lastSavedAt = new Date();
-      try {
-        await ClearDirtyBuffer();
-      } catch (err) {
-        console.error('[recovery] clear failed:', err);
+      if (changedDuringSave) {
+        scheduleAutoSave({ compareSnapshot: false });
+      } else {
+        try {
+          await ClearDirtyBuffer();
+        } catch (err) {
+          console.error('[recovery] clear failed:', err);
+        }
       }
       await refreshPinnedAndTags();
       return true;
@@ -1137,6 +1168,10 @@
     }
   }
 
+  async function onWindowClose(): Promise<boolean> {
+    return flushSave();
+  }
+
   function pickEntry(entry: { relativePath: string }): void {
     quickSwitcherOpen = false;
     void openNote(entry.relativePath);
@@ -1351,13 +1386,16 @@
 
 <svelte:window onkeydown={onGlobalKeydown} onbeforeunload={onBeforeUnload} />
 
-<div class="grid h-dvh min-h-0 grid-rows-[14rem_minmax(0,1fr)] bg-background text-foreground lg:grid-cols-[20rem_minmax(0,1fr)] lg:grid-rows-none">
-  <aside
-    bind:this={sidebarEl}
-    class="flex min-h-0 flex-col border-b border-border bg-sidebar lg:border-b-0 lg:border-r"
-    onfocusin={onSidebarFocus}
-    aria-label="Navigation des notes"
-  >
+<div class="grid h-dvh min-h-0 grid-rows-[2.25rem_minmax(0,1fr)] bg-background text-foreground">
+  <WindowTitleBar onClose={onWindowClose} />
+
+  <div class="grid h-full min-h-0 grid-rows-[14rem_minmax(0,1fr)] lg:grid-cols-[20rem_minmax(0,1fr)] lg:grid-rows-none">
+    <aside
+      bind:this={sidebarEl}
+      class="flex min-h-0 flex-col border-b border-border bg-sidebar lg:border-b-0 lg:border-r"
+      onfocusin={onSidebarFocus}
+      aria-label="Navigation des notes"
+    >
     <div class="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
       <div class="min-w-0 flex-1">
         <button
@@ -1710,8 +1748,10 @@
           <div class="min-h-0 flex-1">
             {#key selected.relativePath}
               <NoteEditor
+                bind:this={noteEditor}
                 markdown={selected.content}
                 onChange={onEditorChange}
+                onDirty={onEditorDirty}
                 knownTitles={knownTitles}
                 onWikiNavigate={onWikiNavigate}
                 onWikiCreate={onWikiCreate}
@@ -1801,7 +1841,8 @@
         </div>
       {/if}
     </section>
-  </main>
+    </main>
+  </div>
 </div>
 
 <QuickSwitcher
