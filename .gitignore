@@ -6,6 +6,7 @@ frontend/wailsjs/
 
 # Go / Wails
 build/bin/
+tools/*/bin/
 *.exe
 *.dll
 *.dylib

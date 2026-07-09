@@ -6,7 +6,6 @@ Application de prise de notes locale-first : les notes sont des fichiers Markdow
 
 - Go 1.23+
 - Node.js LTS + npm
-- Wails v2 : `go install github.com/wailsapp/wails/v2/cmd/wails@latest`
 
 ## Démarrer
 
@@ -15,8 +14,12 @@ git clone <votre-depot> notevault
 cd notevault
 go mod tidy
 cd frontend && npm install && cd ..
-wails dev
+make dev
 ```
+
+`make dev` installe automatiquement le CLI Wails dans
+`tools/wails/bin/wails` si nécessaire, avec la version attendue par le
+projet, puis lance `wails dev`.
 
 Au premier démarrage, l'application crée le coffre personnel :
 
