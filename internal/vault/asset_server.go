@@ -24,15 +24,15 @@ import (
 // Toutes les requêtes sont confinées à `<root>/assets/` avec une whitelist
 // d'extensions (réutilise sanitizeExt) et un check anti-traversal.
 type AssetServer struct {
-	root     string
-	listener net.Listener
-	server   *http.Server
-	mu       sync.Mutex
-	running  bool
+	assetsDir string
+	listener  net.Listener
+	server    *http.Server
+	mu        sync.Mutex
+	running   bool
 }
 
 func NewAssetServer(root string) *AssetServer {
-	return &AssetServer{root: root}
+	return &AssetServer{assetsDir: filepath.Join(root, "assets")}
 }
 
 // Start démarre le serveur HTTP sur 127.0.0.1:<port libre>. Retourne le port.
@@ -91,33 +91,39 @@ func (s *AssetServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rel := strings.TrimPrefix(r.URL.Path, "/files/")
-	rel = strings.TrimPrefix(rel, "/")
-	if rel == "" {
+	assetPath, err := normalizeAssetPath(rel)
+	if err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if assetPath == "" {
 		http.NotFound(w, r)
 		return
 	}
 
 	// Whitelist d'extension avant tout (sécurité : bloque .exe, .html, etc.).
-	if sanitizeExt(rel) == "" {
+	if sanitizeExt(assetPath) == "" {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
-	// Résolution + check anti-traversal.
-	abs := filepath.Clean(filepath.Join(s.root, rel))
-	relCheck, err := filepath.Rel(filepath.Clean(s.root), abs)
-	if err != nil || strings.HasPrefix(relCheck, "..") {
-		http.Error(w, "forbidden", http.StatusForbidden)
+	// os.Root confine aussi l'ouverture face aux liens symboliques qui
+	// pointeraient hors de <vault>/assets.
+	root, err := os.OpenRoot(s.assetsDir)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-
-	file, err := os.Open(abs)
+	defer root.Close()
+	file, err := root.Open(assetPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.NotFound(w, r)
 			return
 		}
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		// os.Root renvoie notamment une erreur ici lorsqu'un symlink tente de
+		// sortir de la racine autorisée. Ne pas révéler plus de détails.
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	defer file.Close()
@@ -132,7 +138,7 @@ func (s *AssetServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ext := filepath.Ext(rel)
+	ext := filepath.Ext(assetPath)
 	mimeType := mime.TypeByExtension(ext)
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
@@ -140,5 +146,5 @@ func (s *AssetServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", mimeType)
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	http.ServeContent(w, r, rel, stat.ModTime(), file)
+	http.ServeContent(w, r, filepath.ToSlash(assetPath), stat.ModTime(), file)
 }

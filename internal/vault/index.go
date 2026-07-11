@@ -4,7 +4,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/votre-compte/notevault/internal/domain"
+	"github.com/kvitrvn/notevault/internal/domain"
 )
 
 // SearchOpts paramètre une recherche full-text.

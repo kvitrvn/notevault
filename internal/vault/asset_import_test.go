@@ -3,6 +3,7 @@ package vault
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -77,5 +78,64 @@ func TestImportAssetFromFilePathDir(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := svc.ImportAssetFromFilePath(dir); err == nil {
 		t.Fatalf("attendu erreur pour un dossier")
+	}
+}
+
+func TestServiceResolveAsset(t *testing.T) {
+	service, _ := setupVault(t)
+	rel, err := service.SaveAsset([]byte("image"), "photo.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	abs, err := service.ResolveAsset(rel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(abs) {
+		t.Fatalf("ResolveAsset() = %q, want absolute path", abs)
+	}
+	if _, err := os.Stat(abs); err != nil {
+		t.Fatalf("resolved asset: %v", err)
+	}
+}
+
+func TestServiceResolveAssetRejectsInvalidPaths(t *testing.T) {
+	service, _ := setupVault(t)
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "traversal", path: "assets/../../outside.png"},
+		{name: "note", path: "notes/private.png"},
+		{name: "absolute", path: filepath.Join(string(filepath.Separator), "tmp", "outside.png")},
+		{name: "unsupported extension", path: "assets/file.exe"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := service.ResolveAsset(tt.path); err == nil {
+				t.Fatalf("ResolveAsset(%q) succeeded, want error", tt.path)
+			}
+		})
+	}
+}
+
+func TestServiceResolveAssetRejectsSymlinkEscape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("la création de symlinks nécessite souvent des privilèges sous Windows")
+	}
+	service, _ := setupVault(t)
+	outside := filepath.Join(t.TempDir(), "outside.png")
+	if err := os.WriteFile(outside, []byte("private"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(service.Root(), "assets", "escape.png")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.ResolveAsset("assets/escape.png"); err == nil {
+		t.Fatal("ResolveAsset() followed a symlink outside assets")
 	}
 }

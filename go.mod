@@ -1,4 +1,4 @@
-module github.com/votre-compte/notevault
+module github.com/kvitrvn/notevault
 
 go 1.25.0
 

@@ -23,7 +23,7 @@
   let { open, initialTheme, onDone }: Props = $props();
 
   let step = $state(0);
-  let theme = $state<ThemeChoice>(initialTheme);
+  let theme = $state<ThemeChoice>('dark');
   let busy = $state(false);
 
   const totalSteps = 3;

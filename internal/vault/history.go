@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/votre-compte/notevault/internal/domain"
+	"github.com/kvitrvn/notevault/internal/domain"
 )
 
 // HistoryEntry représente une version archivée d'une note.

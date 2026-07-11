@@ -3,21 +3,21 @@ package vault
 import (
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
-func newAssetServerTB(t *testing.T) (*AssetServer, string, func()) {
+func newAssetServerTB(t *testing.T) (*AssetServer, string) {
 	t.Helper()
 	root := t.TempDir()
-	srv := NewAssetServer(root)
-	if _, err := srv.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
+	if err := os.MkdirAll(filepath.Join(root, "assets"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	cleanup := func() { _ = srv.Stop() }
-	return srv, root, cleanup
+	return NewAssetServer(root), root
 }
 
 func writeAsset(t *testing.T, root, rel string, data []byte) {
@@ -31,147 +31,158 @@ func writeAsset(t *testing.T, root, rel string, data []byte) {
 	}
 }
 
+func assetRequest(t *testing.T, srv *AssetServer, method, target string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, target, nil)
+	response := httptest.NewRecorder()
+	srv.handleFiles(response, req)
+	return response
+}
+
 func TestAssetServerServesAllowedFile(t *testing.T) {
-	srv, root, stop := newAssetServerTB(t)
-	defer stop()
+	srv, root := newAssetServerTB(t)
 	payload := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
 	writeAsset(t, root, "assets/2026/07/uuid.png", payload)
 
-	url := "http://127.0.0.1:" + portToString(srv.Port()) + "/files/assets/2026/07/uuid.png"
-	resp, err := http.Get(url)
+	response := assetRequest(t, srv, http.MethodGet, "/files/assets/2026/07/uuid.png")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status: %d", response.Code)
+	}
+	if contentType := response.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "image/png") {
+		t.Fatalf("content-type: %q", contentType)
+	}
+	if response.Header().Get("Cache-Control") == "" {
+		t.Fatal("cache-control vide")
+	}
+	got, err := io.ReadAll(response.Result().Body)
 	if err != nil {
-		t.Fatalf("GET: %v", err)
+		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("status: %d", resp.StatusCode)
-	}
-	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "image/png") {
-		t.Fatalf("content-type: %q", ct)
-	}
-	if cc := resp.Header.Get("Cache-Control"); cc == "" {
-		t.Fatalf("cache-control vide")
-	}
-	got, _ := io.ReadAll(resp.Body)
 	if string(got) != string(payload) {
-		t.Fatalf("payload mismatch")
+		t.Fatal("payload mismatch")
 	}
 }
 
 func TestAssetServerBlocksTraversal(t *testing.T) {
-	srv, _, stop := newAssetServerTB(t)
-	defer stop()
-
-	cases := []string{
-		"/files/../etc/passwd",
-		"/files/assets/../../etc/passwd",
-		"/files/assets/../foo.png",
+	srv, _ := newAssetServerTB(t)
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "parent before assets", path: "/files/../etc/passwd"},
+		{name: "escape assets", path: "/files/assets/../../etc/passwd"},
+		{name: "leave assets", path: "/files/assets/../foo.png"},
 	}
-	for _, p := range cases {
-		t.Run(strings.TrimPrefix(p, "/files/"), func(t *testing.T) {
-			resp, err := http.Get("http://127.0.0.1:" + portToString(srv.Port()) + p)
-			if err != nil {
-				t.Fatalf("GET %s: %v", p, err)
-			}
-			resp.Body.Close()
-			if resp.StatusCode != 403 && resp.StatusCode != 404 {
-				t.Fatalf("%s : status %d attendu 403/404", p, resp.StatusCode)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := assetRequest(t, srv, http.MethodGet, tt.path)
+			if response.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
 			}
 		})
 	}
 }
 
+func TestAssetServerBlocksFilesOutsideAssets(t *testing.T) {
+	srv, root := newAssetServerTB(t)
+	writeAsset(t, root, "notes/secret.png", []byte("not an asset"))
+
+	response := assetRequest(t, srv, http.MethodGet, "/files/notes/secret.png")
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
+	}
+}
+
+func TestAssetServerBlocksSymlinkEscape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("la création de symlinks nécessite souvent des privilèges sous Windows")
+	}
+	srv, root := newAssetServerTB(t)
+	outside := filepath.Join(t.TempDir(), "outside.png")
+	if err := os.WriteFile(outside, []byte("private"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	assetsDir := filepath.Join(root, "assets")
+	if err := os.MkdirAll(assetsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(assetsDir, "escape.png")); err != nil {
+		t.Fatal(err)
+	}
+
+	response := assetRequest(t, srv, http.MethodGet, "/files/assets/escape.png")
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
+	}
+}
+
 func TestAssetServerBlocksBadExtension(t *testing.T) {
-	srv, root, stop := newAssetServerTB(t)
-	defer stop()
+	srv, root := newAssetServerTB(t)
 	writeAsset(t, root, "assets/2026/07/payload.exe", []byte("MZ"))
 
-	url := "http://127.0.0.1:" + portToString(srv.Port()) + "/files/assets/2026/07/payload.exe"
-	resp, err := http.Get(url)
-	if err != nil {
-		t.Fatalf("GET: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 403 {
-		t.Fatalf("status %d, attendu 403", resp.StatusCode)
+	response := assetRequest(t, srv, http.MethodGet, "/files/assets/2026/07/payload.exe")
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusForbidden)
 	}
 }
 
 func TestAssetServerNotFound(t *testing.T) {
-	srv, _, stop := newAssetServerTB(t)
-	defer stop()
-	url := "http://127.0.0.1:" + portToString(srv.Port()) + "/files/assets/2026/07/missing.png"
-	resp, err := http.Get(url)
-	if err != nil {
-		t.Fatalf("GET: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 404 {
-		t.Fatalf("status %d, attendu 404", resp.StatusCode)
+	srv, _ := newAssetServerTB(t)
+	response := assetRequest(t, srv, http.MethodGet, "/files/assets/2026/07/missing.png")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusNotFound)
 	}
 }
 
 func TestAssetServerRootListingIsForbidden(t *testing.T) {
-	srv, root, stop := newAssetServerTB(t)
-	defer stop()
+	srv, root := newAssetServerTB(t)
 	writeAsset(t, root, "assets/dir.png", []byte("data"))
 
-	// /files/ (sans chemin) -> 404 ou 403, jamais la liste.
-	resp, err := http.Get("http://127.0.0.1:" + portToString(srv.Port()) + "/files/")
-	if err != nil {
-		t.Fatalf("GET: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode == 200 {
-		t.Fatalf("listing racine不应该获得 200")
+	response := assetRequest(t, srv, http.MethodGet, "/files/")
+	if response.Code == http.StatusOK {
+		t.Fatal("la racine ne doit jamais être listée")
 	}
 }
 
 func TestAssetServerMIMEPerExtension(t *testing.T) {
-	srv, root, stop := newAssetServerTB(t)
-	defer stop()
-	cases := map[string]string{
-		"assets/a.svg":  "image/svg",
-		"assets/b.jpg":  "image/jpeg",
-		"assets/c.webp": "image/webp",
-		"assets/d.md":   "text/",
+	srv, root := newAssetServerTB(t)
+	tests := []struct {
+		path       string
+		wantPrefix string
+	}{
+		{path: "assets/a.svg", wantPrefix: "image/svg"},
+		{path: "assets/b.jpg", wantPrefix: "image/jpeg"},
+		{path: "assets/c.webp", wantPrefix: "image/webp"},
+		{path: "assets/d.md", wantPrefix: "text/"},
 	}
-	for rel, prefix := range cases {
-		writeAsset(t, root, rel, []byte("data"))
-		url := "http://127.0.0.1:" + portToString(srv.Port()) + "/files/" + rel
-		resp, err := http.Get(url)
-		if err != nil {
-			t.Fatalf("GET %s: %v", rel, err)
-		}
-		ct := resp.Header.Get("Content-Type")
-		resp.Body.Close()
-		if !strings.HasPrefix(ct, prefix) {
-			t.Errorf("%s: content-type %q ne commence pas par %q", rel, ct, prefix)
-		}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			writeAsset(t, root, tt.path, []byte("data"))
+			response := assetRequest(t, srv, http.MethodGet, "/files/"+tt.path)
+			contentType := response.Header().Get("Content-Type")
+			if !strings.HasPrefix(contentType, tt.wantPrefix) {
+				t.Fatalf("content-type %q does not start with %q", contentType, tt.wantPrefix)
+			}
+		})
+	}
+}
+
+func TestAssetServerRejectsUnsupportedMethods(t *testing.T) {
+	srv, _ := newAssetServerTB(t)
+	response := assetRequest(t, srv, http.MethodPost, "/files/assets/a.png")
+	if response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusMethodNotAllowed)
 	}
 }
 
 func TestAssetServerIdempotentStop(t *testing.T) {
-	srv, _, _ := newAssetServerTB(t)
+	srv, _ := newAssetServerTB(t)
 	if err := srv.Stop(); err != nil {
 		t.Fatalf("Stop #1: %v", err)
 	}
 	if err := srv.Stop(); err != nil {
 		t.Fatalf("Stop #2: %v", err)
 	}
-}
-
-// portToString évite strconv pour alléger les imports.
-func portToString(p int) string {
-	if p == 0 {
-		return "0"
-	}
-	var b [20]byte
-	i := len(b)
-	for p > 0 {
-		i--
-		b[i] = byte('0' + p%10)
-		p /= 10
-	}
-	return string(b[i:])
 }

@@ -6,8 +6,8 @@
   "frontend:dev:watcher": "../scripts/with-patch-dev.sh",
   "frontend:dev:serverUrl": "auto",
   "author": {
-    "name": "Votre nom",
-    "email": "vous@example.com"
+    "name": "Kvitrvn",
+    "email": ""
   },
   "info": {
     "companyName": "",

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/votre-compte/notevault/internal/domain"
+	"github.com/kvitrvn/notevault/internal/domain"
 )
 
 func serialize(note domain.Note) string {

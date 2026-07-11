@@ -12,7 +12,7 @@
 
   let { open, initialPath, onPick, onClose }: Props = $props();
 
-  let path = $state(initialPath);
+  let path = $state('');
   let importDefault = $state(false);
 
   $effect(() => {

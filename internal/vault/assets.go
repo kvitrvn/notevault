@@ -3,12 +3,69 @@ package vault
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+// normalizeAssetPath valide un chemin issu du frontend et retourne sa partie
+// relative à <vault>/assets. La validation est volontairement séparée de
+// l'ouverture avec os.Root : la première fournit des erreurs compréhensibles,
+// la seconde protège aussi contre les liens symboliques qui sortent du coffre.
+func normalizeAssetPath(relativePath string) (string, error) {
+	path := filepath.Clean(filepath.FromSlash(strings.TrimSpace(relativePath)))
+	if path == "." || !filepath.IsLocal(path) {
+		return "", errors.New("chemin d'asset invalide")
+	}
+
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	if len(parts) < 2 || parts[0] != "assets" {
+		return "", errors.New("un asset doit être rangé sous assets/")
+	}
+
+	assetPath := filepath.Join(parts[1:]...)
+	if assetPath == "." || !filepath.IsLocal(assetPath) {
+		return "", errors.New("chemin d'asset invalide")
+	}
+	return assetPath, nil
+}
+
+// ResolveAsset vérifie qu'un asset autorisé existe dans le coffre et retourne
+// son chemin absolu. os.Root empêche une traversée via un lien symbolique.
+func (s *Service) ResolveAsset(relativePath string) (string, error) {
+	assetPath, err := normalizeAssetPath(relativePath)
+	if err != nil {
+		return "", err
+	}
+	if sanitizeExt(assetPath) == "" {
+		return "", errors.New("extension d'asset non supportée")
+	}
+
+	assetsDir := filepath.Join(s.root, "assets")
+	root, err := os.OpenRoot(assetsDir)
+	if err != nil {
+		return "", fmt.Errorf("ouvrir le dossier assets : %w", err)
+	}
+	defer root.Close()
+
+	file, err := root.Open(assetPath)
+	if err != nil {
+		return "", fmt.Errorf("ouvrir l'asset : %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", fmt.Errorf("inspecter l'asset : %w", err)
+	}
+	if info.IsDir() {
+		return "", errors.New("le chemin d'asset pointe sur un dossier")
+	}
+
+	return filepath.Join(assetsDir, assetPath), nil
+}
 
 // SaveAsset stocke des données binaires (image, pièce jointe) dans
 // <root>/assets/YYYY/MM/<uuid>.<ext>. Retourne le chemin relatif

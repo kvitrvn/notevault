@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/votre-compte/notevault/internal/domain"
+	"github.com/kvitrvn/notevault/internal/domain"
 )
 
 // progressReporter reçoit les étapes d'indexation initiale.

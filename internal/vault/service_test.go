@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/votre-compte/notevault/internal/domain"
+	"github.com/kvitrvn/notevault/internal/domain"
 )
 
 func setupVault(t *testing.T) (*Service, string) {

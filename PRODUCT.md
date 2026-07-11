@@ -31,6 +31,7 @@ remote services.
 - User note templates.
 - Wiki links, backlinks, and quick navigation.
 - Import, storage, and display of local assets.
+- Remote images preserved as Markdown but blocked from automatic loading.
 - Version history, diff, and restore.
 - Built-in themes and user themes.
 - ZIP export, local stats, onboarding, and unsaved buffer recovery.

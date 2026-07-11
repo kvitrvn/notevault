@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/votre-compte/notevault/internal/config"
-	"github.com/votre-compte/notevault/internal/domain"
+	"github.com/kvitrvn/notevault/internal/config"
+	"github.com/kvitrvn/notevault/internal/domain"
 )
 
 // Service est la façade métier du coffre. Elle combine un index SQLite

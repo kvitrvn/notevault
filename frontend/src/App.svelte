@@ -45,6 +45,7 @@
   import RecoveryDialog from './components/RecoveryDialog.svelte';
   import WindowTitleBar from './components/WindowTitleBar.svelte';
   import type { SaveState } from './components/SaveIndicator.svelte';
+  import { isLocalAssetPath, precomputeAssetURLs as resolveAssetURLs } from './lib/assets';
   import { domain, vault } from '../wailsjs/go/models';
 
   import {
@@ -437,26 +438,10 @@
     }
   }
 
-  // Transforme tous les `![alt](relPath)` du markdown en URLs absolues.
-  // Les URLs absolues (http://, https://, data:) sont laissées intactes.
+  // Transforme les assets du coffre en URLs loopback pour Tiptap. La politique
+  // de chemin et le traitement Markdown vivent dans un utilitaire testé.
   async function precomputeAssetURLs(md: string): Promise<string> {
-    const re = /!\[([^\]]*)\]\(([^)]+)\)/g;
-    const matches: { full: string; alt: string; src: string }[] = [];
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(md)) !== null) {
-      matches.push({ full: m[0], alt: m[1], src: m[2] });
-    }
-    if (matches.length === 0) return md;
-    let out = md;
-    for (const match of matches) {
-      const src = match.src.trim();
-      if (/^(https?:|data:|file:)/.test(src)) continue;
-      const absolute = await assetURL(src);
-      if (absolute !== src) {
-        out = out.replace(match.full, `![${match.alt}](${absolute})`);
-      }
-    }
-    return out;
+    return resolveAssetURLs(md, assetURL);
   }
 
   function openTemplatePicker(): void {
@@ -1251,8 +1236,7 @@
   // calculées pour éviter un round-trip Wails à chaque render d'image.
   const assetURLCache = new Map<string, string>();
   async function assetURL(relPath: string): Promise<string> {
-    if (!relPath) return relPath;
-    if (/^(https?:|data:|file:)/.test(relPath)) return relPath;
+    if (!isLocalAssetPath(relPath)) return relPath;
     const cached = assetURLCache.get(relPath);
     if (cached) return cached;
     try {
@@ -1386,7 +1370,7 @@
 
 <svelte:window onkeydown={onGlobalKeydown} onbeforeunload={onBeforeUnload} />
 
-<div class="grid h-dvh min-h-0 grid-rows-[2.25rem_minmax(0,1fr)] bg-background text-foreground">
+<div class="grid h-full min-h-0 grid-rows-[2.25rem_minmax(0,1fr)] bg-background text-foreground">
   <WindowTitleBar onClose={onWindowClose} />
 
   <div class="grid h-full min-h-0 grid-rows-[14rem_minmax(0,1fr)] lg:grid-cols-[20rem_minmax(0,1fr)] lg:grid-rows-none">
@@ -1499,7 +1483,7 @@
 
       {#if loading}
         <div class="flex flex-col gap-2" aria-busy="true">
-          {#each [0, 1, 2, 3, 4] as _ (Math.random())}
+          {#each [0, 1, 2, 3, 4] as row (row)}
             <div class="h-12 animate-pulse rounded-lg border border-border bg-panel-muted"></div>
           {/each}
         </div>

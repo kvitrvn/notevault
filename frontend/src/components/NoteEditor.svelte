@@ -24,7 +24,7 @@
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import Undo2 from '@lucide/svelte/icons/undo-2';
   import { onDestroy, onMount } from 'svelte';
-  import { Editor } from '@tiptap/core';
+  import { Editor, mergeAttributes } from '@tiptap/core';
   import StarterKit from '@tiptap/starter-kit';
   import Image from '@tiptap/extension-image';
   import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight';
@@ -34,6 +34,12 @@
   import { TaskItem, TaskList } from '@tiptap/extension-list';
   import { WikiLink, refreshWikiLinkDecorations } from '../lib/wiki-link';
   import { WikiLinkSuggestion } from '../lib/wiki-link-suggestion';
+  import {
+    isRemoteImageSource,
+    isSafeEditorImageSource,
+    scrubAbsoluteAssetURLs,
+    withTimeout
+  } from '../lib/assets';
 
   export let markdown = '';
   export let onChange: (value: string) => void = () => {};
@@ -84,6 +90,24 @@
   const lowlight = createLowlight(common);
   const MARKDOWN_CHANGE_DEBOUNCE_MS = 200;
   const isDev = Boolean((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV);
+
+  // Le Markdown conserve la source distante, mais aucun élément <img> n'est
+  // créé pour elle : ouvrir une note ne doit pas contacter un serveur tiers.
+  const VaultImage = Image.extend({
+    renderHTML({ HTMLAttributes }) {
+      if (!isSafeEditorImageSource(HTMLAttributes.src)) {
+        return [
+          'span',
+          mergeAttributes(this.options.HTMLAttributes, {
+            class: 'note-editor-blocked-image',
+            'data-blocked-image': 'true'
+          }),
+          'Image distante bloquée'
+        ];
+      }
+      return ['img', mergeAttributes(this.options.HTMLAttributes, HTMLAttributes)];
+    }
+  });
 
   const iconButtonBase =
     'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border text-subtle transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-40';
@@ -165,7 +189,7 @@ function notifyEditorChange(): void {
             codeBlock: false
           }),
           CodeBlockLowlight.configure({ lowlight }),
-          Image.configure({
+          VaultImage.configure({
             inline: false,
             allowBase64: false
           }),
@@ -227,26 +251,13 @@ function notifyEditorChange(): void {
               urlItem?.getAsString((uri) => {
                 const trimmed = uri.trim();
                 if (trimmed) {
-                  if (/^https?:\/\//i.test(trimmed)) {
-                    const alt = trimmed.split('/').pop()?.replace(/\?.*$/, '') || 'image';
-                    editor?.chain().focus().setImage({ src: trimmed, alt }).run();
-                  } else if (/^file:\/\//i.test(trimmed)) {
-                    const absPath = decodeURIComponent(trimmed.replace(/^file:\/\//i, ''));
-                    void handleRemoteImage(absPath);
-                  } else {
-                    void handleRemoteImage(trimmed);
-                  }
+                  void handleRemoteImage(trimmed);
                   return;
                 }
                 htmlItem?.getAsString((html) => {
                   const match = html.match(/<img[^>]+src=["']([^"']+)["']/i);
                   if (match && match[1]) {
-                    if (/^https?:\/\//i.test(match[1])) {
-                      const alt = match[1].split('/').pop()?.replace(/\?.*$/, '') || 'image';
-                      editor?.chain().focus().setImage({ src: match[1], alt }).run();
-                    } else {
-                      void handleRemoteImage(match[1]);
-                    }
+                    void handleRemoteImage(match[1]);
                   }
                 });
               });
@@ -293,14 +304,6 @@ function notifyEditorChange(): void {
     }
   });
 
-  // Remplace l'URL absolue `http://127.0.0.1:port/files/<rel>` par `<rel>`
-  // dans la sortie markdown. Garantit que le .md reste portable.
-  function scrubAbsoluteAssetURLs(md: string): string {
-    return md.replace(/(!\[[^\]]*\]\()http:\/\/127\.0\.0\.1:\d+\/files\/([^)]+)(\))/g, (_m, pre, rel, post) => {
-      return pre + rel + post;
-    });
-  }
-
   function installMarkdownScrubber(ed: Editor): void {
     const original = ed.getMarkdown.bind(ed);
     ed.getMarkdown = () => scrubAbsoluteAssetURLs(original());
@@ -342,10 +345,8 @@ function notifyEditorChange(): void {
   let isUploading = false;
   let uploadError = '';
 
-  // Pour les drops d'URL avec un schéma non-http/file (ex: image glissée
-  // depuis un onglet Firefox, qui est une URL moz-extension:// ou file://
-  // inaccessible directement). On fetche l'URL en data: puis on uploade via
-  // SaveAsset comme un fichier normal.
+  // Les fichiers locaux sont importés par Go. Les URL distantes sont refusées
+  // pour préserver la promesse local-first et éviter les pixels de suivi.
   async function handleRemoteImage(uri: string): Promise<void> {
     if (!editor) return;
     isUploading = true;
@@ -371,31 +372,10 @@ function notifyEditorChange(): void {
         editor.chain().focus().setImage({ src: absoluteURL, alt }).run();
         return;
       }
-      const response = await withTimeout(
-        fetch(uri),
-        10000,
-        'Fetch timeout (10s)'
-      );
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      const blob = await response.blob();
-      const ext = blob.type.split('/').pop()?.split('+')[0] || 'png';
-      const filename = `pasted-${Date.now()}.${ext}`;
-      const file = new File([blob], filename, { type: blob.type });
-      const relPath = await withTimeout(
-        onAssetUpload(file),
-        15000,
-        'Upload timeout (15s)'
-      );
-      if (!relPath) return;
-      const alt = uri.split('/').pop()?.replace(/\?.*$/, '') || 'image';
-      const absoluteURL = await withTimeout(
-        assetURL(relPath),
-        5000,
-        'assetURL timeout (5s)'
-      );
-      editor.chain().focus().setImage({ src: absoluteURL, alt }).run();
+      uploadError = isRemoteImageSource(uri)
+        ? 'Images distantes bloquées — téléchargez le fichier avant de l’ajouter'
+        : 'Source d’image non locale bloquée';
+      setTimeout(() => (uploadError = ''), 4000);
     } catch (err) {
       uploadError = `Image distante : ${err}`;
       setTimeout(() => (uploadError = ''), 4000);
@@ -432,20 +412,6 @@ function notifyEditorChange(): void {
       setTimeout(() => (uploadError = ''), 4000);
     } finally {
       isUploading = false;
-    }
-  }
-
-  // Helper : timeout sur une promise (pour éviter que le drop reste gelé
-  // si SaveAsset ou AssetURL hang côté Go).
-  async function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-    let to: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      to = setTimeout(() => reject(new Error(label)), ms);
-    });
-    try {
-      return await Promise.race([p, timeout]);
-    } finally {
-      if (to) clearTimeout(to);
     }
   }
 

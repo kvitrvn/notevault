@@ -3,14 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
+	"net/url"
 	"path/filepath"
-	"strings"
 	"time"
 
-	"github.com/votre-compte/notevault/internal/config"
-	"github.com/votre-compte/notevault/internal/domain"
-	"github.com/votre-compte/notevault/internal/vault"
+	"github.com/kvitrvn/notevault/internal/config"
+	"github.com/kvitrvn/notevault/internal/domain"
+	"github.com/kvitrvn/notevault/internal/vault"
 )
 
 // App est la façade explicitement exposée au frontend Wails.
@@ -189,21 +188,27 @@ func (a *App) DiffHistory(relativePath, aID, bID string) (string, error) {
 // OpenAsset retourne le chemin absolu d'un asset (utilisable par le frontend
 // pour l'afficher via file:// ou équivalent Wails).
 func (a *App) OpenAsset(relativePath string) (string, error) {
-	if !strings.HasPrefix(relativePath, "assets/") {
-		return "", fmt.Errorf("chemin d'asset invalide")
-	}
-	abs := filepath.Join(a.vault.Root(), relativePath)
-	if _, err := os.Stat(abs); err != nil {
-		return "", err
-	}
-	return abs, nil
+	return a.vault.ResolveAsset(relativePath)
 }
 
 // AssetURL retourne l'URL HTTP locale à utiliser dans `<img src=...>` pour
 // afficher un asset. Le serveur HTTP interne est démarré dans NewApp et
 // confine les requêtes à <vault>/assets/ avec une whitelist d'extensions.
-func (a *App) AssetURL(relativePath string) string {
-	return fmt.Sprintf("http://127.0.0.1:%d/files/%s", a.assetPort, relativePath)
+func (a *App) AssetURL(relativePath string) (string, error) {
+	abs, err := a.vault.ResolveAsset(relativePath)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(a.vault.Root(), abs)
+	if err != nil {
+		return "", fmt.Errorf("construire l'URL de l'asset : %w", err)
+	}
+	assetURL := url.URL{
+		Scheme: "http",
+		Host:   fmt.Sprintf("127.0.0.1:%d", a.assetPort),
+		Path:   "/files/" + filepath.ToSlash(rel),
+	}
+	return assetURL.String(), nil
 }
 
 func (a *App) OpenNote(relativePath string) (domain.Note, error) {
