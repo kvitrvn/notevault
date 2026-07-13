@@ -1,75 +1,93 @@
 # NoteVault
 
-NoteVault est une application desktop de prise de notes locale-first. Les
-notes restent des fichiers Markdown lisibles dans un coffre local ; aucun
-compte, serveur distant ou service de synchronisation n'est nécessaire.
+[![CI](https://github.com/kvitrvn/notevault/actions/workflows/ci.yml/badge.svg)](https://github.com/kvitrvn/notevault/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Le projet est distribué sous licence [MIT](LICENSE) par Benjamin Gaudé
-<kvitrvn@proton.me>. Le code source et les versions publiées sont disponibles
-sur <https://github.com/kvitrvn/notevault>.
+> [!IMPORTANT]
+> NoteVault is under active development. Features, vault behavior, and release
+> packaging may change, and the application is not yet recommended as the only
+> copy of important notes. Keep regular backups of your vault.
 
-## Installation Linux
+NoteVault is a local-first desktop note-taking application. Your notes remain
+ordinary Markdown files in a vault on your computer—no account, remote server,
+or synchronization service required.
 
-Les paquets officiels sont publiés uniquement dans les GitHub Releases et
-ciblent les machines `x86_64`/`amd64`. La première version n'utilise ni AUR ni
-dépôt APT et les paquets ne sont pas encore signés par GPG.
+## Why NoteVault?
 
-Pour Arch Linux, Manjaro et Omarchy :
+NoteVault is built for people who want the speed and convenience of a modern
+notes application without giving up ownership of their files. It combines a
+rich Markdown editor with fast local search, organization tools, and recovery
+features while keeping the vault as the source of truth.
+
+- **Local by default:** notes and application data stay on your machine.
+- **Portable files:** unencrypted notes are readable `.md` files that work with
+  other editors and tools.
+- **Fast navigation:** an in-memory index powers search, filters, tags, folders,
+  wiki links, and backlinks.
+- **Recovery-minded:** autosave, history, trash, and draft recovery help protect
+  work in progress.
+- **Private by design:** remote images are not loaded automatically, and no
+  account or telemetry is required.
+
+## Features
+
+- Rich Markdown editing with tables, tasks, code blocks, and local images.
+- Full-text search, filters, tags, folders, and pinned notes.
+- Wiki links, navigation suggestions, and backlinks.
+- Autosave with visible status, plus manual save and draft recovery.
+- Version history with diffs and restore, as well as a recoverable trash.
+- Templates, themes, daily notes, local statistics, and ZIP export.
+- Detection of changes made to vault files outside NoteVault.
+- Creation, opening, and instant switching between vaults, with up to eight
+  recent vaults.
+- Optional passphrase-based encryption for notes, history, and recovery drafts.
+
+See [PRODUCT.md](PRODUCT.md) for the product vision, principles, current scope,
+and explicit non-goals.
+
+## Installation
+
+Linux packages are published through
+[GitHub Releases](https://github.com/kvitrvn/notevault/releases) for
+`x86_64`/`amd64` systems. Packages are not currently distributed through AUR
+or an APT repository and are not GPG-signed.
+
+### Arch Linux, Manjaro, and Omarchy
 
 ```bash
 sudo pacman -U ./notevault-0.1.0-1-x86_64.pkg.tar.zst
 ```
 
-Pour Debian 12 ou 13 et Ubuntu 24.04 ou version ultérieure :
+### Debian and Ubuntu
+
+The packages target Debian 12 or 13 and Ubuntu 24.04 or later.
 
 ```bash
 sudo apt install ./notevault_0.1.0_amd64.deb
 ```
 
-Téléchargez `SHA256SUMS` dans le même dossier que les paquets, puis vérifiez
-leur intégrité avant l'installation :
+Download `SHA256SUMS` alongside the package and verify its integrity before
+installation:
 
 ```bash
 sha256sum --check SHA256SUMS
 ```
 
-## Fonctionnalités
+## Vaults and data ownership
 
-- Éditeur Markdown riche avec tableaux, tâches, code et images locales.
-- Recherche plein texte en mémoire, filtres, tags, dossiers et notes épinglées.
-- Liens wiki, suggestions de navigation et backlinks.
-- Autosauvegarde, sauvegarde manuelle et récupération des modifications.
-- Historique, comparaison de versions, restauration et corbeille.
-- Modèles, thèmes, note quotidienne, statistiques et export ZIP.
-- Surveillance des modifications apportées aux fichiers hors de l'application.
-- Chiffrement optionnel du contenu des notes, de l’historique et du brouillon
-  de récupération avec une phrase secrète locale.
-- Création, ouverture et changement immédiat de coffre, avec une liste de huit
-  coffres récents au maximum.
+NoteVault does not create a vault on first launch. The vault chooser lets you
+create one or open an existing NoteVault vault. A legacy `~/NoteVault` folder
+is reused only when it already contains meaningful data; an empty folder from
+an earlier version is ignored.
 
-Les images distantes ne sont pas chargées automatiquement : elles restent dans
-le Markdown mais sont bloquées dans l'éditeur afin de préserver la confidentialité
-du coffre. Les fichiers locaux peuvent être importés dans `assets/`.
+New vaults can use one of two storage modes:
 
-## Premier lancement et coffres
+- **Readable Markdown** is the default and remains compatible with other
+  editors.
+- **Encrypted vault** protects note content with a local passphrase and has no
+  recovery mechanism.
 
-Au premier démarrage, NoteVault ne crée aucun dossier automatiquement. L’écran
-« Choisir un coffre » permet de créer un coffre ou d’ouvrir un coffre NoteVault
-existant. Un ancien `~/NoteVault` est repris uniquement s’il contient déjà des
-données utiles ; l’arborescence vide créée par une ancienne version est ignorée.
-
-La création propose deux protections :
-
-- **Markdown lisible**, sélectionné par défaut et compatible avec les autres
-  éditeurs ;
-- **Coffre chiffré**, protégé par une phrase secrète locale sans mécanisme de
-  récupération.
-
-Le sélecteur de la barre latérale permet de changer de coffre sans redémarrer.
-Les huit derniers coffres sont conservés dans la configuration globale du
-système. Retirer un coffre des récents ne supprime jamais son dossier.
-
-Un coffre contient :
+A vault has the following structure:
 
 ```text
 ~/NoteVault/
@@ -82,106 +100,118 @@ Un coffre contient :
     └── pins.json
 ```
 
-L’index est reconstruit en mémoire. Les fichiers Markdown restent
-la source de vérité. Lorsque le chiffrement est activé, leur extension reste
-`.md`, mais leur contenu n’est lisible qu’après déverrouillage dans NoteVault.
-Les noms de fichiers, l’arborescence, les épingles et les assets ne sont pas
-chiffrés. Un export ZIP produit toujours du Markdown en clair.
+The search index is rebuilt in memory; Markdown files remain the source of
+truth. When encryption is enabled, notes keep their `.md` extension but their
+contents are readable only after the vault is unlocked in NoteVault.
 
-La phrase secrète n’est jamais enregistrée et il n’existe pas de clé de
-secours : une phrase oubliée rend les notes irrécupérables. L’activation retire
-les anciens fichiers `index.db`, sans pouvoir garantir leur effacement
-forensique sur un SSD, un snapshot ou une sauvegarde.
+Encryption does not conceal filenames, directory structure, pin metadata,
+file sizes, dates, or assets. ZIP exports always contain plaintext Markdown.
+The passphrase is never stored, and there is no recovery key: losing it makes
+the encrypted notes unrecoverable. Enabling encryption removes legacy
+`index.db` files but cannot guarantee forensic erasure from SSDs, snapshots, or
+backups.
 
-Le guide de prise en main est proposé après l’ouverture ou le déverrouillage,
-après une éventuelle récupération de brouillon. Il reste disponible depuis
-« Raccourcis » et la case « Ne plus afficher automatiquement » contrôle son
-affichage lors des prochains lancements.
+Remote images remain in Markdown but are blocked in the editor to avoid
+unexpected network requests. Local files can be imported into `assets/`.
 
-## Stack
+## Development
 
-- Go 1.25 et Wails 2.
-- Svelte 5, TypeScript, Vite, Tailwind CSS et Tiptap.
-- Vitest pour les tests unitaires frontend.
+### Prerequisites
 
-## Développement
+- Go 1.25
+- Node.js 22 or another current LTS release
+- npm
+- The [Wails v2 platform dependencies](https://wails.io/docs/gettingstarted/installation)
+  for your operating system
 
-Pré-requis : Go 1.25, Node.js LTS, npm et les dépendances système demandées par
-Wails pour votre plateforme.
-
-Sous Arch/Omarchy, le paquet `webkit2gtk-4.1` est requis. Le Makefile le détecte
-avec `pkg-config` et ajoute automatiquement le tag Wails `webkit2_41` à
-`make dev` et `make build`. S'il manque :
+On Arch Linux and Omarchy, install WebKitGTK 4.1 if needed:
 
 ```bash
 omarchy pkg add webkit2gtk-4.1
 ```
 
-Sous Hyprland, NoteVault sélectionne XWayland pour WebKitGTK afin d'éviter un
-bug du backend GTK Wayland qui tronque la surface après un changement de focus.
-Le paquet `xorg-xwayland` doit être présent (il l'est par défaut dans Omarchy).
-Pour retester Wayland natif après une mise à jour WebKitGTK :
+The Makefile detects `webkit2gtk-4.1` through `pkg-config` and automatically
+adds Wails' `webkit2_41` build tag. Under Hyprland, NoteVault defaults to
+XWayland to avoid a WebKitGTK rendering issue after focus changes. To test the
+native Wayland backend explicitly:
 
 ```bash
 NOTEAULT_GDK_BACKEND=wayland make dev
 ```
 
+### Run locally
+
 ```bash
-git clone git@github.com:kvitrvn/notevault.git
+git clone https://github.com/kvitrvn/notevault.git
 cd notevault
 make dev
 ```
 
-`make dev` installe le CLI Wails attendu et laisse Wails installer les
-dépendances frontend si nécessaire.
+`make dev` installs the expected Wails CLI into `tools/wails/bin/` when needed.
+Frontend dependencies are installed automatically by the development workflow.
 
-Commandes utiles :
+### Useful commands
 
-```bash
-make test           # tests Go
-make frontend-test  # tests TypeScript avec Vitest
-make check          # vérification Svelte et TypeScript
-make verify         # les trois vérifications précédentes
-make build          # application desktop de production
-make regen          # bindings Wails après modification d'une API Go exposée
-make fmt            # formatage Go
+| Command | Purpose |
+| --- | --- |
+| `make dev` | Run the application in development mode |
+| `make test` | Run Go tests |
+| `make frontend-test` | Run frontend unit tests with Vitest |
+| `make check` | Check Svelte and TypeScript code |
+| `make verify` | Run all tests and frontend checks |
+| `make build` | Build the production desktop application |
+| `make regen` | Regenerate Wails bindings after an exposed Go API change |
+| `make fmt` | Format Go code |
+
+Generated files under `frontend/wailsjs/` and build artifacts under
+`frontend/dist/` must not be edited by hand.
+
+## Project structure
+
+```text
+.
+├── app.go, main.go       Wails bootstrap and frontend-facing facade
+├── internal/domain/      Models shared by Go and the frontend
+├── internal/config/      Configuration stored inside a vault
+├── internal/appconfig/   Application-wide vault and onboarding settings
+├── internal/vault/       Vault files, index, history, trash, and recovery
+├── frontend/src/         Svelte desktop interface and components
+└── scripts/              Packaging and Wails binding utilities
 ```
 
-## Publier une version
+## Contributing
 
-Les versions utilisent exclusivement des tags SemVer stricts de la forme
-`vMAJOR.MINOR.PATCH`. Le tag est la source de vérité de la version des paquets.
-Pour publier `v0.1.0`, créez et poussez un tag annoté :
+Contributions, bug reports, and focused feature proposals are welcome. Before
+starting a substantial change, read [PRODUCT.md](PRODUCT.md) and open an issue
+to discuss how it fits NoteVault's local-first scope.
+
+When submitting a pull request:
+
+1. Keep the change small and focused.
+2. Add or update tests for changed behavior.
+3. Run `make verify`.
+4. Run `make build` when the change affects integration or packaging.
+
+Please report bugs and request features through
+[GitHub Issues](https://github.com/kvitrvn/notevault/issues).
+
+## Releasing
+
+Releases use strict SemVer tags in the form `vMAJOR.MINOR.PATCH`. The tag is the
+source of truth for package versions. For example:
 
 ```bash
 git tag --annotate v0.1.0 --message "NoteVault v0.1.0"
 git push origin v0.1.0
 ```
 
-Le workflow construit le binaire sous Debian 12, crée les paquets Arch et
-Debian, les installe sur toutes les distributions prises en charge, exécute un
-smoke test graphique, puis publie la GitHub Release avec `SHA256SUMS`. Un
-déclenchement manuel du workflow conserve les mêmes fichiers comme artefacts
-sans créer de release.
+The release workflow builds the binary on Debian 12, creates Arch and Debian
+packages, installs them on supported distributions, runs graphical smoke tests,
+and publishes a GitHub Release with SHA-256 checksums. A manually triggered
+workflow retains the same files as artifacts without creating a release.
 
-Avant le premier tag, le paquet doit aussi être testé manuellement sur
-Omarchy/Hyprland et Manjaro : installation, présence dans le lanceur, icône et
-regroupement de fenêtre, focus, redimensionnement, ouverture d'un coffre, puis
-désinstallation sans suppression des données.
+## License
 
-Les cibles frontend utilisent `npm ci` et régénèrent les bindings Wails si le
-checkout ne les contient pas. Les fichiers générés sous `frontend/wailsjs/` et
-les artefacts sous `frontend/dist/` ne doivent pas être édités à la main.
+NoteVault is available under the [MIT License](LICENSE).
 
-## Architecture
-
-- `main.go` et `app.go` : démarrage Wails et façade exposée au frontend.
-- `internal/domain/` : modèles échangés avec l'interface.
-- `internal/config/` : configuration persistée dans le coffre.
-- `internal/appconfig/` : configuration globale des coffres récents et du guide.
-- `internal/vault/` : fichiers, index, corbeille, historique, assets et recovery.
-- `frontend/src/` : interface Svelte et composants desktop.
-- `scripts/` : génération et correctifs des bindings Wails.
-
-La vision produit, ses principes et ses non-objectifs sont détaillés dans
-[PRODUCT.md](PRODUCT.md).
+Copyright © 2026 Benjamin Gaudé.

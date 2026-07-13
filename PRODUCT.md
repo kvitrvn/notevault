@@ -1,72 +1,203 @@
-# PRODUCT.md
+# NoteVault Product Overview
 
-## Summary
+## Vision
 
-NoteVault is a local-first desktop note-taking app for single-user use. It
-stores notes as Markdown files in a local vault and uses an in-memory index for
-fast search and navigation. The product goal is a reliable, quiet, fast tool
-for writing, finding, organizing, and recovering notes without accounts or
-remote services.
+NoteVault is a quiet, dependable desktop application for writing, finding,
+organizing, and recovering personal notes. It offers the convenience of a
+modern note-taking interface while preserving the durability and portability
+of files stored on the user's own computer.
 
-## Product Principles
+The product is local-first and designed for one person. It does not require an
+account, network connection, remote database, or hosted service.
 
-- Local-first: the user's data stays on their machine.
-- Readable files by default: notes are real `.md` files. Optional whole-vault
-  encryption deliberately makes their contents opaque until the vault is
-  unlocked or encryption is disabled.
-- Reliability before feature depth: no data loss, atomic operations, trash,
-  history, and draft recovery.
-- Pragmatic performance: the target vault size is roughly 10,000 notes with
-  fluid search and navigation.
-- Simplicity: no cloud, collaboration, user accounts, telemetry, marketplace, or
-  plugin architecture unless explicitly requested.
+## Product promise
 
-## Current Features
+NoteVault keeps the vault under the user's control:
 
-- Starts without creating a vault and provides a dedicated vault chooser.
-- Creates readable Markdown or encrypted vaults, opens existing vaults, and
-  switches between them without restarting.
-- Keeps up to eight recent vaults in an application-wide local configuration;
-  forgetting a recent entry never deletes its files.
-- Local vault with `notes/`, `assets/`, `templates/`, `themes/`, and
-  `.notevault/` metadata.
+- Notes are stored locally as Markdown files by default.
+- The vault remains the source of truth, not an internal database.
+- Search and navigation stay fast through an index rebuilt in memory.
+- Important editing operations favor recovery and data safety.
+- No vault content is sent to a remote service by default.
+
+Optional vault encryption deliberately changes the first promise: note files
+keep their `.md` extension, but their contents remain opaque until the vault is
+unlocked or encryption is disabled.
+
+## Intended users
+
+NoteVault is for individuals who want a focused desktop workspace and direct
+ownership of their notes. It is especially suited to people who:
+
+- prefer local files over a hosted notes service;
+- want Markdown portability without giving up a rich editor;
+- manage personal notes, references, journals, or small knowledge bases;
+- value predictable behavior, privacy, and recovery over collaboration or a
+  large extension ecosystem.
+
+## Product principles
+
+### Local-first
+
+User data stays on the user's machine. Features must work without an account or
+remote service and should remain useful without a network connection.
+
+### Files users can own
+
+Readable Markdown is the default. Notes should remain accessible with ordinary
+tools outside NoteVault. Encryption is optional and its limitations must be
+communicated clearly.
+
+### Reliability before feature depth
+
+Avoiding data loss matters more than adding breadth. Atomic writes, autosave,
+trash, version history, and draft recovery are core product behavior rather
+than secondary features.
+
+### Fast enough for a real vault
+
+The working target is approximately 10,000 notes with fluid search and
+navigation. The in-memory index is disposable and must be reconstructible from
+the vault.
+
+### Deliberate simplicity
+
+NoteVault should remain focused and understandable. New infrastructure,
+abstractions, or product surfaces must solve a demonstrated user problem.
+
+### Privacy by default
+
+Vault content is untrusted and private. NoteVault must avoid unexpected network
+requests, keep file access inside the vault boundary, and expose no content to
+third parties by default.
+
+## Current product experience
+
+### Vault lifecycle
+
+- Start without silently creating a vault.
+- Create a readable Markdown vault or an encrypted vault.
+- Open an existing vault and switch vaults without restarting.
+- Remember up to eight recent vaults in local application-wide configuration.
+- Forgetting a recent vault entry never deletes its files.
+
+### Writing and organization
+
 - Create, read, edit, rename, move, duplicate, and delete notes.
-- Autosave with visible status and manual save.
-- Trash with restore and empty actions.
-- In-memory index, search, filters, pinned notes, tags, and folder view.
-- Optional daily note.
-- User note templates.
-- Wiki links, backlinks, and quick navigation.
-- Import, storage, and display of local assets.
-- Remote images preserved as Markdown but blocked from automatic loading.
-- Version history, diff, and restore.
-- Built-in themes and user themes.
-- ZIP export, local stats, onboarding, and unsaved buffer recovery.
-- Optional whole-vault encryption for notes, history, and draft recovery.
-- Onboarding shown at most once per process unless reopened manually, with
-  recovery taking priority and a global automatic-display preference.
+- Use a rich Markdown editor with autosave status and manual save.
+- Organize with folders, tags, pinned notes, filters, and an optional daily
+  note.
+- Create notes from user-defined templates.
+- Navigate with wiki links, backlinks, and quick suggestions.
 
-## Non-Goals
+### Search and navigation
 
-- Cloud sync or multi-device sync.
-- Accounts, authentication, sharing, or collaboration.
-- Hosted web application.
-- Plugins or third-party code execution.
-- Remote database.
+- Build the search index in memory from vault contents.
+- Provide full-text search and responsive navigation across the target vault
+  size.
+- Detect relevant file changes made outside the application.
 
-## Data And Security
+### Assets and external content
 
-The vault is the trust boundary. User input includes paths, titles, Markdown
-content, assets, templates, and themes. Every feature must preserve vault
-confinement, prevent path traversal, and avoid exposing local content to any
-remote service by default.
+- Import, store, and display local assets from the vault's `assets/` directory.
+- Preserve remote image references in Markdown without loading them
+  automatically.
+- Treat Markdown, HTML, images, paths, filenames, templates, and themes as
+  untrusted input.
 
-Encryption is local and optional. It does not conceal filenames, directories,
-pin metadata, file sizes and dates, or assets. Plaintext necessarily exists in
-process and WebView memory while the vault is unlocked, and ZIP exports contain
-plaintext Markdown. There is no recovery key in the first version.
+### Recovery and portability
 
-Application-wide state is limited to the active vault path, up to eight recent
-vault paths with their last-opened times, the format version, and the onboarding
-display preference. It lives in the operating system's configuration directory,
-outside every vault. Passphrases and encryption keys are never stored there.
+- Move deleted notes to trash with restore and empty actions.
+- Keep version history, show diffs, and restore earlier versions.
+- Recover unsaved editing buffers after interruption.
+- Export the vault as a ZIP containing plaintext Markdown.
+
+### Personalization and insight
+
+- Offer built-in themes and local user themes.
+- Provide local vault statistics.
+- Show onboarding at most once per process unless reopened manually.
+- Give draft recovery priority over automatic onboarding.
+- Store the onboarding display preference outside the vault.
+
+## Vault model
+
+A standard vault contains:
+
+```text
+vault/
+├── notes/
+├── assets/
+├── templates/
+├── themes/
+└── .notevault/
+```
+
+Notes and their related data live in this local directory. The in-memory index
+is derived state and can be rebuilt. The application may keep only limited
+global state outside the vault:
+
+- the active vault path;
+- up to eight recent vault paths and their last-opened times;
+- the application configuration format version;
+- the automatic onboarding display preference.
+
+This global state lives in the operating system's configuration directory.
+Passphrases and encryption keys are never stored there.
+
+## Security and privacy boundaries
+
+The vault is the primary trust boundary. Every user-controlled path must remain
+relative to it after normalization and validation. Features must prevent path
+traversal and must not open or serve files outside the vault without explicit,
+validated intent.
+
+The local asset server must remain confined to `assets/`, bind only to loopback,
+and allow only supported file types. Logs must not contain secrets, note
+content, or unnecessary personal paths. Important persisted state should use
+atomic writes.
+
+### Encryption scope and limitations
+
+Encryption is local and optional. It covers note contents, history, and draft
+recovery data. It does not conceal:
+
+- filenames or directory structure;
+- pin metadata;
+- file sizes or dates;
+- assets.
+
+Plaintext necessarily exists in process and WebView memory while an encrypted
+vault is unlocked. ZIP exports contain plaintext Markdown. The first version
+has no recovery key, so a forgotten passphrase makes encrypted notes
+unrecoverable.
+
+## Non-goals
+
+The following are outside the current product scope:
+
+- cloud or multi-device synchronization;
+- accounts, authentication, sharing, or collaboration;
+- a hosted web application;
+- telemetry or remote analytics;
+- plugins, a marketplace, or third-party code execution;
+- a remote database.
+
+These constraints are intentional. They should change only in response to an
+explicit product decision, not as an incidental part of another feature.
+
+## Decision filter for new features
+
+Before adding a feature, ask:
+
+1. Does it improve writing, finding, organizing, or recovering notes?
+2. Does it preserve local ownership and offline usefulness?
+3. Can it stay within the vault's security boundary?
+4. Does it introduce a new durable format or exposed API, and is that cost
+   justified?
+5. Can the problem be solved with a small, reviewable change using existing
+   architecture?
+6. How does the feature behave during failure, interruption, or recovery?
+
+When a proposal conflicts with reliability, privacy, or clear file ownership,
+those principles take precedence over feature breadth.
