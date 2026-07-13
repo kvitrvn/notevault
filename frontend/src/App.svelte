@@ -22,6 +22,7 @@
   import Activity from '@lucide/svelte/icons/activity';
   import Download from '@lucide/svelte/icons/download';
   import Keyboard from '@lucide/svelte/icons/keyboard';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
 
   import NoteEditor from './components/NoteEditor.svelte';
   import SaveIndicator from './components/SaveIndicator.svelte';
@@ -46,10 +47,13 @@
   import WindowTitleBar from './components/WindowTitleBar.svelte';
   import type { SaveState } from './components/SaveIndicator.svelte';
   import { isLocalAssetPath, precomputeAssetURLs as resolveAssetURLs } from './lib/assets';
+  import { shouldShowVaultUnlock } from './lib/vault-manager';
   import { domain, vault } from '../wailsjs/go/models';
 
   import {
+    ApplicationStatus,
     ClearDirtyBuffer,
+    CreateVault,
     CreateNote,
     DeleteNote,
     DuplicateNote,
@@ -80,6 +84,8 @@
     VaultPath,
     AssetURL,
     ImportAssetFromFilePath,
+    ForgetRecentVault,
+    OpenVault,
     VaultStatus,
     UnlockVault,
     EnableEncryption,
@@ -170,6 +176,10 @@
 
   // Vault picker
   let vaultPickerOpen = $state(false);
+  let vaultMenuOpen = $state(false);
+  let applicationStatus = $state<domain.ApplicationStatus | null>(null);
+  let vaultSwitching = $state(false);
+  let vaultSwitchError = $state('');
 
   // Phase 5 : onboarding, raccourcis, stats, export, recovery
   let onboardingOpen = $state(false);
@@ -180,6 +190,7 @@
   let recoveryOpen = $state(false);
   let customThemes = $state<vault.Theme[]>([]);
   let dirtyBufferTimer: ReturnType<typeof setTimeout> | null = null;
+  let onboardingShownThisLaunch = false;
 
   let vaultStatus = $state<vault.VaultStatusInfo | null>(null);
   let unlockPassphrase = $state('');
@@ -1313,24 +1324,134 @@
   });
 
   function openVaultPicker(): void {
+    vaultMenuOpen = false;
+    vaultSwitchError = '';
     vaultPickerOpen = true;
   }
 
-  function onPickVault(path: string): void {
-    // Phase 4.5 : on note la préférence mais l'app redémarre le service
-    // (hors scope : la modification du root nécessite un restart). On
-    // indique à l'utilisateur de relancer.
-    showToast('info', `Sélection enregistrée : ${path}. Relancez l'app pour basculer.`);
+  async function prepareVaultSwitch(): Promise<boolean> {
+    if (applicationStatus?.mode === 'noVault' || applicationStatus?.mode === 'locked') {
+      clearSaveTimers();
+      return true;
+    }
+    noteEditor?.flushPendingChange();
+    const needsSave = hasUnsavedChanges || saveState === 'dirty' || saveState === 'saving';
+    if (needsSave && !window.confirm('Enregistrer les modifications et changer de coffre ?')) {
+      return false;
+    }
+    clearSaveTimers();
+    if (needsSave && !(await flushSave())) {
+      vaultSwitchError = 'La sauvegarde a échoué. Le coffre n’a pas été changé.';
+      return false;
+    }
+    try {
+      await ClearDirtyBuffer();
+    } catch (err) {
+      vaultSwitchError = `Impossible de vider le buffer de récupération : ${err}`;
+      return false;
+    }
+    return true;
+  }
+
+  function resetVaultState(): void {
+    refreshSeq += 1;
+    clearSaveTimers();
+    notes = [];
+    pinned = [];
+    folders = [];
+    tags = [];
+    templates = [];
+    selected = null;
+    lastSavedSnapshot = '';
+    saveState = 'clean';
+    lastSavedAt = null;
+    activeFilter = '';
+    activeChips = [];
+    parsedFilter = null;
+    allEntries = [];
+    foldersLoaded = false;
+    recoverySnapshot = null;
+    recoveryOpen = false;
+    onboardingOpen = false;
+    quickSwitcherOpen = false;
+    tagsViewOpen = false;
+    templatePickerOpen = false;
+    moveDialogOpen = false;
+    historyOpen = false;
+    statsOpen = false;
+    exportOpen = false;
+    encryptionDialogOpen = false;
+  }
+
+  async function finishVaultSwitch(): Promise<void> {
+    resetVaultState();
+    applicationStatus = await ApplicationStatus();
+    vaultPath = applicationStatus.activeVault?.path ?? '';
     vaultPickerOpen = false;
+    vaultMenuOpen = false;
+    if (applicationStatus.mode === 'noVault') {
+      vaultStatus = null;
+      loading = false;
+      return;
+    }
+    vaultStatus = await VaultStatus();
+    if (applicationStatus.mode === 'locked') {
+      loading = false;
+      return;
+    }
+    await refresh();
+    await checkStartup();
+  }
+
+  async function switchVault(path: string): Promise<void> {
+    if (vaultSwitching || !(await prepareVaultSwitch())) return;
+    vaultSwitching = true;
+    vaultSwitchError = '';
+    try {
+      await OpenVault(path);
+      await finishVaultSwitch();
+    } catch (err) {
+      vaultSwitchError = String(err);
+    } finally {
+      vaultSwitching = false;
+    }
+  }
+
+  async function createVault(request: domain.CreateVaultRequest): Promise<void> {
+    if (vaultSwitching || !(await prepareVaultSwitch())) return;
+    vaultSwitching = true;
+    vaultSwitchError = '';
+    try {
+      await CreateVault(request);
+      await finishVaultSwitch();
+    } catch (err) {
+      vaultSwitchError = String(err);
+    } finally {
+      vaultSwitching = false;
+    }
+  }
+
+  async function forgetRecentVault(path: string): Promise<void> {
+    try {
+      await ForgetRecentVault(path);
+      applicationStatus = await ApplicationStatus();
+    } catch (err) {
+      vaultSwitchError = String(err);
+    }
   }
 
   void bootstrapVault();
 
   async function bootstrapVault(): Promise<void> {
     try {
+      applicationStatus = await ApplicationStatus();
+      vaultPath = applicationStatus.activeVault?.path ?? '';
+      if (applicationStatus.mode === 'noVault') {
+        loading = false;
+        return;
+      }
       vaultStatus = await VaultStatus();
-      vaultPath = await VaultPath();
-      if (vaultStatus.state === 'locked') {
+      if (applicationStatus.mode === 'locked') {
         loading = false;
         return;
       }
@@ -1350,6 +1471,7 @@
       await UnlockVault(unlockPassphrase);
       unlockPassphrase = '';
       vaultStatus = await VaultStatus();
+      applicationStatus = await ApplicationStatus();
       await refresh();
       await checkStartup();
       if (vaultStatus.warnings.length > 0) {
@@ -1412,34 +1534,49 @@
       const snap = (await SnapshotForStartup()) as vault.RecoverySnapshot;
       if (!snap) return;
       recoverySnapshot = snap;
-      // Onboarding d'abord : si pas terminé, on affiche l'onboarding.
-      // La recovery attendra la fermeture de l'onboarding.
-      if (!snap.onboarding) {
-        onboardingOpen = true;
-        return;
-      }
       if (snap.hasRecovery) {
         recoveryOpen = true;
+        return;
       }
+      maybeOpenGuide();
     } catch (err) {
       console.error('[startup] snapshot failed:', err);
     }
   }
 
-  function onOnboardingDone(_skipped: boolean): void {
+  function maybeOpenGuide(): void {
+    if (applicationStatus?.onboardingDismissed || onboardingShownThisLaunch) return;
+    onboardingShownThisLaunch = true;
+    onboardingOpen = true;
+  }
+
+  function reviewGuide(): void {
+    shortcutsOpen = false;
+    onboardingShownThisLaunch = true;
+    onboardingOpen = true;
+  }
+
+  function onOnboardingDone(dismissed: boolean): void {
     onboardingOpen = false;
-    // Si une recovery attendait, on l'affiche maintenant.
-    if (recoverySnapshot?.hasRecovery) {
-      recoveryOpen = true;
+    if (applicationStatus) {
+      applicationStatus.onboardingDismissed = dismissed;
+      applicationStatus = applicationStatus;
     }
   }
 
   async function onRecoverAccept(buffer: string): Promise<void> {
-    if (!selected) {
-      recoveryOpen = false;
+    const recoveryPath = recoverySnapshot?.notePath;
+    if (!recoveryPath) return;
+    try {
+      if (!selected || selected.relativePath !== recoveryPath) {
+        const recoveredNote = await OpenNote(recoveryPath);
+        selected = cloneNote(recoveredNote, await precomputeAssetURLs(recoveredNote.content));
+      }
+    } catch (err) {
+      showToast('error', `Impossible d’ouvrir la note à récupérer : ${err}`);
       return;
     }
-    selected.content = buffer;
+    selected!.content = buffer;
     selected = selected;
     saveState = 'dirty';
     lastSavedSnapshot = ''; // force la prochaine save à persister
@@ -1450,6 +1587,7 @@
       console.error('[recovery] clear failed:', err);
     }
     showToast('info', 'Buffer récupéré. Enregistrez pour conserver les modifications.');
+    maybeOpenGuide();
   }
 
   async function onRecoverDiscard(): Promise<void> {
@@ -1460,6 +1598,7 @@
       console.error('[recovery] clear failed:', err);
     }
     showToast('info', 'Buffer ignoré.');
+    maybeOpenGuide();
   }
 
   function onExportSuccess(path: string): void {
@@ -1477,7 +1616,25 @@
 <div class="grid h-full min-h-0 grid-rows-[2.25rem_minmax(0,1fr)] bg-background text-foreground">
   <WindowTitleBar onClose={onWindowClose} />
 
-  {#if vaultStatus?.state === 'locked'}
+  {#if applicationStatus === null}
+    <main class="grid min-h-0 place-items-center" aria-live="polite">
+      <p class="text-sm text-subtle">Chargement de NoteVault…</p>
+    </main>
+  {:else if applicationStatus.mode === 'noVault'}
+    <main class="flex min-h-0" aria-label="Sélection du coffre">
+      <VaultPickerDialog
+        open={true}
+        embedded={true}
+        status={applicationStatus}
+        busy={vaultSwitching}
+        error={vaultSwitchError}
+        onOpen={(path) => void switchVault(path)}
+        onCreate={(request) => void createVault(request)}
+        onForget={(path) => void forgetRecentVault(path)}
+        onClose={() => {}}
+      />
+    </main>
+  {:else if shouldShowVaultUnlock(applicationStatus.mode, vaultStatus?.state)}
     <main class="grid min-h-0 place-items-center px-6" aria-labelledby="unlock-title">
       <form class="w-full max-w-sm" onsubmit={(event) => { event.preventDefault(); void unlockVault(); }}>
         <h1 id="unlock-title" class="text-lg font-semibold">Coffre verrouillé</h1>
@@ -1505,7 +1662,10 @@
         >
           {unlocking ? 'Déverrouillage et indexation…' : 'Déverrouiller'}
         </button>
-        {#if vaultStatus.warnings.length > 0}
+        <button class="mt-2 h-9 w-full rounded-md border border-border bg-panel px-3 text-sm text-subtle hover:bg-panel-muted hover:text-foreground" type="button" onclick={openVaultPicker} disabled={unlocking}>
+          Choisir un autre coffre
+        </button>
+        {#if (vaultStatus?.warnings?.length ?? 0) > 0}
           <div class="mt-5 border-l-2 border-danger pl-3 text-sm text-subtle" role="status">
             Certains fichiers ont demandé votre attention lors de la dernière ouverture.
           </div>
@@ -1520,24 +1680,36 @@
       onfocusin={onSidebarFocus}
       aria-label="Navigation des notes"
     >
-    <div class="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
+    <div class="relative flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
       <div class="min-w-0 flex-1">
         <button
           type="button"
-          class="flex items-center gap-1.5 text-left"
-          onclick={() => openVaultPicker()}
+          class="flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left hover:bg-panel-muted"
+          onclick={() => (vaultMenuOpen = !vaultMenuOpen)}
           title={vaultPath}
+          aria-haspopup="menu"
+          aria-expanded={vaultMenuOpen}
         >
-          <h1 class="truncate text-sm font-semibold tracking-normal">NoteVault</h1>
-          {#if vaultIsSynced}
-            <span title="Coffre dans un dossier synchronisé" aria-label="Coffre synchronisé">
-              <Cloud size={12} strokeWidth={2} class="text-accent" aria-hidden="true" />
+          <span class="min-w-0 flex-1">
+            <span class="flex items-center gap-1.5">
+              <strong class="truncate text-sm font-semibold tracking-normal">{applicationStatus.activeVault?.name ?? 'Coffre'}</strong>
+              {#if vaultIsSynced}<Cloud size={12} strokeWidth={2} class="shrink-0 text-accent" aria-label="Coffre dans un dossier synchronisé" />{/if}
             </span>
-          {/if}
+            <span class="block truncate text-xs text-subtle">{vaultPath}</span>
+          </span>
+          <ChevronDown size={14} class="shrink-0 text-subtle" aria-hidden="true" />
         </button>
-        <p class="truncate text-xs text-subtle" title={vaultPath}>
-          {vaultPath || 'Chargement du coffre...'}
-        </p>
+        {#if vaultMenuOpen}
+          <div class="absolute left-2 top-[3.2rem] z-40 w-[min(19rem,calc(100vw-1rem))] overflow-hidden rounded-md border border-border bg-panel shadow-lg" role="menu" aria-label="Changer de coffre">
+            {#each applicationStatus.recentVaults as recent (recent.path)}
+              <button type="button" role="menuitem" class="block w-full border-b border-border px-3 py-2 text-left hover:bg-panel-muted disabled:text-faint" disabled={vaultSwitching || !recent.available || recent.active} onclick={() => void switchVault(recent.path)}>
+                <span class="flex items-center gap-2 text-sm"><span class="truncate">{recent.name}</span>{#if recent.encrypted}<span class="text-xs text-subtle">Chiffré</span>{/if}{#if !recent.available}<span class="text-xs text-danger">Indisponible</span>{/if}</span>
+                <span class="block truncate text-xs text-subtle">{recent.path}</span>
+              </button>
+            {/each}
+            <button type="button" role="menuitem" class="block w-full px-3 py-2 text-left text-sm hover:bg-panel-muted" onclick={openVaultPicker}>Créer ou ouvrir un coffre…</button>
+          </div>
+        {/if}
       </div>
       <div class="ml-2 flex items-center gap-1.5">
         <button
@@ -2037,6 +2209,12 @@
   </div>
 {/if}
 
+{#if vaultSwitching}
+  <div class="fixed inset-0 z-[70] grid place-items-center bg-black/45 px-4" role="status" aria-live="assertive" aria-label="Changement de coffre en cours">
+    <div class="rounded-md border border-border bg-panel px-4 py-3 text-sm text-foreground shadow-lg">Préparation et indexation du coffre…</div>
+  </div>
+{/if}
+
 <QuickSwitcher
   open={quickSwitcherOpen}
   entries={allEntries}
@@ -2075,18 +2253,23 @@
 
 <VaultPickerDialog
   open={vaultPickerOpen}
-  initialPath={vaultPath}
-  onPick={onPickVault}
+  status={applicationStatus}
+  busy={vaultSwitching}
+  error={vaultSwitchError}
+  onOpen={(path) => void switchVault(path)}
+  onCreate={(request) => void createVault(request)}
+  onForget={(path) => void forgetRecentVault(path)}
   onClose={() => (vaultPickerOpen = false)}
 />
 
 <OnboardingModal
   open={onboardingOpen}
   initialTheme={theme}
+  initiallyDismissed={applicationStatus?.onboardingDismissed ?? false}
   onDone={onOnboardingDone}
 />
 
-<ShortcutsOverlay open={shortcutsOpen} onClose={() => (shortcutsOpen = false)} />
+<ShortcutsOverlay open={shortcutsOpen} onClose={() => (shortcutsOpen = false)} onReviewGuide={reviewGuide} />
 
 <StatsView
   open={statsOpen}

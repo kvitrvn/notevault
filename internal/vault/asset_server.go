@@ -51,12 +51,13 @@ func (s *AssetServer) Start() (int, error) {
 		return 0, fmt.Errorf("listen asset server : %w", err)
 	}
 	s.listener = listener
-	s.server = &http.Server{Handler: mux}
+	server := &http.Server{Handler: mux}
+	s.server = server
 	s.running = true
 
 	port := listener.Addr().(*net.TCPAddr).Port
 	go func() {
-		if err := s.server.Serve(listener); err != nil && err != http.ErrServerClosed {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			log.Printf("asset server: %v", err)
 		}
 	}()
@@ -71,7 +72,10 @@ func (s *AssetServer) Stop() error {
 		return nil
 	}
 	s.running = false
-	return s.server.Close()
+	server := s.server
+	s.server = nil
+	s.listener = nil
+	return server.Close()
 }
 
 // Port retourne le port sur lequel le serveur écoute. 0 si non démarré.

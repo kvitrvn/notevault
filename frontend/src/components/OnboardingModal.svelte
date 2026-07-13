@@ -1,80 +1,63 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { tick } from 'svelte';
   import Check from '@lucide/svelte/icons/check';
-  import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
-  import Sparkles from '@lucide/svelte/icons/sparkles';
-  import Sun from '@lucide/svelte/icons/sun';
-  import Moon from '@lucide/svelte/icons/moon';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Keyboard from '@lucide/svelte/icons/keyboard';
-  import { MarkOnboardingCompleted } from '../../wailsjs/go/main/App';
-  import { vault } from '../../wailsjs/go/models';
-  const { Onboarding } = vault;
+  import X from '@lucide/svelte/icons/x';
+  import { SetOnboardingDismissed } from '../../wailsjs/go/main/App';
 
   type ThemeChoice = 'dark' | 'light';
-  type OnboardingType = InstanceType<typeof Onboarding>;
-
   type Props = {
     open: boolean;
     initialTheme: ThemeChoice;
-    onDone: (skipped: boolean) => void;
+    initiallyDismissed?: boolean;
+    onDone: (dismissed: boolean) => void;
   };
 
-  let { open, initialTheme, onDone }: Props = $props();
-
+  let { open, initialTheme, initiallyDismissed = false, onDone }: Props = $props();
   let step = $state(0);
   let theme = $state<ThemeChoice>('dark');
+  let dontShowAutomatically = $state(false);
   let busy = $state(false);
-
+  let feedback = $state('');
+  let dialogEl: HTMLElement | undefined = $state();
+  let previousFocus: HTMLElement | null = null;
   const totalSteps = 3;
-  const labels = ['Bienvenue', 'Apparence', 'Raccourcis'];
 
-  const shortcuts: { keys: string; label: string }[] = [
-    { keys: 'Ctrl+P', label: 'Recherche rapide' },
-    { keys: 'Ctrl+N', label: 'Nouvelle note' },
-    { keys: 'Ctrl+S', label: 'Enregistrer' },
-    { keys: 'Ctrl+T', label: 'Vue Tags' },
-    { keys: 'Ctrl+Shift+P', label: 'Épingler la note' },
-    { keys: 'Ctrl+Shift+D', label: 'Note du jour' },
-    { keys: 'Ctrl+Shift+M', label: 'Déplacer' },
-    { keys: 'Ctrl+Shift+R', label: 'Renommer' },
-    { keys: 'Ctrl+Shift+H', label: 'Historique' },
-    { keys: 'Ctrl+Shift+F', label: 'Filtres sidebar' },
-    { keys: 'Ctrl+/', label: 'Cette aide' },
-    { keys: 'j / k', label: 'Naviguer dans la liste' }
+  const shortcuts = [
+    ['Ctrl+P', 'Recherche rapide'],
+    ['Ctrl+N', 'Nouvelle note'],
+    ['Ctrl+S', 'Enregistrer'],
+    ['Ctrl+Shift+D', 'Note du jour'],
+    ['Ctrl+Shift+H', 'Historique'],
+    ['Ctrl+/', 'Aide et raccourcis']
   ];
 
-  onMount(() => {
-    if (open) {
-      step = 0;
-      theme = initialTheme;
-    }
+  $effect(() => {
+    if (!open) return;
+    previousFocus = document.activeElement as HTMLElement | null;
+    step = 0;
+    theme = initialTheme;
+    dontShowAutomatically = initiallyDismissed;
+    feedback = '';
+    void tick().then(() => dialogEl?.querySelector<HTMLElement>('button, input')?.focus());
+    return () => previousFocus?.focus();
   });
 
   $effect(() => {
-    if (open) {
-      document.documentElement.dataset.theme = theme;
-    }
+    if (open) document.documentElement.dataset.theme = theme;
   });
 
-  async function finish(skipped: boolean): Promise<void> {
+  async function finish(): Promise<void> {
     busy = true;
+    feedback = '';
     try {
-      const onboarding = new Onboarding({
-        theme,
-        skipped,
-        completedAt: new Date()
-      }) as OnboardingType;
-      await MarkOnboardingCompleted(onboarding);
-      // Persist theme via existing toggleTheme logic from the parent.
+      await SetOnboardingDismissed(dontShowAutomatically);
       window.localStorage.setItem('notevault-theme', theme);
-      onDone(skipped);
+      onDone(dontShowAutomatically);
     } catch (err) {
-      // En cas d'échec de persistance, on ferme quand même pour ne pas
-      // bloquer l'utilisateur. La configuration du thème reste appliquée
-      // pour la session.
-      console.error('[onboarding] mark failed:', err);
-      onDone(skipped);
+      feedback = String(err);
     } finally {
       busy = false;
     }
@@ -82,13 +65,22 @@
 
   function onKey(event: KeyboardEvent): void {
     if (!open) return;
-    if (event.key === 'Escape') {
+    if (event.key === 'Escape' && !busy) {
       event.preventDefault();
-      void finish(true);
-    } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      void finish();
+      return;
+    }
+    if (event.key !== 'Tab' || !dialogEl) return;
+    const focusable = Array.from(dialogEl.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled])'));
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
       event.preventDefault();
-      if (step < totalSteps - 1) step += 1;
-      else void finish(false);
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
     }
   }
 </script>
@@ -96,155 +88,58 @@
 <svelte:window onkeydown={onKey} />
 
 {#if open}
-  <div
-    class="fixed inset-0 z-[60] grid place-items-center px-4"
-    role="dialog"
-    aria-modal="true"
-    aria-label="Onboarding"
-  >
+  <div class="fixed inset-0 z-[60] grid place-items-center px-4" role="dialog" aria-modal="true" aria-labelledby="guide-title">
     <div class="absolute inset-0 bg-black/65" aria-hidden="true"></div>
-    <div
-      class="relative flex w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-border bg-panel shadow-2xl"
-    >
-      <header class="flex items-center justify-between border-b border-border bg-background px-5 py-3">
-        <div class="flex items-center gap-2 text-sm font-semibold text-foreground">
-          <Sparkles size={15} strokeWidth={2} class="text-accent" aria-hidden="true" />
-          {labels[step]}
-        </div>
-        <div class="flex items-center gap-1.5 text-xs text-subtle">
-          {#each { length: totalSteps } as _, i (i)}
-            <span
-              class={i === step
-                ? 'h-1.5 w-4 rounded-full bg-accent'
-                : 'h-1.5 w-1.5 rounded-full bg-border-strong'}
-              aria-hidden="true"
-            ></span>
-          {/each}
-          <span class="ml-1 text-xs text-faint">{step + 1}/{totalSteps}</span>
-        </div>
+    <div bind:this={dialogEl} class="relative flex max-h-[calc(100vh-2rem)] w-full max-w-lg flex-col overflow-hidden rounded-lg border border-border bg-panel shadow-lg">
+      <header class="flex items-center gap-3 border-b border-border bg-background px-4 py-3">
+        <h2 id="guide-title" class="text-base font-semibold text-foreground">Guide NoteVault</h2>
+        <span class="text-xs text-subtle">{step + 1} sur {totalSteps}</span>
+        <button type="button" class="ml-auto grid h-8 w-8 place-items-center rounded-md border border-border text-subtle hover:bg-panel-muted hover:text-foreground" aria-label="Fermer le guide" onclick={() => void finish()} disabled={busy}>
+          <X size={14} aria-hidden="true" />
+        </button>
       </header>
 
-      <div class="min-h-[18rem] px-6 py-6">
+      <div class="min-h-0 flex-1 overflow-y-auto px-5 py-5">
         {#if step === 0}
-          <h1 class="text-2xl font-semibold text-foreground">Bienvenue dans NoteVault</h1>
-          <p class="mt-2 text-sm leading-6 text-subtle">
-            NoteVault est un bloc-notes 100% local. Vos notes sont stockées
-            dans un coffre de fichiers Markdown sur votre machine — vous
-            pouvez les ouvrir dans n'importe quel autre éditeur.
-          </p>
-          <ul class="mt-4 flex flex-col gap-2 text-sm text-foreground">
-            <li class="flex items-start gap-2">
-              <Check size={14} strokeWidth={2.5} class="mt-0.5 shrink-0 text-accent" aria-hidden="true" />
-              Éditeur Tiptap avec wiki-links, images et coloration syntaxique.
-            </li>
-            <li class="flex items-start gap-2">
-              <Check size={14} strokeWidth={2.5} class="mt-0.5 shrink-0 text-accent" aria-hidden="true" />
-              Recherche full-text, filtres par tag/dossier, épingles.
-            </li>
-            <li class="flex items-start gap-2">
-              <Check size={14} strokeWidth={2.5} class="mt-0.5 shrink-0 text-accent" aria-hidden="true" />
-              Historique local, export, thèmes personnalisés.
-            </li>
+          <h3 class="text-lg font-semibold">Vos notes restent locales</h3>
+          <p class="mt-2 text-sm leading-6 text-subtle">Un coffre Markdown reste lisible dans n’importe quel éditeur. Un coffre chiffré protège les notes et l’historique jusqu’au déverrouillage.</p>
+          <ul class="mt-4 space-y-2 text-sm">
+            <li class="flex gap-2"><Check size={14} class="mt-0.5 shrink-0 text-accent" aria-hidden="true" /> Recherche, tags, dossiers et liens wiki.</li>
+            <li class="flex gap-2"><Check size={14} class="mt-0.5 shrink-0 text-accent" aria-hidden="true" /> Sauvegarde automatique, historique et récupération locale.</li>
+            <li class="flex gap-2"><Check size={14} class="mt-0.5 shrink-0 text-accent" aria-hidden="true" /> Changement de coffre depuis l’en-tête de la barre latérale.</li>
           </ul>
         {:else if step === 1}
-          <h1 class="text-2xl font-semibold text-foreground">Choisissez votre apparence</h1>
-          <p class="mt-2 text-sm leading-6 text-subtle">
-            Vous pourrez changer à tout moment depuis l'en-tête. Les thèmes
-            personnalisés se placent dans
-            <code class="rounded bg-background px-1.5 py-0.5">.notevault/themes/</code>.
-          </p>
-          <div class="mt-5 grid grid-cols-2 gap-3">
-            <button
-              type="button"
-              class={theme === 'dark'
-                ? 'flex flex-col items-center gap-2 rounded-xl border-2 border-accent bg-panel-muted p-4 text-sm text-foreground'
-                : 'flex flex-col items-center gap-2 rounded-xl border border-border bg-panel p-4 text-sm text-foreground hover:border-border-strong'}
-              aria-pressed={theme === 'dark'}
-              onclick={() => (theme = 'dark')}
-            >
-              <div class="grid h-16 w-16 place-items-center rounded-lg border border-border-strong bg-[#151515] text-[#ecebe7]">
-                <Moon size={22} strokeWidth={2} aria-hidden="true" />
-              </div>
-              Sombre
-            </button>
-            <button
-              type="button"
-              class={theme === 'light'
-                ? 'flex flex-col items-center gap-2 rounded-xl border-2 border-accent bg-panel-muted p-4 text-sm text-foreground'
-                : 'flex flex-col items-center gap-2 rounded-xl border border-border bg-panel p-4 text-sm text-foreground hover:border-border-strong'}
-              aria-pressed={theme === 'light'}
-              onclick={() => (theme = 'light')}
-            >
-              <div class="grid h-16 w-16 place-items-center rounded-lg border border-border-strong bg-[#f6f5f2] text-[#202124]">
-                <Sun size={22} strokeWidth={2} aria-hidden="true" />
-              </div>
-              Clair
-            </button>
+          <h3 class="text-lg font-semibold">Apparence</h3>
+          <p class="mt-2 text-sm text-subtle">Ce choix reste modifiable depuis l’en-tête de l’éditeur.</p>
+          <div class="mt-4 grid grid-cols-2 gap-2">
+            <button type="button" class={theme === 'dark' ? 'rounded-md border-2 border-accent bg-background px-4 py-3 text-sm' : 'rounded-md border border-border bg-background px-4 py-3 text-sm'} aria-pressed={theme === 'dark'} onclick={() => (theme = 'dark')}>Sombre</button>
+            <button type="button" class={theme === 'light' ? 'rounded-md border-2 border-accent bg-background px-4 py-3 text-sm' : 'rounded-md border border-border bg-background px-4 py-3 text-sm'} aria-pressed={theme === 'light'} onclick={() => (theme = 'light')}>Clair</button>
           </div>
         {:else}
-          <h1 class="flex items-center gap-2 text-2xl font-semibold text-foreground">
-            <Keyboard size={20} strokeWidth={2} class="text-accent" aria-hidden="true" />
-            Raccourcis essentiels
-          </h1>
-          <p class="mt-2 text-sm leading-6 text-subtle">
-            Toute la liste est accessible plus tard avec
-            <kbd class="rounded border border-border-strong bg-background px-1.5 py-0.5">Ctrl+/</kbd>.
-          </p>
-          <ul class="mt-4 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-            {#each shortcuts as s (s.keys)}
-              <li class="flex items-center justify-between gap-2 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs">
-                <span class="text-subtle">{s.label}</span>
-                <kbd class="shrink-0 rounded border border-border-strong bg-panel px-1.5 py-0.5 font-mono text-[0.7rem] text-foreground">
-                  {s.keys}
-                </kbd>
-              </li>
+          <h3 class="flex items-center gap-2 text-lg font-semibold"><Keyboard size={17} class="text-accent" aria-hidden="true" /> Raccourcis essentiels</h3>
+          <ul class="mt-4 divide-y divide-border border-y border-border">
+            {#each shortcuts as shortcut (shortcut[0])}
+              <li class="flex items-center justify-between gap-3 py-2 text-sm"><span>{shortcut[1]}</span><kbd class="rounded border border-border-strong bg-background px-1.5 py-0.5 text-xs">{shortcut[0]}</kbd></li>
             {/each}
           </ul>
         {/if}
       </div>
 
-      <footer class="flex items-center justify-between gap-2 border-t border-border bg-background px-5 py-3 text-xs text-subtle">
-        <button
-          type="button"
-          class="rounded-md px-2 py-1 text-subtle hover:text-foreground"
-          onclick={() => void finish(true)}
-          disabled={busy}
-        >
-          Passer
-        </button>
-        <div class="flex items-center gap-2">
-          {#if step > 0}
-            <button
-              type="button"
-              class="inline-flex items-center gap-1 rounded-md border border-border bg-transparent px-3 py-1.5 text-sm text-subtle hover:bg-panel-muted hover:text-foreground"
-              onclick={() => (step -= 1)}
-              disabled={busy}
-            >
-              <ChevronLeft size={13} strokeWidth={2} aria-hidden="true" />
-              Retour
-            </button>
-          {/if}
-          {#if step < totalSteps - 1}
-            <button
-              type="button"
-              class="inline-flex items-center gap-1 rounded-md border border-accent bg-accent px-3 py-1.5 text-sm font-medium text-accent-foreground hover:bg-accent-hover"
-              onclick={() => (step += 1)}
-              disabled={busy}
-            >
-              Suivant
-              <ChevronRight size={13} strokeWidth={2} aria-hidden="true" />
-            </button>
-          {:else}
-            <button
-              type="button"
-              class="inline-flex items-center gap-1 rounded-md border border-accent bg-accent px-3 py-1.5 text-sm font-medium text-accent-foreground hover:bg-accent-hover"
-              onclick={() => void finish(false)}
-              disabled={busy}
-            >
-              Commencer
-              <Check size={13} strokeWidth={2} aria-hidden="true" />
-            </button>
-          {/if}
+      <footer class="border-t border-border bg-background px-4 py-3">
+        <label class="flex items-center gap-2 text-sm text-subtle">
+          <input type="checkbox" bind:checked={dontShowAutomatically} disabled={busy} />
+          Ne plus afficher automatiquement
+        </label>
+        <div class="mt-3 flex items-center justify-between gap-2">
+          <p class="min-h-5 text-xs text-danger" role="status" aria-live="polite">{feedback}</p>
+          <div class="flex gap-2">
+            {#if step > 0}<button type="button" class="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-sm text-subtle hover:bg-panel-muted" onclick={() => (step -= 1)} disabled={busy}><ChevronLeft size={13} aria-hidden="true" /> Retour</button>{/if}
+            {#if step < totalSteps - 1}
+              <button type="button" class="inline-flex items-center gap-1 rounded-md border border-accent bg-accent px-3 py-1.5 text-sm font-medium text-accent-foreground hover:bg-accent-hover" onclick={() => (step += 1)} disabled={busy}>Suivant <ChevronRight size={13} aria-hidden="true" /></button>
+            {:else}
+              <button type="button" class="rounded-md border border-accent bg-accent px-3 py-1.5 text-sm font-medium text-accent-foreground hover:bg-accent-hover" onclick={() => void finish()} disabled={busy}>{busy ? 'Enregistrement…' : 'Terminer'}</button>
+            {/if}
+          </div>
         </div>
       </footer>
     </div>

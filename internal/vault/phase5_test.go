@@ -531,11 +531,8 @@ func TestServiceOnboardingFlag(t *testing.T) {
 	}
 }
 
-func TestServiceSnapshotOffersRecovery(t *testing.T) {
+func TestServiceSnapshotOffersRecoveryBeforeOnboarding(t *testing.T) {
 	svc, _ := setupVault(t)
-	if err := svc.MarkOnboardingCompleted(nil); err != nil {
-		t.Fatalf("Mark: %v", err)
-	}
 	// Crée une vraie note sur disque pour que fileModified réussisse.
 	note, _ := svc.CreateNote("Test", "")
 	if err := svc.SetDirtyBuffer(note.RelativePath, "contenu en attente", time.Time{}); err != nil {

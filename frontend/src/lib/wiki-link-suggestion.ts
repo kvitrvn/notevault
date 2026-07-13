@@ -11,14 +11,27 @@
 // surbrillance et la navigation au click.
 
 import { Extension, type Editor } from '@tiptap/core';
-import Suggestion, { type SuggestionOptions } from '@tiptap/suggestion';
+import Suggestion, { exitSuggestion, type SuggestionOptions } from '@tiptap/suggestion';
 import { PluginKey } from '@tiptap/pm/state';
+import type { Range } from '@tiptap/core';
 
 export type WikiLinkSuggestionOptions = {
   knownTitles: () => string[];
 };
 
 const PLUGIN_KEY = new PluginKey('wikiLinkSuggestion');
+
+export function shouldShowWikiLinkSuggestion(query: string): boolean {
+  return !query.includes(']]');
+}
+
+export function completeWikiLinkSuggestion(editor: Editor, range: Range, title: string): void {
+  editor.chain().focus().insertContentAt(range, `[[${title}]]`).run();
+  // Le matcher autorise les espaces et considère sinon les `]]` comme une
+  // partie de la requête. Sans sortie explicite, la popup reste active et
+  // capture Entrée/Tab après la sélection du lien.
+  exitSuggestion(editor.view, PLUGIN_KEY);
+}
 
 export const WikiLinkSuggestion = Extension.create<WikiLinkSuggestionOptions>({
   name: 'wikiLinkSuggestion',
@@ -39,6 +52,7 @@ export const WikiLinkSuggestion = Extension.create<WikiLinkSuggestionOptions>({
       allowSpaces: true,
       allowedPrefixes: null,
       pluginKey: PLUGIN_KEY,
+      shouldShow: ({ query }) => shouldShowWikiLinkSuggestion(query),
       items: ({ query }) => {
         const all = opts.knownTitles();
         const q = query.toLowerCase();
@@ -56,7 +70,7 @@ export const WikiLinkSuggestion = Extension.create<WikiLinkSuggestionOptions>({
         return [...starts, ...contains].slice(0, 8);
       },
       command: ({ editor: ed, range, props }) => {
-        ed.chain().focus().insertContentAt(range, `[[${props}]]`).run();
+        completeWikiLinkSuggestion(ed, range, props);
       },
       render: () => {
         let host: HTMLDivElement | null = null;

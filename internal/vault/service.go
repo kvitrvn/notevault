@@ -820,9 +820,6 @@ func (s *Service) SnapshotForStartup() (RecoverySnapshot, error) {
 	snap := RecoverySnapshot{
 		Onboarding: state.Onboarding,
 	}
-	if !state.OnboardingCompleted {
-		return snap, nil
-	}
 	if state.Dirty && state.NotePath != "" {
 		diskMTime, err := s.fileModified(state.NotePath)
 		if err == nil {

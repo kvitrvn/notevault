@@ -23,6 +23,11 @@ remote services.
 
 ## Current Features
 
+- Starts without creating a vault and provides a dedicated vault chooser.
+- Creates readable Markdown or encrypted vaults, opens existing vaults, and
+  switches between them without restarting.
+- Keeps up to eight recent vaults in an application-wide local configuration;
+  forgetting a recent entry never deletes its files.
 - Local vault with `notes/`, `assets/`, `templates/`, `themes/`, and
   `.notevault/` metadata.
 - Create, read, edit, rename, move, duplicate, and delete notes.
@@ -38,6 +43,8 @@ remote services.
 - Built-in themes and user themes.
 - ZIP export, local stats, onboarding, and unsaved buffer recovery.
 - Optional whole-vault encryption for notes, history, and draft recovery.
+- Onboarding shown at most once per process unless reopened manually, with
+  recovery taking priority and a global automatic-display preference.
 
 ## Non-Goals
 
@@ -58,3 +65,8 @@ Encryption is local and optional. It does not conceal filenames, directories,
 pin metadata, file sizes and dates, or assets. Plaintext necessarily exists in
 process and WebView memory while the vault is unlocked, and ZIP exports contain
 plaintext Markdown. There is no recovery key in the first version.
+
+Application-wide state is limited to the active vault path, up to eight recent
+vault paths with their last-opened times, the format version, and the onboarding
+display preference. It lives in the operating system's configuration directory,
+outside every vault. Passphrases and encryption keys are never stored there.

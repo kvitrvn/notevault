@@ -15,14 +15,32 @@ compte, serveur distant ou service de synchronisation n'est nécessaire.
 - Surveillance des modifications apportées aux fichiers hors de l'application.
 - Chiffrement optionnel du contenu des notes, de l’historique et du brouillon
   de récupération avec une phrase secrète locale.
+- Création, ouverture et changement immédiat de coffre, avec une liste de huit
+  coffres récents au maximum.
 
 Les images distantes ne sont pas chargées automatiquement : elles restent dans
 le Markdown mais sont bloquées dans l'éditeur afin de préserver la confidentialité
 du coffre. Les fichiers locaux peuvent être importés dans `assets/`.
 
-## Organisation du coffre
+## Premier lancement et coffres
 
-Au premier démarrage, NoteVault crée par défaut :
+Au premier démarrage, NoteVault ne crée aucun dossier automatiquement. L’écran
+« Choisir un coffre » permet de créer un coffre ou d’ouvrir un coffre NoteVault
+existant. Un ancien `~/NoteVault` est repris uniquement s’il contient déjà des
+données utiles ; l’arborescence vide créée par une ancienne version est ignorée.
+
+La création propose deux protections :
+
+- **Markdown lisible**, sélectionné par défaut et compatible avec les autres
+  éditeurs ;
+- **Coffre chiffré**, protégé par une phrase secrète locale sans mécanisme de
+  récupération.
+
+Le sélecteur de la barre latérale permet de changer de coffre sans redémarrer.
+Les huit derniers coffres sont conservés dans la configuration globale du
+système. Retirer un coffre des récents ne supprime jamais son dossier.
+
+Un coffre contient :
 
 ```text
 ~/NoteVault/
@@ -45,6 +63,11 @@ La phrase secrète n’est jamais enregistrée et il n’existe pas de clé de
 secours : une phrase oubliée rend les notes irrécupérables. L’activation retire
 les anciens fichiers `index.db`, sans pouvoir garantir leur effacement
 forensique sur un SSD, un snapshot ou une sauvegarde.
+
+Le guide de prise en main est proposé après l’ouverture ou le déverrouillage,
+après une éventuelle récupération de brouillon. Il reste disponible depuis
+« Raccourcis » et la case « Ne plus afficher automatiquement » contrôle son
+affichage lors des prochains lancements.
 
 ## Stack
 
@@ -104,6 +127,7 @@ les artefacts sous `frontend/dist/` ne doivent pas être édités à la main.
 - `main.go` et `app.go` : démarrage Wails et façade exposée au frontend.
 - `internal/domain/` : modèles échangés avec l'interface.
 - `internal/config/` : configuration persistée dans le coffre.
+- `internal/appconfig/` : configuration globale des coffres récents et du guide.
 - `internal/vault/` : fichiers, index, corbeille, historique, assets et recovery.
 - `frontend/src/` : interface Svelte et composants desktop.
 - `scripts/` : génération et correctifs des bindings Wails.

@@ -2,315 +2,585 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/kvitrvn/notevault/internal/appconfig"
 	"github.com/kvitrvn/notevault/internal/config"
 	"github.com/kvitrvn/notevault/internal/domain"
 	"github.com/kvitrvn/notevault/internal/vault"
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// App est la façade explicitement exposée au frontend Wails.
-// Garder cette couche mince : la logique métier doit rester dans internal/.
-type App struct {
-	ctx       context.Context
-	vault     *vault.Service
+var (
+	ErrNoVaultOpen    = errors.New("aucun coffre ouvert")
+	ErrVaultSwitching = errors.New("changement de coffre en cours")
+)
+
+type vaultSession struct {
+	service   *vault.Service
 	assetSrv  *vault.AssetServer
 	assetPort int
 }
 
-func NewApp() (*App, error) {
-	service, err := vault.NewDefaultService()
-	if err != nil {
-		return nil, fmt.Errorf("initialiser le coffre : %w", err)
+func (s *vaultSession) close() {
+	if s == nil {
+		return
 	}
-	// Un coffre chiffré reste vierge en mémoire jusqu'au déverrouillage.
-	if status := service.VaultStatus(); status.State != vault.VaultLocked {
-		if err := service.IndexNow(service.BootstrapContext(), nil); err != nil {
-			return nil, fmt.Errorf("indexation initiale : %w", err)
+	if s.assetSrv != nil {
+		_ = s.assetSrv.Stop()
+	}
+	if s.service != nil {
+		_ = s.service.Close()
+	}
+}
+
+type appOptions struct {
+	configPath string
+	legacyPath string
+	now        func() time.Time
+}
+
+// App est la façade Wails. La session est absente tant qu'aucun coffre
+// valide n'a été ouvert.
+type App struct {
+	ctx context.Context
+
+	sessionMu sync.RWMutex
+	session   *vaultSession
+	switchMu  sync.Mutex
+	switching atomic.Bool
+
+	configMu sync.Mutex
+	config   appconfig.Config
+	store    *appconfig.Store
+
+	now func() time.Time
+}
+
+func NewApp() (*App, error) {
+	configPath, err := appconfig.DefaultPath()
+	if err != nil {
+		return nil, err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("déterminer le dossier utilisateur : %w", err)
+	}
+	return newApp(appOptions{
+		configPath: configPath,
+		legacyPath: filepath.Join(home, "NoteVault"),
+		now:        time.Now,
+	})
+}
+
+func newApp(opts appOptions) (*App, error) {
+	if opts.now == nil {
+		opts.now = time.Now
+	}
+	store := appconfig.NewStore(opts.configPath)
+	cfg, exists, err := store.Load()
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		cfg, err = migrateLegacyConfiguration(opts.legacyPath, opts.now())
+		if err != nil {
+			return nil, err
+		}
+		if err := store.Save(cfg); err != nil {
+			return nil, err
 		}
 	}
 
-	assetSrv := vault.NewAssetServer(service.Root())
+	app := &App{
+		config: cfg,
+		store:  store,
+		now:    opts.now,
+	}
+	if cfg.ActiveVault != "" {
+		prepared, prepareErr := app.prepareSession(cfg.ActiveVault)
+		if prepareErr == nil {
+			app.session = prepared
+		}
+	}
+	return app, nil
+}
+
+func migrateLegacyConfiguration(path string, now time.Time) (appconfig.Config, error) {
+	cfg := appconfig.Default()
+	statePath := filepath.Join(path, ".notevault", "state.json")
+	if raw, err := os.ReadFile(statePath); err == nil {
+		var state struct {
+			OnboardingCompleted bool `json:"onboardingCompleted"`
+		}
+		if json.Unmarshal(raw, &state) == nil {
+			cfg.OnboardingDismissed = state.OnboardingCompleted
+		}
+	}
+	used, err := vault.LegacyVaultUsed(path)
+	if err != nil {
+		return cfg, fmt.Errorf("inspecter l’ancien coffre : %w", err)
+	}
+	if !used {
+		return cfg, nil
+	}
+	canonical, err := vault.ValidateExistingVault(path)
+	if err != nil {
+		return cfg, nil
+	}
+	cfg.RecordOpen(canonical, now)
+	return cfg, nil
+}
+
+func (a *App) Startup(ctx context.Context) { a.ctx = ctx }
+
+func (a *App) Shutdown(context.Context) {
+	a.switchMu.Lock()
+	defer a.switchMu.Unlock()
+	a.switching.Store(true)
+	a.sessionMu.Lock()
+	old := a.session
+	a.session = nil
+	a.sessionMu.Unlock()
+	old.close()
+}
+
+func (a *App) acquireSession() (*vaultSession, func(), error) {
+	if a.switching.Load() {
+		return nil, nil, ErrVaultSwitching
+	}
+	a.sessionMu.RLock()
+	if a.switching.Load() {
+		a.sessionMu.RUnlock()
+		return nil, nil, ErrVaultSwitching
+	}
+	if a.session == nil {
+		a.sessionMu.RUnlock()
+		return nil, nil, ErrNoVaultOpen
+	}
+	return a.session, a.sessionMu.RUnlock, nil
+}
+
+func withSession[T any](a *App, call func(*vaultSession) (T, error)) (T, error) {
+	var zero T
+	session, release, err := a.acquireSession()
+	if err != nil {
+		return zero, err
+	}
+	defer release()
+	return call(session)
+}
+
+func (a *App) beginSwitch() (func(), error) {
+	if !a.switchMu.TryLock() {
+		return nil, ErrVaultSwitching
+	}
+	a.switching.Store(true)
+	return func() {
+		a.switching.Store(false)
+		a.switchMu.Unlock()
+	}, nil
+}
+
+func (a *App) prepareSession(path string) (*vaultSession, error) {
+	canonical, err := vault.ValidateExistingVault(path)
+	if err != nil {
+		return nil, err
+	}
+	service, err := vault.New(vault.Options{Root: canonical, StartWatcher: true})
+	if err != nil {
+		return nil, fmt.Errorf("initialiser le coffre : %w", err)
+	}
+	if service.VaultStatus().State != vault.VaultLocked {
+		if err := service.IndexNow(service.BootstrapContext(), nil); err != nil {
+			_ = service.Close()
+			return nil, fmt.Errorf("indexer le coffre : %w", err)
+		}
+	}
+	assetSrv := vault.NewAssetServer(canonical)
 	port, err := assetSrv.Start()
 	if err != nil {
 		_ = service.Close()
-		return nil, fmt.Errorf("démarrer asset server : %w", err)
+		return nil, fmt.Errorf("démarrer le serveur d’assets : %w", err)
 	}
-
-	return &App{vault: service, assetSrv: assetSrv, assetPort: port}, nil
+	return &vaultSession{service: service, assetSrv: assetSrv, assetPort: port}, nil
 }
 
-func (a *App) Startup(ctx context.Context) {
-	a.ctx = ctx
-}
+func (a *App) commitSession(prepared *vaultSession) error {
+	a.sessionMu.Lock()
 
-func (a *App) Shutdown(ctx context.Context) {
-	if a.assetSrv != nil {
-		_ = a.assetSrv.Stop()
+	a.configMu.Lock()
+	next := a.config
+	next.RecordOpen(prepared.service.Root(), a.now())
+	if err := a.store.Save(next); err != nil {
+		a.configMu.Unlock()
+		a.sessionMu.Unlock()
+		return err
 	}
-	_ = a.vault.Close()
+	a.config = next
+	a.configMu.Unlock()
+
+	old := a.session
+	a.session = prepared
+	a.sessionMu.Unlock()
+	old.close()
+	return nil
 }
 
-func (a *App) VaultPath() string {
-	return a.vault.Root()
+func (a *App) OpenVault(path string) error {
+	finish, err := a.beginSwitch()
+	if err != nil {
+		return err
+	}
+	defer finish()
+	prepared, err := a.prepareSession(path)
+	if err != nil {
+		return err
+	}
+	if err := a.commitSession(prepared); err != nil {
+		prepared.close()
+		return err
+	}
+	return nil
 }
 
-func (a *App) VaultStatus() vault.VaultStatusInfo {
-	return a.vault.VaultStatus()
+func (a *App) CreateVault(request domain.CreateVaultRequest) error {
+	finish, err := a.beginSwitch()
+	if err != nil {
+		return err
+	}
+	defer finish()
+	if err := vault.ValidateVaultName(request.Name); err != nil {
+		return err
+	}
+	parent, err := vault.CanonicalExistingDir(request.ParentPath)
+	if err != nil {
+		return err
+	}
+	destination := filepath.Join(parent, request.Name)
+	if _, err := os.Lstat(destination); err == nil {
+		return errors.New("un fichier ou dossier porte déjà ce nom")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("vérifier la destination : %w", err)
+	}
+	tempRoot, err := os.MkdirTemp(parent, ".notevault-create-*")
+	if err != nil {
+		return fmt.Errorf("préparer le coffre temporaire : %w", err)
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.RemoveAll(tempRoot)
+		}
+	}()
+	service, err := vault.New(vault.Options{Root: tempRoot})
+	if err != nil {
+		return err
+	}
+	if request.Encrypted {
+		if err := service.EnableEncryption(request.Passphrase); err != nil {
+			_ = service.Close()
+			return err
+		}
+	}
+	if err := service.Close(); err != nil {
+		return fmt.Errorf("finaliser le coffre : %w", err)
+	}
+	if err := os.Rename(tempRoot, destination); err != nil {
+		return fmt.Errorf("installer le coffre : %w", err)
+	}
+	cleanup = false
+	prepared, err := a.prepareSession(destination)
+	if err != nil {
+		return err
+	}
+	if err := a.commitSession(prepared); err != nil {
+		prepared.close()
+		return err
+	}
+	return nil
+}
+
+func (a *App) ApplicationStatus() (domain.ApplicationStatus, error) {
+	a.configMu.Lock()
+	cfg := a.config
+	a.configMu.Unlock()
+
+	a.sessionMu.RLock()
+	activePath := ""
+	mode := domain.ApplicationNoVault
+	if a.session != nil {
+		activePath = a.session.service.Root()
+		state := a.session.service.VaultStatus().State
+		if state == vault.VaultLocked || state == vault.VaultEnabling || state == vault.VaultDisabling {
+			mode = domain.ApplicationLocked
+		} else {
+			mode = domain.ApplicationReady
+		}
+	}
+	a.sessionMu.RUnlock()
+
+	status := domain.ApplicationStatus{
+		Mode:                mode,
+		RecentVaults:        make([]domain.VaultInfo, 0, len(cfg.RecentVaults)),
+		OnboardingDismissed: cfg.OnboardingDismissed,
+	}
+	for _, recent := range cfg.RecentVaults {
+		info := vaultInfo(recent.Path, recent.LastOpenedAt, recent.Path == activePath)
+		status.RecentVaults = append(status.RecentVaults, info)
+		if info.Active {
+			copyInfo := info
+			status.ActiveVault = &copyInfo
+		}
+	}
+	if activePath != "" && status.ActiveVault == nil {
+		info := vaultInfo(activePath, time.Time{}, true)
+		status.ActiveVault = &info
+	}
+	return status, nil
+}
+
+func vaultInfo(path string, opened time.Time, active bool) domain.VaultInfo {
+	available := false
+	if _, err := vault.ValidateExistingVault(path); err == nil {
+		available = true
+	}
+	_, encryptionErr := os.Stat(filepath.Join(path, ".notevault", "encryption.json"))
+	return domain.VaultInfo{
+		Name:         filepath.Base(path),
+		Path:         path,
+		Available:    available,
+		Encrypted:    encryptionErr == nil,
+		Active:       active,
+		LastOpenedAt: opened,
+	}
+}
+
+func (a *App) ForgetRecentVault(path string) error {
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	next := a.config
+	next.Forget(path)
+	if err := a.store.Save(next); err != nil {
+		return err
+	}
+	a.config = next
+	return nil
+}
+
+func (a *App) SetOnboardingDismissed(dismissed bool) error {
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	next := a.config
+	next.OnboardingDismissed = dismissed
+	if err := a.store.Save(next); err != nil {
+		return err
+	}
+	a.config = next
+	return nil
+}
+
+func (a *App) SelectExistingVaultDirectory() (string, error) {
+	return wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title: "Ouvrir un coffre NoteVault existant",
+	})
+}
+
+func (a *App) SelectVaultParentDirectory() (string, error) {
+	return wailsruntime.OpenDirectoryDialog(a.ctx, wailsruntime.OpenDialogOptions{
+		Title: "Choisir l’emplacement du nouveau coffre",
+	})
+}
+
+func (a *App) VaultPath() (string, error) {
+	return withSession(a, func(s *vaultSession) (string, error) { return s.service.Root(), nil })
+}
+
+func (a *App) VaultStatus() (vault.VaultStatusInfo, error) {
+	return withSession(a, func(s *vaultSession) (vault.VaultStatusInfo, error) { return s.service.VaultStatus(), nil })
 }
 
 func (a *App) EnableEncryption(passphrase string) error {
-	return a.vault.EnableEncryption(passphrase)
+	return a.sessionError(func(s *vault.Service) error { return s.EnableEncryption(passphrase) })
 }
-
 func (a *App) UnlockVault(passphrase string) error {
-	return a.vault.UnlockVault(passphrase)
+	return a.sessionError(func(s *vault.Service) error { return s.UnlockVault(passphrase) })
 }
-
 func (a *App) ChangePassphrase(current, replacement string) error {
-	return a.vault.ChangePassphrase(current, replacement)
+	return a.sessionError(func(s *vault.Service) error { return s.ChangePassphrase(current, replacement) })
+}
+func (a *App) DisableEncryption(passphrase string) error {
+	return a.sessionError(func(s *vault.Service) error { return s.DisableEncryption(passphrase) })
 }
 
-func (a *App) DisableEncryption(passphrase string) error {
-	return a.vault.DisableEncryption(passphrase)
+func (a *App) sessionError(call func(*vault.Service) error) error {
+	_, err := withSession(a, func(s *vaultSession) (struct{}, error) { return struct{}{}, call(s.service) })
+	return err
 }
 
 func (a *App) ListNotes() ([]domain.NoteSummary, error) {
-	return a.vault.ListNotes()
+	return withSession(a, func(s *vaultSession) ([]domain.NoteSummary, error) { return s.service.ListNotes() })
 }
-
-// ListNotesFiltered applique une requête structurée (filtre sidebar).
 func (a *App) ListNotesFiltered(filter vault.FilterQuery, limit int) ([]domain.NoteSummary, error) {
 	if limit <= 0 {
 		limit = 1000
 	}
-	return a.vault.ListNotesFiltered(filter, limit)
+	return withSession(a, func(s *vaultSession) ([]domain.NoteSummary, error) { return s.service.ListNotesFiltered(filter, limit) })
 }
-
-// ListPinned retourne les notes épinglées.
 func (a *App) ListPinned() ([]domain.NoteSummary, error) {
-	return a.vault.ListPinned()
+	return withSession(a, func(s *vaultSession) ([]domain.NoteSummary, error) { return s.service.ListPinned() })
 }
-
-// ListFolders retourne les dossiers connus du coffre.
 func (a *App) ListFolders() ([]vault.FolderInfo, error) {
-	return a.vault.ListFolders()
+	return withSession(a, func(s *vaultSession) ([]vault.FolderInfo, error) { return s.service.ListFolders() })
 }
-
-// PinNote épingle ou désépingle une note.
-func (a *App) PinNote(relativePath string, pinned bool) error {
-	return a.vault.Pin(relativePath, pinned)
+func (a *App) PinNote(path string, pinned bool) error {
+	return a.sessionError(func(s *vault.Service) error { return s.Pin(path, pinned) })
 }
-
-// IsNotePinned indique si une note est épinglée.
-func (a *App) IsNotePinned(relativePath string) (bool, error) {
-	return a.vault.IsPinned(relativePath)
+func (a *App) IsNotePinned(path string) (bool, error) {
+	return withSession(a, func(s *vaultSession) (bool, error) { return s.service.IsPinned(path) })
 }
-
-// ListTags retourne les tags connus.
 func (a *App) ListTags() ([]vault.TagCount, error) {
-	return a.vault.ListTags()
+	return withSession(a, func(s *vaultSession) ([]vault.TagCount, error) { return s.service.ListTags() })
 }
-
 func (a *App) SearchNotes(query string, limit int) ([]domain.NoteSummary, error) {
 	if limit <= 0 {
 		limit = 200
 	}
-	return a.vault.Search(query, limit)
+	return withSession(a, func(s *vaultSession) ([]domain.NoteSummary, error) { return s.service.Search(query, limit) })
 }
-
-// OpenDailyNote ouvre (ou crée) la note du jour.
 func (a *App) OpenDailyNote() (domain.Note, error) {
-	return a.vault.OpenDailyNote()
+	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.OpenDailyNote() })
 }
-
-// EnsureDailyNote crée la note du jour si AutoDailyNote=true.
-// Retourne le chemin relatif ou "" si la fonction est désactivée.
 func (a *App) EnsureDailyNote() (string, error) {
-	return a.vault.EnsureDailyNote()
+	return withSession(a, func(s *vaultSession) (string, error) { return s.service.EnsureDailyNote() })
 }
-
-// ListTemplates retourne la liste des templates disponibles.
 func (a *App) ListTemplates() []vault.Template {
-	return a.vault.ListTemplates()
+	s, release, err := a.acquireSession()
+	if err != nil {
+		return nil
+	}
+	defer release()
+	return s.service.ListTemplates()
 }
-
-// CreateNoteFromTemplate crée une note avec un template nommé (id de Template).
-// Si templateID est vide ou "blank", la note est vide.
 func (a *App) CreateNoteFromTemplate(title, templateID string) (domain.Note, error) {
-	return a.vault.CreateNote(title, templateID)
+	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.CreateNote(title, templateID) })
 }
-
-// MoveNote déplace une note vers un nouveau chemin.
 func (a *App) MoveNote(oldPath, newPath string) (domain.Note, error) {
-	return a.vault.MoveNote(oldPath, newPath)
+	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.MoveNote(oldPath, newPath) })
 }
-
-// DuplicateNote crée une copie d'une note.
-func (a *App) DuplicateNote(relativePath string) (domain.Note, error) {
-	return a.vault.DuplicateNote(relativePath)
+func (a *App) DuplicateNote(path string) (domain.Note, error) {
+	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.DuplicateNote(path) })
 }
-
-// OpenInExplorer ouvre le fichier (ou son dossier) dans le gestionnaire natif.
-func (a *App) OpenInExplorer(relativePath string, reveal bool) error {
-	return a.vault.OpenInExplorer(relativePath, reveal)
+func (a *App) OpenInExplorer(path string, reveal bool) error {
+	return a.sessionError(func(s *vault.Service) error { return s.OpenInExplorer(path, reveal) })
 }
-
-// RenameTitle met à jour uniquement le titre d'une note.
-func (a *App) RenameTitle(relativePath, newTitle string) (domain.Note, error) {
-	return a.vault.RenameTitle(relativePath, newTitle)
+func (a *App) RenameTitle(path, title string) (domain.Note, error) {
+	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.RenameTitle(path, title) })
 }
-
-// GetBacklinks retourne les notes qui mentionnent le titre donné.
-// excludePath permet d'ignorer la note courante des résultats.
-func (a *App) GetBacklinks(title, excludePath string, limit int) ([]domain.NoteSummary, error) {
+func (a *App) GetBacklinks(title, exclude string, limit int) ([]domain.NoteSummary, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	return a.vault.GetBacklinks(title, excludePath, limit)
+	return withSession(a, func(s *vaultSession) ([]domain.NoteSummary, error) {
+		return s.service.GetBacklinks(title, exclude, limit)
+	})
 }
-
-// SaveAsset enregistre un binaire (image, etc.) dans le coffre.
-// `filename` est utilisé pour deviner l'extension.
 func (a *App) SaveAsset(data []byte, filename string) (string, error) {
-	return a.vault.SaveAsset(data, filename)
+	return withSession(a, func(s *vaultSession) (string, error) { return s.service.SaveAsset(data, filename) })
 }
-
-// ImportAssetFromFilePath copie un fichier existant (par exemple dropé
-// depuis un explorateur de fichiers) dans le coffre. Voir
-// vault.Service.ImportAssetFromFilePath.
-func (a *App) ImportAssetFromFilePath(absolutePath string) (string, error) {
-	return a.vault.ImportAssetFromFilePath(absolutePath)
+func (a *App) ImportAssetFromFilePath(path string) (string, error) {
+	return withSession(a, func(s *vaultSession) (string, error) { return s.service.ImportAssetFromFilePath(path) })
 }
-
-// ListHistory retourne les versions d'une note.
-func (a *App) ListHistory(relativePath string) ([]vault.HistoryEntry, error) {
-	return a.vault.ListHistory(relativePath)
+func (a *App) ListHistory(path string) ([]vault.HistoryEntry, error) {
+	return withSession(a, func(s *vaultSession) ([]vault.HistoryEntry, error) { return s.service.ListHistory(path) })
 }
-
-// ReadHistoryVersion retourne le contenu brut d'une version d'historique.
-func (a *App) ReadHistoryVersion(relativePath, versionID string) (string, error) {
-	return a.vault.ReadHistoryVersion(relativePath, versionID)
+func (a *App) ReadHistoryVersion(path, id string) (string, error) {
+	return withSession(a, func(s *vaultSession) (string, error) { return s.service.ReadHistoryVersion(path, id) })
 }
-
-// RestoreFromHistory restaure une version comme version courante.
-func (a *App) RestoreFromHistory(relativePath, versionID string) (domain.Note, error) {
-	return a.vault.RestoreFromHistory(relativePath, versionID)
+func (a *App) RestoreFromHistory(path, id string) (domain.Note, error) {
+	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.RestoreFromHistory(path, id) })
 }
-
-// DiffHistory retourne le diff unifié entre deux versions.
-func (a *App) DiffHistory(relativePath, aID, bID string) (string, error) {
-	return a.vault.DiffHistory(relativePath, aID, bID)
+func (a *App) DiffHistory(path, aID, bID string) (string, error) {
+	return withSession(a, func(s *vaultSession) (string, error) { return s.service.DiffHistory(path, aID, bID) })
 }
-
-// OpenAsset retourne le chemin absolu d'un asset (utilisable par le frontend
-// pour l'afficher via file:// ou équivalent Wails).
-func (a *App) OpenAsset(relativePath string) (string, error) {
-	return a.vault.ResolveAsset(relativePath)
+func (a *App) OpenAsset(path string) (string, error) {
+	return withSession(a, func(s *vaultSession) (string, error) { return s.service.ResolveAsset(path) })
 }
-
-// AssetURL retourne l'URL HTTP locale à utiliser dans `<img src=...>` pour
-// afficher un asset. Le serveur HTTP interne est démarré dans NewApp et
-// confine les requêtes à <vault>/assets/ avec une whitelist d'extensions.
-func (a *App) AssetURL(relativePath string) (string, error) {
-	abs, err := a.vault.ResolveAsset(relativePath)
-	if err != nil {
-		return "", err
-	}
-	rel, err := filepath.Rel(a.vault.Root(), abs)
-	if err != nil {
-		return "", fmt.Errorf("construire l'URL de l'asset : %w", err)
-	}
-	assetURL := url.URL{
-		Scheme: "http",
-		Host:   fmt.Sprintf("127.0.0.1:%d", a.assetPort),
-		Path:   "/files/" + filepath.ToSlash(rel),
-	}
-	return assetURL.String(), nil
+func (a *App) AssetURL(path string) (string, error) {
+	return withSession(a, func(s *vaultSession) (string, error) {
+		abs, err := s.service.ResolveAsset(path)
+		if err != nil {
+			return "", err
+		}
+		rel, err := filepath.Rel(s.service.Root(), abs)
+		if err != nil {
+			return "", fmt.Errorf("construire l’URL de l’asset : %w", err)
+		}
+		u := url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", s.assetPort), Path: "/files/" + filepath.ToSlash(rel)}
+		return u.String(), nil
+	})
 }
-
-func (a *App) OpenNote(relativePath string) (domain.Note, error) {
-	return a.vault.OpenNote(relativePath)
+func (a *App) OpenNote(path string) (domain.Note, error) {
+	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.OpenNote(path) })
 }
-
-func (a *App) CreateNote(title string, templateKey string) (domain.Note, error) {
-	return a.vault.CreateNote(title, templateKey)
+func (a *App) CreateNote(title, key string) (domain.Note, error) {
+	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.CreateNote(title, key) })
 }
-
 func (a *App) SaveNote(note domain.Note) (domain.Note, error) {
-	return a.vault.SaveNote(note)
+	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.SaveNote(note) })
 }
-
-func (a *App) DeleteNote(relativePath string) error {
-	return a.vault.DeleteNote(relativePath)
+func (a *App) DeleteNote(path string) error {
+	return a.sessionError(func(s *vault.Service) error { return s.DeleteNote(path) })
 }
-
-// ListTrash retourne les notes actuellement en corbeille.
 func (a *App) ListTrash() ([]vault.TrashEntry, error) {
-	return a.vault.ListTrash()
+	return withSession(a, func(s *vaultSession) ([]vault.TrashEntry, error) { return s.service.ListTrash() })
 }
-
-// RestoreFromTrash remet en place une note supprimée.
 func (a *App) RestoreFromTrash(id string) (domain.Note, error) {
-	return a.vault.RestoreFromTrash(id)
+	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.RestoreFromTrash(id) })
 }
-
-// EmptyTrash vide la corbeille.
 func (a *App) EmptyTrash() error {
-	return a.vault.EmptyTrash()
+	return a.sessionError(func(s *vault.Service) error { return s.EmptyTrash() })
 }
-
-// GetConfig retourne la configuration persistée.
 func (a *App) GetConfig() (config.Config, error) {
-	return a.vault.GetConfig()
+	return withSession(a, func(s *vaultSession) (config.Config, error) { return s.service.GetConfig() })
 }
-
-// UpdateConfig enregistre la configuration.
 func (a *App) UpdateConfig(cfg config.Config) error {
-	return a.vault.UpdateConfig(cfg)
+	return a.sessionError(func(s *vault.Service) error { return s.UpdateConfig(cfg) })
 }
-
-// --- Phase 5 : thèmes, export, stats, recovery ---------------------------
-
-// ListThemes retourne les thèmes disponibles (built-in + utilisateur).
 func (a *App) ListThemes() []vault.Theme {
-	return a.vault.ListThemes()
+	s, release, err := a.acquireSession()
+	if err != nil {
+		return nil
+	}
+	defer release()
+	return s.service.ListThemes()
 }
-
-// Theme retourne un thème par ID.
 func (a *App) Theme(id string) (vault.Theme, error) {
-	return a.vault.Theme(id)
+	return withSession(a, func(s *vaultSession) (vault.Theme, error) { return s.service.Theme(id) })
 }
-
-// ExportNotes écrit les notes fournies (+ assets) dans un fichier zip.
-func (a *App) ExportNotes(paths []string, destZip string) error {
-	return a.vault.ExportNotes(paths, destZip)
+func (a *App) ExportNotes(paths []string, dest string) error {
+	return a.sessionError(func(s *vault.Service) error { return s.ExportNotes(paths, dest) })
 }
-
-// Stats calcule les indicateurs d'activité locale.
 func (a *App) Stats() (vault.Stats, error) {
-	return a.vault.Stats()
+	return withSession(a, func(s *vaultSession) (vault.Stats, error) { return s.service.Stats() })
 }
-
-// SnapshotForStartup renvoie l'état combiné onboarding + recovery.
 func (a *App) SnapshotForStartup() (vault.RecoverySnapshot, error) {
-	return a.vault.SnapshotForStartup()
+	return withSession(a, func(s *vaultSession) (vault.RecoverySnapshot, error) { return s.service.SnapshotForStartup() })
 }
-
-// MarkOnboardingCompleted marque l'onboarding comme terminé.
 func (a *App) MarkOnboardingCompleted(onboarding *vault.Onboarding) error {
-	return a.vault.MarkOnboardingCompleted(onboarding)
+	return a.sessionError(func(s *vault.Service) error { return s.MarkOnboardingCompleted(onboarding) })
 }
-
-// SetDirtyBuffer enregistre un buffer en cours d'édition (recovery).
-func (a *App) SetDirtyBuffer(notePath, buffer string, diskMTime time.Time) error {
-	return a.vault.SetDirtyBuffer(notePath, buffer, diskMTime)
+func (a *App) SetDirtyBuffer(path, buffer string, mtime time.Time) error {
+	return a.sessionError(func(s *vault.Service) error { return s.SetDirtyBuffer(path, buffer, mtime) })
 }
-
-// ClearDirtyBuffer efface le buffer de recovery.
 func (a *App) ClearDirtyBuffer() error {
-	return a.vault.ClearDirtyBuffer()
+	return a.sessionError(func(s *vault.Service) error { return s.ClearDirtyBuffer() })
 }

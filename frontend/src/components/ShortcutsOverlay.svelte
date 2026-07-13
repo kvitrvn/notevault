@@ -66,9 +66,10 @@
   type Props = {
     open: boolean;
     onClose: () => void;
+    onReviewGuide: () => void;
   };
 
-  let { open, onClose }: Props = $props();
+  let { open, onClose, onReviewGuide }: Props = $props();
 
   let query = $state('');
   let inputEl: HTMLInputElement | undefined = $state();
@@ -124,7 +125,7 @@
       <header class="flex items-center gap-2 border-b border-border px-4 py-3">
         <Keyboard size={16} strokeWidth={2} class="shrink-0 text-accent" aria-hidden="true" />
         <h2 class="text-sm font-semibold text-foreground">Raccourcis clavier</h2>
-        <span class="ml-auto text-xs text-faint">{filtered.length} groupe(s)</span>
+        <button type="button" class="ml-auto rounded-md border border-border px-2 py-1 text-xs text-subtle hover:bg-panel-muted hover:text-foreground" onclick={onReviewGuide}>Revoir le guide</button>
         <button
           type="button"
           class="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-background text-subtle hover:bg-panel-muted hover:text-foreground"
