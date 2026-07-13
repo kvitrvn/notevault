@@ -1,0 +1,413 @@
+name: Linux packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Package version for the retained artifacts (MAJOR.MINOR.PATCH)
+        required: true
+        default: 0.1.0
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    name: Validate version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - id: version
+        name: Resolve strict SemVer
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          semver='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+          if [[ "$EVENT_NAME" == push ]]; then
+            [[ "$REF_NAME" =~ ^v${semver}$ ]] || {
+              echo "tag must match vMAJOR.MINOR.PATCH" >&2
+              exit 1
+            }
+            version=${REF_NAME#v}
+            publish=true
+          else
+            [[ "$INPUT_VERSION" =~ ^${semver}$ ]] || {
+              echo "version must match MAJOR.MINOR.PATCH" >&2
+              exit 1
+            }
+            version=$INPUT_VERSION
+            publish=false
+          fi
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "publish=$publish" >>"$GITHUB_OUTPUT"
+
+  build:
+    name: Build once on Debian 12
+    needs: metadata
+    runs-on: ubuntu-24.04
+    container: debian:12
+    timeout-minutes: 35
+    steps:
+      - name: Install container prerequisites
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            curl \
+            file \
+            git \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            pkg-config \
+            xz-utils
+
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.25.0'
+          cache-dependency-path: go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Verify source
+        run: make verify
+
+      - name: Build production binary
+        run: make build WAILS_TAGS=webkit2_41 WAILS_BUILD_FLAGS=-trimpath
+
+      - name: Inspect binary
+        run: |
+          file build/bin/notevault
+          file build/bin/notevault | grep -Eq 'ELF 64-bit.*x86-64'
+          ldd build/bin/notevault | tee /tmp/notevault-ldd.txt
+          ! grep -q 'not found' /tmp/notevault-ldd.txt
+          install -Dm755 build/bin/notevault release-input/notevault
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-amd64-binary
+          path: release-input/notevault
+          if-no-files-found: error
+          retention-days: 7
+
+  package-deb:
+    name: Create Debian package
+    needs:
+      - metadata
+      - build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Install package inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends desktop-file-utils
+
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Download release binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: linux-amd64-binary
+          path: release-input
+
+      - name: Build and inspect package
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          chmod 0755 release-input/notevault
+          ./scripts/package-deb.sh "$VERSION" release-input/notevault dist/deb
+          package="dist/deb/notevault_${VERSION}_amd64.deb"
+          dpkg-deb --info "$package"
+          dpkg-deb --contents "$package"
+          ./scripts/verify-package.sh "$package"
+          desktop-file-validate packaging/linux/notevault.desktop
+
+      - name: Upload Debian package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: debian-package
+          path: dist/deb/*.deb
+          if-no-files-found: error
+          retention-days: 7
+
+  package-arch:
+    name: Create Arch package
+    needs:
+      - metadata
+      - build
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    timeout-minutes: 25
+    steps:
+      - name: Install container prerequisites
+        run: |
+          pacman -Syu --noconfirm --needed \
+            desktop-file-utils \
+            git \
+            namcap \
+            pacman-contrib
+
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Download release binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: linux-amd64-binary
+          path: release-input
+
+      - name: Build package as an unprivileged user
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          useradd --create-home builder
+          install -m755 release-input/notevault packaging/arch/notevault
+          install -m644 packaging/linux/notevault.desktop packaging/arch/notevault.desktop
+          install -m644 build/appicon.svg packaging/arch/notevault.svg
+          install -m644 build/appicon.png packaging/arch/notevault.png
+          install -m644 LICENSE packaging/arch/LICENSE
+          chown -R builder:builder packaging/arch
+          runuser -u builder -- sh -c 'cd packaging/arch && updpkgsums'
+          runuser -u builder -- env NOTEAULT_VERSION="$VERSION" \
+            makepkg --dir packaging/arch --cleanbuild --clean --nodeps --noconfirm
+          mkdir -p dist/arch
+          cp "packaging/arch/notevault-${VERSION}-1-x86_64.pkg.tar.zst" dist/arch/
+
+      - name: Inspect package
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          package="dist/arch/notevault-${VERSION}-1-x86_64.pkg.tar.zst"
+          pacman -Qip "$package"
+          pacman -Qlp "$package"
+          namcap packaging/arch/PKGBUILD "$package"
+          ./scripts/verify-package.sh "$package"
+          desktop-file-validate packaging/linux/notevault.desktop
+
+      - name: Upload Arch package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: arch-package
+          path: dist/arch/*.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 7
+
+  test-deb:
+    name: Test ${{ matrix.name }} package
+    needs:
+      - metadata
+      - package-deb
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Debian 12
+            image: debian:12
+          - name: Debian 13
+            image: debian:13
+          - name: Ubuntu 24.04
+            image: ubuntu:24.04
+    steps:
+      - name: Install test prerequisites
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends \
+            ca-certificates \
+            dbus-x11 \
+            desktop-file-utils \
+            git \
+            procps \
+            xauth \
+            xvfb
+
+      - name: Check out package tests
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Download Debian package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: debian-package
+          path: dist/deb
+
+      - name: Install and inspect package
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          package="dist/deb/notevault_${VERSION}_amd64.deb"
+          apt-get install --yes "$PWD/$package"
+          dpkg-query --show notevault
+          dpkg-query --listfiles notevault
+          ./scripts/verify-package.sh "$package"
+          desktop-file-validate /usr/share/applications/notevault.desktop
+          test "$(stat -c %a /usr/bin/notevault)" = 755
+          test "$(stat -c %a /usr/share/applications/notevault.desktop)" = 644
+          ldd /usr/bin/notevault | tee /tmp/notevault-ldd.txt
+          ! grep -q 'not found' /tmp/notevault-ldd.txt
+
+      - name: Run graphical smoke test
+        run: |
+          useradd --create-home smoke
+          set +e
+          runuser -u smoke -- timeout 15s dbus-run-session -- \
+            xvfb-run --auto-servernum /usr/bin/notevault > /tmp/notevault-smoke.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/notevault-smoke.log
+          test "$status" -eq 124
+          ! grep -Eiq 'error while loading shared libraries|WebKit2GTK.*required' \
+            /tmp/notevault-smoke.log
+
+  test-arch:
+    name: Test Arch package
+    needs:
+      - metadata
+      - package-arch
+    runs-on: ubuntu-24.04
+    container: archlinux:base
+    timeout-minutes: 35
+    steps:
+      - name: Install test prerequisites
+        run: |
+          pacman -Syu --noconfirm --needed \
+            dbus \
+            desktop-file-utils \
+            git \
+            namcap \
+            procps-ng \
+            xorg-server-xvfb \
+            xorg-xauth
+
+      - name: Check out package tests
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Download Arch package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: arch-package
+          path: dist/arch
+
+      - name: Install and inspect package
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          package="dist/arch/notevault-${VERSION}-1-x86_64.pkg.tar.zst"
+          pacman -Qip "$package"
+          pacman -Qlp "$package"
+          namcap "$package"
+          pacman -U --noconfirm "$package"
+          pacman -Q notevault webkit2gtk-4.1 xorg-xwayland
+          ./scripts/verify-package.sh "$package"
+          desktop-file-validate /usr/share/applications/notevault.desktop
+          test "$(stat -c %a /usr/bin/notevault)" = 755
+          test "$(stat -c %a /usr/share/applications/notevault.desktop)" = 644
+          ldd /usr/bin/notevault | tee /tmp/notevault-ldd.txt
+          ! grep -q 'not found' /tmp/notevault-ldd.txt
+
+      - name: Run graphical smoke test
+        run: |
+          useradd --create-home smoke
+          set +e
+          runuser -u smoke -- timeout 15s dbus-run-session -- \
+            xvfb-run --auto-servernum /usr/bin/notevault > /tmp/notevault-smoke.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/notevault-smoke.log
+          test "$status" -eq 124
+          ! grep -Eiq 'error while loading shared libraries|WebKit2GTK.*required' \
+            /tmp/notevault-smoke.log
+
+  assemble:
+    name: Assemble validated artifacts
+    needs:
+      - metadata
+      - test-deb
+      - test-arch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download Debian package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: debian-package
+          path: release
+
+      - name: Download Arch package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: arch-package
+          path: release
+
+      - name: Generate SHA-256 checksums
+        working-directory: release
+        run: sha256sum ./*.deb ./*.pkg.tar.zst > SHA256SUMS
+
+      - name: Retain validated release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: notevault-${{ needs.metadata.outputs.version }}-linux-amd64
+          path: release/*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish GitHub Release
+    if: needs.metadata.outputs.publish == 'true'
+    needs:
+      - metadata
+      - assemble
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download validated release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: notevault-${{ needs.metadata.outputs.version }}-linux-amd64
+          path: release
+
+      - name: Create release without overwriting
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists; refusing to overwrite it" >&2
+            exit 1
+          fi
+          gh release create "$TAG" \
+            --verify-tag \
+            --generate-notes \
+            release/*.deb \
+            release/*.pkg.tar.zst \
+            release/SHA256SUMS

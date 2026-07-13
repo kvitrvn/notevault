@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=NoteVault
+Comment=Application de notes locale-first
+Exec=notevault
+Icon=notevault
+Terminal=false
+Categories=Utility;TextEditor;
+Keywords=notes;markdown;vault;
+StartupNotify=true
+StartupWMClass=notevault

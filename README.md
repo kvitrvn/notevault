@@ -4,6 +4,35 @@ NoteVault est une application desktop de prise de notes locale-first. Les
 notes restent des fichiers Markdown lisibles dans un coffre local ; aucun
 compte, serveur distant ou service de synchronisation n'est nécessaire.
 
+Le projet est distribué sous licence [MIT](LICENSE) par Benjamin Gaudé
+<kvitrvn@proton.me>. Le code source et les versions publiées sont disponibles
+sur <https://github.com/kvitrvn/notevault>.
+
+## Installation Linux
+
+Les paquets officiels sont publiés uniquement dans les GitHub Releases et
+ciblent les machines `x86_64`/`amd64`. La première version n'utilise ni AUR ni
+dépôt APT et les paquets ne sont pas encore signés par GPG.
+
+Pour Arch Linux, Manjaro et Omarchy :
+
+```bash
+sudo pacman -U ./notevault-0.1.0-1-x86_64.pkg.tar.zst
+```
+
+Pour Debian 12 ou 13 et Ubuntu 24.04 ou version ultérieure :
+
+```bash
+sudo apt install ./notevault_0.1.0_amd64.deb
+```
+
+Téléchargez `SHA256SUMS` dans le même dossier que les paquets, puis vérifiez
+leur intégrité avant l'installation :
+
+```bash
+sha256sum --check SHA256SUMS
+```
+
 ## Fonctionnalités
 
 - Éditeur Markdown riche avec tableaux, tâches, code et images locales.
@@ -117,6 +146,28 @@ make build          # application desktop de production
 make regen          # bindings Wails après modification d'une API Go exposée
 make fmt            # formatage Go
 ```
+
+## Publier une version
+
+Les versions utilisent exclusivement des tags SemVer stricts de la forme
+`vMAJOR.MINOR.PATCH`. Le tag est la source de vérité de la version des paquets.
+Pour publier `v0.1.0`, créez et poussez un tag annoté :
+
+```bash
+git tag --annotate v0.1.0 --message "NoteVault v0.1.0"
+git push origin v0.1.0
+```
+
+Le workflow construit le binaire sous Debian 12, crée les paquets Arch et
+Debian, les installe sur toutes les distributions prises en charge, exécute un
+smoke test graphique, puis publie la GitHub Release avec `SHA256SUMS`. Un
+déclenchement manuel du workflow conserve les mêmes fichiers comme artefacts
+sans créer de release.
+
+Avant le premier tag, le paquet doit aussi être testé manuellement sur
+Omarchy/Hyprland et Manjaro : installation, présence dans le lanceur, icône et
+regroupement de fenêtre, focus, redimensionnement, ouverture d'un coffre, puis
+désinstallation sans suppression des données.
 
 Les cibles frontend utilisent `npm ci` et régénèrent les bindings Wails si le
 checkout ne les contient pas. Les fichiers générés sous `frontend/wailsjs/` et

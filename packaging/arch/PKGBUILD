@@ -1,0 +1,33 @@
+# Maintainer: Benjamin Gaudé <kvitrvn@proton.me>
+
+pkgname=notevault
+pkgver="${NOTEAULT_VERSION:-0.1.0}"
+pkgrel=1
+pkgdesc="Local-first desktop note-taking application"
+arch=('x86_64')
+url="https://github.com/kvitrvn/notevault"
+license=('MIT')
+depends=(
+  'at-spi2-core'
+  'cairo'
+  'gdk-pixbuf2'
+  'glib2'
+  'glibc'
+  'gtk3'
+  'harfbuzz'
+  'libsoup3'
+  'pango'
+  'webkit2gtk-4.1'
+  'xorg-xwayland'
+  'zlib'
+)
+source=('notevault' 'notevault.desktop' 'notevault.svg' 'notevault.png' 'LICENSE')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+package() {
+  install -Dm755 notevault "$pkgdir/usr/bin/notevault"
+  install -Dm644 notevault.desktop "$pkgdir/usr/share/applications/notevault.desktop"
+  install -Dm644 notevault.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/notevault.svg"
+  install -Dm644 notevault.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/notevault.png"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/notevault/LICENSE"
+}

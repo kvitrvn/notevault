@@ -4,6 +4,7 @@ WAILS := tools/wails/bin/wails
 # Wails utilise encore 4.0 par défaut, sauf avec ce tag officiel.
 WAILS_TAGS ?= $(shell pkg-config --exists webkit2gtk-4.1 2>/dev/null && echo webkit2_41)
 WAILS_TAG_ARGS := $(if $(WAILS_TAGS),-tags $(WAILS_TAGS),)
+WAILS_BUILD_FLAGS ?= -trimpath
 
 .PHONY: dev regen build test frontend-test fmt check verify patch-models frontend-install
 
@@ -21,7 +22,7 @@ regen: $(WAILS)
 	./scripts/patch-models.sh
 
 build: $(WAILS)
-	$(WAILS) build $(WAILS_TAG_ARGS)
+	$(WAILS) build $(WAILS_TAG_ARGS) $(WAILS_BUILD_FLAGS)
 
 test:
 	go test ./...

@@ -11,6 +11,7 @@ import (
 	"github.com/kvitrvn/notevault/internal/appconfig"
 	"github.com/kvitrvn/notevault/internal/domain"
 	"github.com/kvitrvn/notevault/internal/vault"
+	"github.com/wailsapp/wails/v2/pkg/options/linux"
 )
 
 func setupAppForTest(t *testing.T) *App {
@@ -293,5 +294,21 @@ func TestApplicationBackgroundIsOpaque(t *testing.T) {
 	}
 	if background.A != 255 {
 		t.Fatalf("background alpha = %d, want 255", background.A)
+	}
+}
+
+func TestApplicationLinuxDesktopIdentity(t *testing.T) {
+	linuxOptions := applicationOptions(&App{}).Linux
+	if linuxOptions == nil {
+		t.Fatal("Linux options are nil")
+	}
+	if linuxOptions.ProgramName != "notevault" {
+		t.Fatalf("ProgramName = %q, want %q", linuxOptions.ProgramName, "notevault")
+	}
+	if len(linuxOptions.Icon) == 0 {
+		t.Fatal("Linux application icon is empty")
+	}
+	if linuxOptions.WebviewGpuPolicy != linux.WebviewGpuPolicyNever {
+		t.Fatalf("WebviewGpuPolicy = %d, want disabled", linuxOptions.WebviewGpuPolicy)
 	}
 }

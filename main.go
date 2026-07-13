@@ -7,6 +7,7 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/linux"
 )
 
 func main() {
@@ -35,6 +36,11 @@ func applicationOptions(app *App) *options.App {
 		DisableResize: false,
 		Fullscreen:    false,
 		AssetServer:   &assetserver.Options{Assets: assets},
+		Linux: &linux.Options{
+			Icon:             applicationIcon,
+			ProgramName:      "notevault",
+			WebviewGpuPolicy: linux.WebviewGpuPolicyNever,
+		},
 		// NewRGB garantit un fond natif opaque (alpha 255).
 		BackgroundColour: options.NewRGB(24, 24, 27),
 		Debug: options.Debug{

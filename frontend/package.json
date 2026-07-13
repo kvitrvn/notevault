@@ -2,6 +2,14 @@
   "name": "notevault-frontend",
   "private": true,
   "version": "0.1.0",
+  "description": "NoteVault local-first desktop application frontend",
+  "author": "Benjamin Gaudé <kvitrvn@proton.me>",
+  "license": "MIT",
+  "homepage": "https://github.com/kvitrvn/notevault",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kvitrvn/notevault.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",

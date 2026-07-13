@@ -1,0 +1,11 @@
+Package: notevault
+Version: @VERSION@
+Section: editors
+Priority: optional
+Architecture: amd64
+Maintainer: Benjamin Gaudé <kvitrvn@proton.me>
+Homepage: https://github.com/kvitrvn/notevault
+Depends: libatk1.0-0 | libatk1.0-0t64, libc6, libcairo2, libgdk-pixbuf-2.0-0, libglib2.0-0 | libglib2.0-0t64, libgtk-3-0 | libgtk-3-0t64, libharfbuzz0b, libjavascriptcoregtk-4.1-0, libpango-1.0-0, libsoup-3.0-0, libwebkit2gtk-4.1-0, xwayland, zlib1g
+Description: local-first desktop note-taking application
+ NoteVault stores notes as local Markdown files and provides fast search,
+ recovery, templates, themes, local assets, and optional vault encryption.
