@@ -27,30 +27,31 @@ func historyDirFor(root, relativePath string) string {
 	return filepath.Join(root, ".notevault", "history", relativePath)
 }
 
-// snapshotHistory copie le fichier courant vers l'historique avant qu'il
-// ne soit écrasé. Effectue la rotation pour conserver au plus N versions.
-// Retourne l'ID (timestamp) de la nouvelle version ou "" si rien n'a été
-// copié (note inexistante, par exemple).
-func snapshotHistory(root, relativePath string, maxVersions int) (string, error) {
-	src := filepath.Join(root, filepath.FromSlash(relativePath))
-	info, err := os.Stat(src)
-	if err != nil {
+func (s *Service) snapshotHistory(relativePath string, maxVersions int) (string, error) {
+	src := filepath.Join(s.root, filepath.FromSlash(relativePath))
+	if _, err := os.Stat(src); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", nil
 		}
 		return "", err
 	}
-	dir := historyDirFor(root, relativePath)
+	raw, err := s.readPayload(relativePath)
+	if err != nil {
+		return "", err
+	}
+	dir := historyDirFor(s.root, relativePath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	now := nowUTC()
-	id := fmt.Sprintf("%d", now.UnixNano())
+	id := fmt.Sprintf("%d", nowUTC().UnixNano())
 	dest := filepath.Join(dir, id+".md")
-	if err := copyFileAtomic(src, dest); err != nil {
+	destRel, err := filepath.Rel(s.root, dest)
+	if err != nil {
 		return "", err
 	}
-	_ = info // la taille sera calculée par ListHistory
+	if err := s.writePayload(filepath.ToSlash(destRel), raw, 0o600); err != nil {
+		return "", err
+	}
 	if maxVersions > 0 {
 		if err := rotateHistory(dir, maxVersions); err != nil {
 			return id, err
@@ -89,6 +90,12 @@ func rotateHistory(dir string, maxVersions int) error {
 
 // ListHistory retourne les versions d'une note, de la plus récente à la plus ancienne.
 func (s *Service) ListHistory(relativePath string) ([]HistoryEntry, error) {
+	if err := s.requireUnlocked(); err != nil {
+		return nil, err
+	}
+	if err := s.validateNoteRelPath(relativePath); err != nil {
+		return nil, err
+	}
 	dir := historyDirFor(s.root, relativePath)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -114,7 +121,7 @@ func (s *Service) ListHistory(relativePath string) ([]HistoryEntry, error) {
 		if info != nil {
 			size = info.Size()
 		}
-		preview := readHistoryPreview(filepath.Join(dir, e.Name()))
+		preview := s.readHistoryPreview(filepath.Join(dir, e.Name()))
 		out = append(out, HistoryEntry{
 			ID:        name,
 			Timestamp: t,
@@ -127,20 +134,25 @@ func (s *Service) ListHistory(relativePath string) ([]HistoryEntry, error) {
 	return out, nil
 }
 
-// readHistoryPreview extrait les 2 premières lignes significatives.
-func readHistoryPreview(path string) string {
-	raw, err := os.ReadFile(path)
+func (s *Service) readHistoryPreview(path string) string {
+	rel, err := filepath.Rel(s.root, path)
 	if err != nil {
 		return ""
 	}
-	s := string(raw)
-	lines := strings.Split(s, "\n")
+	raw, err := s.readPayload(filepath.ToSlash(rel))
+	if err != nil {
+		return ""
+	}
+	return historyPreview(string(raw))
+}
+
+func historyPreview(content string) string {
+	lines := strings.Split(content, "\n")
 	out := make([]string, 0, 2)
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "---") || strings.HasPrefix(line, "title:") ||
-			strings.HasPrefix(line, "created:") || strings.HasPrefix(line, "updated:") ||
-			strings.HasPrefix(line, "tags:") {
+			strings.HasPrefix(line, "created:") || strings.HasPrefix(line, "updated:") || strings.HasPrefix(line, "tags:") {
 			continue
 		}
 		out = append(out, line)
@@ -153,12 +165,22 @@ func readHistoryPreview(path string) string {
 
 // ReadHistoryVersion retourne le contenu brut d'une version d'historique.
 func (s *Service) ReadHistoryVersion(relativePath, versionID string) (string, error) {
-	dir := historyDirFor(s.root, relativePath)
-	path := filepath.Join(dir, versionID+".md")
-	if !strings.HasPrefix(path, dir) {
+	if err := s.requireUnlocked(); err != nil {
+		return "", err
+	}
+	if versionID == "" || strings.Trim(versionID, "0123456789") != "" {
 		return "", fmt.Errorf("version invalide")
 	}
-	raw, err := os.ReadFile(path)
+	if err := s.validateNoteRelPath(relativePath); err != nil {
+		return "", err
+	}
+	dir := historyDirFor(s.root, relativePath)
+	path := filepath.Join(dir, versionID+".md")
+	rel, err := filepath.Rel(s.root, path)
+	if err != nil {
+		return "", err
+	}
+	raw, err := s.readPayload(filepath.ToSlash(rel))
 	if err != nil {
 		return "", err
 	}

@@ -22,6 +22,9 @@ import (
 // Chaque note est préfixée par un en-tête YAML minimal (title + updated) si
 // le frontmatter est manquant.
 func (s *Service) ExportNotes(paths []string, destZip string) error {
+	if err := s.requireUnlocked(); err != nil {
+		return err
+	}
 	if destZip == "" {
 		return fmt.Errorf("chemin de destination vide")
 	}
@@ -42,11 +45,16 @@ func (s *Service) ExportNotes(paths []string, destZip string) error {
 	if err != nil {
 		return fmt.Errorf("créer l'archive : %w", err)
 	}
+	success := false
+	defer func() {
+		if !success {
+			_ = os.Remove(destZip)
+		}
+	}()
 	zw := zip.NewWriter(out)
 	added := make(map[string]struct{})
 	for _, relPath := range resolved {
-		abs := filepath.Join(s.root, filepath.FromSlash(relPath))
-		raw, err := os.ReadFile(abs)
+		raw, err := s.readPayload(relPath)
 		if err != nil {
 			_ = zw.Close()
 			_ = out.Close()
@@ -89,6 +97,7 @@ func (s *Service) ExportNotes(paths []string, destZip string) error {
 	if err := out.Close(); err != nil {
 		return fmt.Errorf("fermer l'archive : %w", err)
 	}
+	success = true
 	return nil
 }
 
@@ -107,9 +116,11 @@ func (s *Service) resolveExportPaths(paths []string) ([]string, error) {
 		candidate := ""
 		// Cas 1 : chemin relatif existant.
 		if strings.HasPrefix(p, "notes/") {
-			abs := filepath.Join(s.root, filepath.FromSlash(p))
-			if _, err := os.Stat(abs); err == nil {
-				candidate = p
+			abs, pathErr := s.absoluteNotePath(p)
+			if pathErr == nil {
+				if _, statErr := os.Stat(abs); statErr == nil {
+					candidate = filepath.ToSlash(filepath.Clean(filepath.FromSlash(p)))
+				}
 			}
 		}
 		// Cas 2 : titre exact (lookup préchargé).
@@ -133,7 +144,7 @@ func (s *Service) resolveExportPaths(paths []string) ([]string, error) {
 
 // buildTitleIndex retourne un map title -> relativePath pour tous les
 // fichiers présents dans notes/. Lecture directe sur disque : on n'utilise
-// pas l'index SQLite pour rester cohérent avec l'état réel du coffre
+// pas l'index mémoire pour rester cohérent avec l'état réel du coffre
 // (un export doit toujours refléter les fichiers, pas un cache).
 func (s *Service) buildTitleIndex() map[string]string {
 	out := make(map[string]string)
@@ -145,7 +156,11 @@ func (s *Service) buildTitleIndex() map[string]string {
 		if strings.ToLower(filepath.Ext(path)) != ".md" {
 			return nil
 		}
-		raw, err := os.ReadFile(path)
+		rel, relErr := filepath.Rel(s.root, path)
+		if relErr != nil {
+			return nil
+		}
+		raw, err := s.readPayload(filepath.ToSlash(rel))
 		if err != nil {
 			return nil
 		}
@@ -154,7 +169,6 @@ func (s *Service) buildTitleIndex() map[string]string {
 		if title == "" {
 			title = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 		}
-		rel, _ := filepath.Rel(s.root, path)
 		out[title] = filepath.ToSlash(rel)
 		return nil
 	})

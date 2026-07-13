@@ -3,7 +3,7 @@
 ## Summary
 
 NoteVault is a local-first desktop note-taking app for single-user use. It
-stores notes as Markdown files in a local vault and uses SQLite indexing for
+stores notes as Markdown files in a local vault and uses an in-memory index for
 fast search and navigation. The product goal is a reliable, quiet, fast tool
 for writing, finding, organizing, and recovering notes without accounts or
 remote services.
@@ -11,7 +11,9 @@ remote services.
 ## Product Principles
 
 - Local-first: the user's data stays on their machine.
-- Readable files: notes are real `.md` files, not an opaque proprietary format.
+- Readable files by default: notes are real `.md` files. Optional whole-vault
+  encryption deliberately makes their contents opaque until the vault is
+  unlocked or encryption is disabled.
 - Reliability before feature depth: no data loss, atomic operations, trash,
   history, and draft recovery.
 - Pragmatic performance: the target vault size is roughly 10,000 notes with
@@ -26,7 +28,7 @@ remote services.
 - Create, read, edit, rename, move, duplicate, and delete notes.
 - Autosave with visible status and manual save.
 - Trash with restore and empty actions.
-- SQLite index, search, filters, pinned notes, tags, and folder view.
+- In-memory index, search, filters, pinned notes, tags, and folder view.
 - Optional daily note.
 - User note templates.
 - Wiki links, backlinks, and quick navigation.
@@ -35,12 +37,12 @@ remote services.
 - Version history, diff, and restore.
 - Built-in themes and user themes.
 - ZIP export, local stats, onboarding, and unsaved buffer recovery.
+- Optional whole-vault encryption for notes, history, and draft recovery.
 
 ## Non-Goals
 
 - Cloud sync or multi-device sync.
 - Accounts, authentication, sharing, or collaboration.
-- Built-in encryption.
 - Hosted web application.
 - Plugins or third-party code execution.
 - Remote database.
@@ -51,3 +53,8 @@ The vault is the trust boundary. User input includes paths, titles, Markdown
 content, assets, templates, and themes. Every feature must preserve vault
 confinement, prevent path traversal, and avoid exposing local content to any
 remote service by default.
+
+Encryption is local and optional. It does not conceal filenames, directories,
+pin metadata, file sizes and dates, or assets. Plaintext necessarily exists in
+process and WebView memory while the vault is unlocked, and ZIP exports contain
+plaintext Markdown. There is no recovery key in the first version.

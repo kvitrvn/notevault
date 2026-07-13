@@ -25,7 +25,7 @@ type Stats struct {
 
 // DayCount associe un jour (UTC) à un nombre d'événements.
 type DayCount struct {
-	Day   string `json:"day"`   // YYYY-MM-DD
+	Day   string `json:"day"` // YYYY-MM-DD
 	Count int    `json:"count"`
 }
 
@@ -33,10 +33,13 @@ type DayCount struct {
 const statsWindowDays = 30
 
 // Stats calcule les indicateurs d'activité locale. Les compteurs par jour
-// sont calculés en SQL (GROUP BY date(updated_at,...)). Les totaux de mots
+// sont calculés par l'index mémoire. Les totaux de mots
 // et la taille cumulée des assets sont lus depuis le disque (coût linéaire
 // en nombre de notes, exécuté ponctuellement).
 func (s *Service) Stats() (Stats, error) {
+	if err := s.requireUnlocked(); err != nil {
+		return Stats{}, err
+	}
 	stats := Stats{
 		WindowDays: statsWindowDays,
 		ComputedAt: nowUTC(),

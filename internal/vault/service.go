@@ -2,19 +2,21 @@ package vault
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kvitrvn/notevault/internal/config"
 	"github.com/kvitrvn/notevault/internal/domain"
 )
 
-// Service est la façade métier du coffre. Elle combine un index SQLite
+// Service est la façade métier du coffre. Elle combine un index mémoire
 // (cache requêtable), un Store de configuration et des opérations fichiers
 // atomiques. Toute mutation doit passer par elle pour rester cohérente.
 type Service struct {
@@ -27,12 +29,23 @@ type Service struct {
 	themes    *ThemeLoader
 	indexCtx  context.Context
 	indexStop context.CancelFunc
+
+	securityMu         sync.RWMutex
+	mutationMu         sync.RWMutex
+	vaultState         VaultState
+	metadata           *encryptionMetadata
+	metadataInvalid    bool
+	vaultKey           []byte
+	encryptionWarnings []string
+	migrationCurrent   int
+	migrationTotal     int
+	watcherWanted      bool
 }
 
 // Options configure la construction du service.
 type Options struct {
 	Root         string
-	Index        Index         // si nil, un index SQLite est créé
+	Index        Index         // si nil, un index mémoire est créé
 	Config       *config.Store // si nil, un Store est créé
 	StartWatcher bool
 }
@@ -54,9 +67,12 @@ func New(opts Options) (*Service, error) {
 	}
 	idx := opts.Index
 	if idx == nil {
-		idx, err = newSQLiteIndex(filepath.Join(root, ".notevault", "index.db"))
+		idx, err = newMemoryIndex(root)
 		if err != nil {
 			return nil, err
+		}
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			_ = os.Remove(filepath.Join(root, ".notevault", "index.db") + suffix)
 		}
 	}
 	cfg := opts.Config
@@ -64,12 +80,28 @@ func New(opts Options) (*Service, error) {
 		cfg = config.NewStore(root)
 	}
 	s := &Service{
-		root:      root,
-		index:     idx,
-		config:    cfg,
-		state:     newStateStore(root),
-		templates: NewTemplateLoader(root),
-		themes:    NewThemeLoader(root),
+		root:          root,
+		index:         idx,
+		config:        cfg,
+		state:         newStateStore(root),
+		templates:     NewTemplateLoader(root),
+		themes:        NewThemeLoader(root),
+		vaultState:    VaultDisabled,
+		watcherWanted: opts.StartWatcher,
+	}
+	metadata, err := loadEncryptionMetadata(root)
+	if err != nil {
+		if errors.Is(err, ErrUnlockFailed) {
+			s.metadataInvalid = true
+			s.vaultState = VaultLocked
+		} else {
+			return nil, err
+		}
+	}
+	if metadata != nil {
+		s.metadata = metadata
+		s.vaultState = VaultLocked
+		s.encryptionWarnings = append([]string(nil), metadata.Warnings...)
 	}
 	// Purge de la corbeille au démarrage.
 	if loaded, err := cfg.Load(); err == nil {
@@ -77,14 +109,11 @@ func New(opts Options) (*Service, error) {
 	} else {
 		_ = purgeTrash(root, config.Default().TrashRetentionDays)
 	}
-	if opts.StartWatcher {
-		s.indexCtx, s.indexStop = context.WithCancel(context.Background())
-		w, err := NewWatcher(s.indexCtx, root, idx, s.reindexFromPath)
-		if err != nil {
+	if opts.StartWatcher && s.vaultState == VaultDisabled {
+		if err := s.startWatcher(); err != nil {
 			idx.Close()
 			return nil, err
 		}
-		s.watcher = w
 	}
 	return s, nil
 }
@@ -159,12 +188,12 @@ func (s *Service) BootstrapContext() context.Context {
 
 // Close ferme les ressources ouvertes.
 func (s *Service) Close() error {
-	if s.watcher != nil {
-		_ = s.watcher.Close()
-	}
-	if s.indexStop != nil {
-		s.indexStop()
-	}
+	s.watcherWanted = false
+	s.stopWatcher()
+	s.securityMu.Lock()
+	zeroBytes(s.vaultKey)
+	s.vaultKey = nil
+	s.securityMu.Unlock()
 	if s.index != nil {
 		return s.index.Close()
 	}
@@ -177,10 +206,23 @@ func (s *Service) Close() error {
 // existantes, supprime les chemins dont le fichier a disparu et enregistre
 // meta.last_full_index_at quand le backend d'index le permet.
 func (s *Service) IndexNow(ctx context.Context, reporter progressReporter) error {
-	if idx, ok := s.index.(reconcileIndex); ok {
-		return ReconcileExisting(ctx, s.root, idx, reporter)
+	if err := s.requireUnlocked(); err != nil {
+		return err
 	}
-	return IndexExisting(ctx, s.root, s.index, reporter)
+	if idx, ok := s.index.(reconcileIndex); ok {
+		return reconcileExistingWithReader(ctx, s.root, idx, reporter, s.readForIndex)
+	}
+	return indexExistingWithReader(ctx, s.root, s.index, reporter, s.readForIndex)
+}
+
+func (s *Service) readForIndex(path string) (domain.Note, error) {
+	note, err := s.readAbsolute(path)
+	if err != nil {
+		if rel, relErr := filepath.Rel(s.root, path); relErr == nil {
+			s.addEncryptionWarning(filepath.ToSlash(rel) + " : note illisible")
+		}
+	}
+	return note, err
 }
 
 func (s *Service) reindexFromPath(absPath string) {
@@ -203,8 +245,10 @@ func (s *Service) reindexFromPath(absPath string) {
 		_ = s.index.Delete(rel)
 		return
 	}
-	note, err := readAbsoluteFile(s.root, absPath)
+	note, err := s.readAbsolute(absPath)
 	if err != nil {
+		_ = s.index.Delete(rel)
+		s.addEncryptionWarning(rel + " : note illisible")
 		return
 	}
 	_ = s.index.Upsert(note)
@@ -218,6 +262,9 @@ func (s *Service) ListNotes() ([]domain.NoteSummary, error) {
 // résumés de notes correspondants. Si la requête est vide, équivaut
 // à ListNotes().
 func (s *Service) ListNotesFiltered(q FilterQuery, limit int) ([]domain.NoteSummary, error) {
+	if err := s.requireUnlocked(); err != nil {
+		return nil, err
+	}
 	if limit <= 0 {
 		limit = 5000
 	}
@@ -226,15 +273,18 @@ func (s *Service) ListNotesFiltered(q FilterQuery, limit int) ([]domain.NoteSumm
 		return nil, fmt.Errorf("lister les notes : %w", err)
 	}
 	if q.IsEmpty() {
-		// Tri stable déjà assuré par SQL.
+		// Tri stable déjà assuré par l'index.
 		return summaries, nil
 	}
-	// Tri mémoire stable par updated_at DESC (le SQL fait déjà le tri).
+	// Tri déjà assuré par l'index.
 	return summaries, nil
 }
 
 // ListPinned retourne les notes épinglées (par ordre d'épinglage).
 func (s *Service) ListPinned() ([]domain.NoteSummary, error) {
+	if err := s.requireUnlocked(); err != nil {
+		return nil, err
+	}
 	out, err := s.index.ListPinned()
 	if err != nil {
 		return nil, fmt.Errorf("lister les épinglées : %w", err)
@@ -244,11 +294,17 @@ func (s *Service) ListPinned() ([]domain.NoteSummary, error) {
 
 // ListFolders retourne les dossiers connus du coffre pour la vue arbre.
 func (s *Service) ListFolders() ([]FolderInfo, error) {
+	if err := s.requireUnlocked(); err != nil {
+		return nil, err
+	}
 	return s.index.ListFolders()
 }
 
 // Pin épingle ou désépingle une note.
 func (s *Service) Pin(relativePath string, pinned bool) error {
+	if err := s.requireUnlocked(); err != nil {
+		return err
+	}
 	if _, err := s.absoluteNotePath(relativePath); err != nil {
 		return err
 	}
@@ -257,16 +313,25 @@ func (s *Service) Pin(relativePath string, pinned bool) error {
 
 // IsPinned retourne l'état d'épinglage d'une note.
 func (s *Service) IsPinned(relativePath string) (bool, error) {
+	if err := s.requireUnlocked(); err != nil {
+		return false, err
+	}
 	return s.index.IsPinned(relativePath)
 }
 
 // ListTags retourne tous les tags avec leur compte.
 func (s *Service) ListTags() ([]TagCount, error) {
+	if err := s.requireUnlocked(); err != nil {
+		return nil, err
+	}
 	return s.index.ListTags()
 }
 
 // Search interroge l'index full-text.
 func (s *Service) Search(query string, limit int) ([]domain.NoteSummary, error) {
+	if err := s.requireUnlocked(); err != nil {
+		return nil, err
+	}
 	return s.index.Search(query, SearchOpts{Limit: limit})
 }
 
@@ -313,6 +378,12 @@ func (s *Service) resolveTemplateBody(key string) string {
 }
 
 func (s *Service) SaveNote(note domain.Note) (domain.Note, error) {
+	s.mutationMu.RLock()
+	defer s.mutationMu.RUnlock()
+	if err := s.requireUnlocked(); err != nil {
+		return domain.Note{}, err
+	}
+	note.RelativePath = filepath.ToSlash(filepath.Clean(filepath.FromSlash(note.RelativePath)))
 	path, err := s.absoluteNotePath(note.RelativePath)
 	if err != nil {
 		return domain.Note{}, err
@@ -335,11 +406,11 @@ func (s *Service) SaveNote(note domain.Note) (domain.Note, error) {
 	}
 	if maxVersions > 0 {
 		if _, err := os.Stat(path); err == nil {
-			_, _ = snapshotHistory(s.root, note.RelativePath, maxVersions)
+			_, _ = s.snapshotHistory(note.RelativePath, maxVersions)
 		}
 	}
 
-	if err := writeAtomic(path, []byte(serialize(note)), 0o644); err != nil {
+	if err := s.writePayload(note.RelativePath, []byte(serialize(note)), 0o644); err != nil {
 		return domain.Note{}, err
 	}
 	if err := s.index.Upsert(note); err != nil {
@@ -350,6 +421,11 @@ func (s *Service) SaveNote(note domain.Note) (domain.Note, error) {
 
 // DeleteNote fait un soft-delete : la note est déplacée vers la corbeille.
 func (s *Service) DeleteNote(relativePath string) error {
+	s.mutationMu.RLock()
+	defer s.mutationMu.RUnlock()
+	if err := s.requireUnlocked(); err != nil {
+		return err
+	}
 	path, err := s.absoluteNotePath(relativePath)
 	if err != nil {
 		return err
@@ -370,11 +446,19 @@ func (s *Service) DeleteNote(relativePath string) error {
 
 // ListTrash retourne les entrées actuellement en corbeille.
 func (s *Service) ListTrash() ([]TrashEntry, error) {
+	if err := s.requireUnlocked(); err != nil {
+		return nil, err
+	}
 	return listTrash(s.root)
 }
 
 // RestoreFromTrash remet en place une note précédemment supprimée.
 func (s *Service) RestoreFromTrash(id string) (domain.Note, error) {
+	s.mutationMu.RLock()
+	defer s.mutationMu.RUnlock()
+	if err := s.requireUnlocked(); err != nil {
+		return domain.Note{}, err
+	}
 	entries, err := listTrash(s.root)
 	if err != nil {
 		return domain.Note{}, err
@@ -405,6 +489,9 @@ func (s *Service) RestoreFromTrash(id string) (domain.Note, error) {
 
 // EmptyTrash vide la corbeille.
 func (s *Service) EmptyTrash() error {
+	if err := s.requireUnlocked(); err != nil {
+		return err
+	}
 	entries, err := listTrash(s.root)
 	if err != nil {
 		return err
@@ -453,6 +540,11 @@ func (s *Service) GetTemplate(id string) (Template, error) {
 // échoue. Le contenu est déplacé atomiquement (os.Rename quand possible,
 // sinon copy + delete).
 func (s *Service) MoveNote(oldPath, newPath string) (domain.Note, error) {
+	s.mutationMu.RLock()
+	defer s.mutationMu.RUnlock()
+	if err := s.requireUnlocked(); err != nil {
+		return domain.Note{}, err
+	}
 	oldPath = filepath.ToSlash(filepath.Clean(oldPath))
 	newPath = filepath.ToSlash(filepath.Clean(newPath))
 	if err := s.validateNoteRelPath(newPath); err != nil {
@@ -464,6 +556,7 @@ func (s *Service) MoveNote(oldPath, newPath string) (domain.Note, error) {
 	if oldPath == newPath {
 		return s.OpenNote(oldPath)
 	}
+	wasPinned, _ := s.index.IsPinned(oldPath)
 	src := filepath.Join(s.root, filepath.FromSlash(oldPath))
 	dst := filepath.Join(s.root, filepath.FromSlash(newPath))
 	if _, err := os.Stat(src); err != nil {
@@ -472,15 +565,16 @@ func (s *Service) MoveNote(oldPath, newPath string) (domain.Note, error) {
 	if _, err := os.Stat(dst); err == nil {
 		return domain.Note{}, fmt.Errorf("un fichier existe déjà à %s", newPath)
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return domain.Note{}, fmt.Errorf("préparer le dossier destination : %w", err)
+	raw, err := s.readPayload(oldPath)
+	if err != nil {
+		return domain.Note{}, err
 	}
-	if err := os.Rename(src, dst); err != nil {
-		// os.Rename échoue cross-device : fallback copy + delete.
-		if cerr := copyFileAtomic(src, dst); cerr != nil {
-			return domain.Note{}, fmt.Errorf("déplacer : %w", cerr)
-		}
-		_ = os.Remove(src)
+	if err := s.writePayload(newPath, raw, 0o644); err != nil {
+		return domain.Note{}, fmt.Errorf("déplacer : %w", err)
+	}
+	if err := os.Remove(src); err != nil {
+		_ = os.Remove(dst)
+		return domain.Note{}, fmt.Errorf("supprimer l'ancienne note : %w", err)
 	}
 	// Réindexe : supprimer l'ancien, upsert le nouveau.
 	if err := s.index.Delete(oldPath); err != nil && !errors.Is(err, ErrNotFound) {
@@ -493,6 +587,11 @@ func (s *Service) MoveNote(oldPath, newPath string) (domain.Note, error) {
 	if err := s.index.Upsert(note); err != nil {
 		return domain.Note{}, err
 	}
+	if wasPinned {
+		if err := s.index.Pin(newPath, true); err != nil {
+			return domain.Note{}, err
+		}
+	}
 	return note, nil
 }
 
@@ -500,6 +599,9 @@ func (s *Service) MoveNote(oldPath, newPath string) (domain.Note, error) {
 // Le nom de fichier est suffixé par "-copie" si la cible existe déjà.
 // Les tags et la date de création sont remis à zéro.
 func (s *Service) DuplicateNote(relativePath string) (domain.Note, error) {
+	if err := s.requireUnlocked(); err != nil {
+		return domain.Note{}, err
+	}
 	src := relativePath
 	if err := s.validateNoteRelPath(src); err != nil {
 		return domain.Note{}, err
@@ -535,6 +637,9 @@ func (s *Service) DuplicateNote(relativePath string) (domain.Note, error) {
 // Sur les plateformes supportées par le runtime de Wails, l'OS
 // est sélectionné automatiquement.
 func (s *Service) OpenInExplorer(relativePath string, reveal bool) error {
+	if err := s.requireUnlocked(); err != nil {
+		return err
+	}
 	abs, err := s.absoluteNotePath(relativePath)
 	if err != nil {
 		return err
@@ -565,6 +670,9 @@ func (s *Service) RenameTitle(relativePath, newTitle string) (domain.Note, error
 // panneau de backlinks de l'éditeur. excludePath est ignoré dans les
 // résultats (la note courante ne se backlink pas elle-même).
 func (s *Service) GetBacklinks(title, excludePath string, limit int) ([]domain.NoteSummary, error) {
+	if err := s.requireUnlocked(); err != nil {
+		return nil, err
+	}
 	return s.index.GetBacklinks(title, SearchOpts{Limit: limit, ExcludePath: excludePath})
 }
 
@@ -638,13 +746,34 @@ func (s *Service) MarkOnboardingCompleted(onboarding *Onboarding) error {
 // récupération après crash. Si diskMTime est non nulle, on la conserve
 // pour pouvoir comparer à la prochaine lecture.
 func (s *Service) SetDirtyBuffer(notePath, buffer string, diskMTime time.Time) error {
+	s.mutationMu.RLock()
+	defer s.mutationMu.RUnlock()
+	if err := s.requireUnlocked(); err != nil {
+		return err
+	}
 	state, err := s.LoadState()
 	if err != nil {
 		state = StateFile{}
 	}
 	state.Dirty = true
 	state.NotePath = notePath
-	state.Buffer = buffer
+	s.securityMu.RLock()
+	encrypted := s.vaultState == VaultUnlocked
+	key := append([]byte(nil), s.vaultKey...)
+	s.securityMu.RUnlock()
+	if encrypted {
+		ciphertext, err := encryptFilePayload(key, ".notevault/state.json#buffer", []byte(buffer))
+		zeroBytes(key)
+		if err != nil {
+			return err
+		}
+		state.Buffer = ""
+		state.BufferCiphertext = base64.StdEncoding.EncodeToString(ciphertext)
+	} else {
+		zeroBytes(key)
+		state.Buffer = buffer
+		state.BufferCiphertext = ""
+	}
 	state.BufferSavedAt = nowUTC()
 	if !diskMTime.IsZero() {
 		t := diskMTime.UTC()
@@ -656,6 +785,11 @@ func (s *Service) SetDirtyBuffer(notePath, buffer string, diskMTime time.Time) e
 // ClearDirtyBuffer efface le buffer en attente (après save réussi ou
 // récupération rejetée).
 func (s *Service) ClearDirtyBuffer() error {
+	s.mutationMu.RLock()
+	defer s.mutationMu.RUnlock()
+	if err := s.requireUnlocked(); err != nil {
+		return err
+	}
 	state, err := s.LoadState()
 	if err != nil {
 		return nil
@@ -665,6 +799,7 @@ func (s *Service) ClearDirtyBuffer() error {
 	}
 	state.Dirty = false
 	state.Buffer = ""
+	state.BufferCiphertext = ""
 	state.BufferSavedAt = time.Time{}
 	state.NotePath = ""
 	state.DiskModifiedAt = nil
@@ -675,6 +810,9 @@ func (s *Service) ClearDirtyBuffer() error {
 // récupération. À appeler au démarrage du frontend pour décider de
 // l'affichage initial.
 func (s *Service) SnapshotForStartup() (RecoverySnapshot, error) {
+	if err := s.requireUnlocked(); err != nil {
+		return RecoverySnapshot{}, err
+	}
 	state, err := s.LoadState()
 	if err != nil {
 		return RecoverySnapshot{}, err
@@ -689,9 +827,25 @@ func (s *Service) SnapshotForStartup() (RecoverySnapshot, error) {
 		diskMTime, err := s.fileModified(state.NotePath)
 		if err == nil {
 			if ShouldOfferRecovery(state, diskMTime) {
+				buffer := state.Buffer
+				if state.BufferCiphertext != "" {
+					encoded, decodeErr := base64.StdEncoding.DecodeString(state.BufferCiphertext)
+					if decodeErr != nil {
+						return RecoverySnapshot{}, ErrUnlockFailed
+					}
+					s.securityMu.RLock()
+					key := append([]byte(nil), s.vaultKey...)
+					s.securityMu.RUnlock()
+					plain, openErr := decryptFilePayload(key, ".notevault/state.json#buffer", encoded)
+					zeroBytes(key)
+					if openErr != nil {
+						return RecoverySnapshot{}, ErrUnlockFailed
+					}
+					buffer = string(plain)
+				}
 				snap.HasRecovery = true
 				snap.NotePath = state.NotePath
-				snap.Buffer = state.Buffer
+				snap.Buffer = buffer
 				snap.BufferSavedAt = state.BufferSavedAt
 				if state.DiskModifiedAt != nil {
 					snap.DiskModifiedAt = *state.DiskModifiedAt
@@ -743,16 +897,17 @@ func (s *Service) absoluteNotePath(relativePath string) (string, error) {
 }
 
 func (s *Service) readAbsolute(path string) (domain.Note, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return domain.Note{}, fmt.Errorf("lire la note : %w", err)
-	}
 	relativePath, err := filepath.Rel(s.root, path)
 	if err != nil {
 		return domain.Note{}, err
 	}
+	relativePath = filepath.ToSlash(relativePath)
+	raw, err := s.readPayload(relativePath)
+	if err != nil {
+		return domain.Note{}, fmt.Errorf("lire la note : %w", err)
+	}
 	note := parse(string(raw))
-	note.RelativePath = filepath.ToSlash(relativePath)
+	note.RelativePath = relativePath
 	if note.Title == "" {
 		note.Title = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 	}
@@ -761,4 +916,34 @@ func (s *Service) readAbsolute(path string) (domain.Note, error) {
 		note.UpdatedAt = info.ModTime().UTC()
 	}
 	return note, nil
+}
+
+func (s *Service) startWatcher() error {
+	if !s.watcherWanted || s.watcher != nil {
+		return nil
+	}
+	if err := s.requireUnlocked(); err != nil {
+		return nil
+	}
+	s.indexCtx, s.indexStop = context.WithCancel(context.Background())
+	w, err := NewWatcher(s.indexCtx, s.root, s.index, s.reindexFromPath)
+	if err != nil {
+		s.indexStop()
+		s.indexStop = nil
+		return err
+	}
+	s.watcher = w
+	return nil
+}
+
+func (s *Service) stopWatcher() {
+	w := s.watcher
+	s.watcher = nil
+	if s.indexStop != nil {
+		s.indexStop()
+		s.indexStop = nil
+	}
+	if w != nil {
+		_ = w.Close()
+	}
 }

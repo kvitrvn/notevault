@@ -13,13 +13,14 @@ import (
 // Il sert à la fois pour l'onboarding (drapeau Completed) et pour la
 // récupération après crash (DirtyBuffer d'une note en cours d'édition).
 type StateFile struct {
-	OnboardingCompleted bool       `json:"onboardingCompleted"`
-	LastShownVersion    string     `json:"lastShownVersion"`
-	Dirty               bool       `json:"dirty"`
-	NotePath            string     `json:"notePath"`
-	Buffer              string     `json:"buffer"`
-	BufferSavedAt       time.Time  `json:"bufferSavedAt"`
-	DiskModifiedAt      *time.Time `json:"diskModifiedAt,omitempty"`
+	OnboardingCompleted bool        `json:"onboardingCompleted"`
+	LastShownVersion    string      `json:"lastShownVersion"`
+	Dirty               bool        `json:"dirty"`
+	NotePath            string      `json:"notePath"`
+	Buffer              string      `json:"buffer"`
+	BufferCiphertext    string      `json:"bufferCiphertext,omitempty"`
+	BufferSavedAt       time.Time   `json:"bufferSavedAt"`
+	DiskModifiedAt      *time.Time  `json:"diskModifiedAt,omitempty"`
 	Onboarding          *Onboarding `json:"onboarding,omitempty"`
 }
 
@@ -27,9 +28,9 @@ type StateFile struct {
 // On conserve les valeurs même après la fin de l'onboarding pour permettre
 // de les restaurer depuis la page d'aide.
 type Onboarding struct {
-	VaultPath  string `json:"vaultPath,omitempty"`
-	Theme      string `json:"theme,omitempty"`
-	Skipped    bool   `json:"skipped"`
+	VaultPath   string    `json:"vaultPath,omitempty"`
+	Theme       string    `json:"theme,omitempty"`
+	Skipped     bool      `json:"skipped"`
 	CompletedAt time.Time `json:"completedAt,omitempty"`
 }
 
@@ -105,10 +106,10 @@ func ShouldOfferRecovery(state StateFile, diskMTime time.Time) bool {
 // propose de récupérer un buffer. Onboarding peut être nil si l'utilisateur
 // n'a jamais complété l'onboarding.
 type RecoverySnapshot struct {
-	HasRecovery    bool       `json:"hasRecovery"`
-	NotePath       string     `json:"notePath"`
-	Buffer         string     `json:"buffer"`
-	BufferSavedAt  time.Time  `json:"bufferSavedAt"`
-	DiskModifiedAt time.Time  `json:"diskModifiedAt"`
+	HasRecovery    bool        `json:"hasRecovery"`
+	NotePath       string      `json:"notePath"`
+	Buffer         string      `json:"buffer"`
+	BufferSavedAt  time.Time   `json:"bufferSavedAt"`
+	DiskModifiedAt time.Time   `json:"diskModifiedAt"`
 	Onboarding     *Onboarding `json:"onboarding,omitempty"`
 }

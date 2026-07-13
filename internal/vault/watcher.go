@@ -30,12 +30,13 @@ const indexMetaLastFullIndexAt = "last_full_index_at"
 
 // Watcher observe les changements dans le coffre et synchronise l'index.
 type Watcher struct {
-	root    string
-	index   Index
-	fs      *fsnotify.Watcher
-	stop    chan struct{}
-	done    chan struct{}
-	reindex func(path string)
+	root      string
+	index     Index
+	fs        *fsnotify.Watcher
+	stop      chan struct{}
+	done      chan struct{}
+	reindex   func(path string)
+	callbacks sync.WaitGroup
 }
 
 const watcherDebounce = 200 * time.Millisecond
@@ -95,18 +96,30 @@ func (w *Watcher) Close() error {
 }
 
 func (w *Watcher) loop(ctx context.Context) {
-	defer close(w.done)
 	timers := make(map[string]*time.Timer)
 	var timersMu sync.Mutex
+	defer func() {
+		timersMu.Lock()
+		for _, timer := range timers {
+			if timer.Stop() {
+				w.callbacks.Done()
+			}
+		}
+		timersMu.Unlock()
+		w.callbacks.Wait()
+		close(w.done)
+	}()
 	schedule := func(path string) {
 		if isIgnored(path) {
 			return
 		}
 		timersMu.Lock()
-		if t, ok := timers[path]; ok {
-			t.Stop()
+		if timer, ok := timers[path]; ok && timer.Stop() {
+			w.callbacks.Done()
 		}
+		w.callbacks.Add(1)
 		timers[path] = time.AfterFunc(watcherDebounce, func() {
+			defer w.callbacks.Done()
 			w.reindex(path)
 		})
 		timersMu.Unlock()
@@ -155,17 +168,15 @@ func isIgnored(path string) bool {
 	return false
 }
 
-// IndexExisting scanne le dossier notes/ et alimente l'index.
-// Émet la progression via reporter.
-func IndexExisting(ctx context.Context, root string, idx Index, reporter progressReporter) error {
+func indexExistingWithReader(ctx context.Context, root string, idx Index, reporter progressReporter, reader func(string) (domain.Note, error)) error {
 	files, err := markdownFiles(root)
 	if err != nil {
 		return err
 	}
-	return indexFiles(ctx, root, idx, files, reporter)
+	return indexFiles(ctx, root, idx, files, reporter, reader)
 }
 
-func ReconcileExisting(ctx context.Context, root string, idx reconcileIndex, reporter progressReporter) error {
+func reconcileExistingWithReader(ctx context.Context, root string, idx reconcileIndex, reporter progressReporter, reader func(string) (domain.Note, error)) error {
 	files, err := markdownFiles(root)
 	if err != nil {
 		return err
@@ -198,7 +209,7 @@ func ReconcileExisting(ctx context.Context, root string, idx reconcileIndex, rep
 		}
 	}
 
-	if err := indexFiles(ctx, root, idx, files, reporter); err != nil {
+	if err := indexFiles(ctx, root, idx, files, reporter, reader); err != nil {
 		return err
 	}
 	return idx.SetMeta(indexMetaLastFullIndexAt, nowUTC().Format(time.RFC3339))
@@ -229,7 +240,7 @@ func markdownFiles(root string) ([]string, error) {
 	return files, nil
 }
 
-func indexFiles(ctx context.Context, root string, idx Index, files []string, reporter progressReporter) error {
+func indexFiles(ctx context.Context, root string, idx Index, files []string, reporter progressReporter, reader func(string) (domain.Note, error)) error {
 	total := len(files)
 	if reporter != nil {
 		reporter.OnProgress("index", 0, total)
@@ -240,8 +251,13 @@ func indexFiles(ctx context.Context, root string, idx Index, files []string, rep
 			return ctx.Err()
 		default:
 		}
-		note, err := readAbsoluteFile(root, path)
+		note, err := reader(path)
 		if err != nil {
+			rel, _ := filepath.Rel(root, path)
+			rel = filepath.ToSlash(rel)
+			if deleteErr := idx.Delete(rel); deleteErr != nil && !errors.Is(deleteErr, ErrNotFound) {
+				return deleteErr
+			}
 			continue
 		}
 		if err := idx.Upsert(note); err != nil {
@@ -255,25 +271,4 @@ func indexFiles(ctx context.Context, root string, idx Index, files []string, rep
 		reporter.OnProgress("index", total, total)
 	}
 	return nil
-}
-
-func readAbsoluteFile(root, absPath string) (domain.Note, error) {
-	raw, err := os.ReadFile(absPath)
-	if err != nil {
-		return domain.Note{}, fmt.Errorf("lire la note : %w", err)
-	}
-	rel, err := filepath.Rel(root, absPath)
-	if err != nil {
-		return domain.Note{}, err
-	}
-	note := parse(string(raw))
-	note.RelativePath = filepath.ToSlash(rel)
-	if note.Title == "" {
-		note.Title = strings.TrimSuffix(filepath.Base(absPath), filepath.Ext(absPath))
-	}
-	info, err := os.Stat(absPath)
-	if err == nil && note.UpdatedAt.IsZero() {
-		note.UpdatedAt = info.ModTime().UTC()
-	}
-	return note, nil
 }

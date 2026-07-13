@@ -26,10 +26,11 @@ func NewApp() (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("initialiser le coffre : %w", err)
 	}
-	// Indexation initiale synchrone : bloque Startup tant que l'index
-	// n'est pas prêt. À 10 000 notes cible, l'opération doit rester < 2 s.
-	if err := service.IndexNow(service.BootstrapContext(), nil); err != nil {
-		return nil, fmt.Errorf("indexation initiale : %w", err)
+	// Un coffre chiffré reste vierge en mémoire jusqu'au déverrouillage.
+	if status := service.VaultStatus(); status.State != vault.VaultLocked {
+		if err := service.IndexNow(service.BootstrapContext(), nil); err != nil {
+			return nil, fmt.Errorf("indexation initiale : %w", err)
+		}
 	}
 
 	assetSrv := vault.NewAssetServer(service.Root())
@@ -55,6 +56,26 @@ func (a *App) Shutdown(ctx context.Context) {
 
 func (a *App) VaultPath() string {
 	return a.vault.Root()
+}
+
+func (a *App) VaultStatus() vault.VaultStatusInfo {
+	return a.vault.VaultStatus()
+}
+
+func (a *App) EnableEncryption(passphrase string) error {
+	return a.vault.EnableEncryption(passphrase)
+}
+
+func (a *App) UnlockVault(passphrase string) error {
+	return a.vault.UnlockVault(passphrase)
+}
+
+func (a *App) ChangePassphrase(current, replacement string) error {
+	return a.vault.ChangePassphrase(current, replacement)
+}
+
+func (a *App) DisableEncryption(passphrase string) error {
+	return a.vault.DisableEncryption(passphrase)
 }
 
 func (a *App) ListNotes() ([]domain.NoteSummary, error) {

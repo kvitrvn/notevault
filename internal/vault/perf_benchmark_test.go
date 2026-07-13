@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/kvitrvn/notevault/internal/domain"
 )
 
 func BenchmarkListNotes_10k(b *testing.B) {
@@ -36,6 +38,45 @@ func BenchmarkListFolders_10k(b *testing.B) {
 	}
 }
 
+func BenchmarkBuildIndex_10k(b *testing.B) {
+	notes := benchmarkNotes(10_000)
+	b.ResetTimer()
+	for b.Loop() {
+		idx := &memoryIndex{
+			notes:    make(map[string]domain.Note),
+			tokens:   make(map[string]map[string]int),
+			noteKeys: make(map[string]map[string]int),
+			pins:     make(map[string]time.Time),
+		}
+		for _, note := range notes {
+			if err := idx.Upsert(note); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+}
+
+func BenchmarkSearch_10k(b *testing.B) {
+	svc := benchmarkServiceWithNotes(b, 10_000)
+	b.ResetTimer()
+	for b.Loop() {
+		results, err := svc.Search("benchmark 09999", 50)
+		if err != nil || len(results) == 0 {
+			b.Fatalf("Search: %v (%d results)", err, len(results))
+		}
+	}
+}
+
+func BenchmarkBacklinks_10k(b *testing.B) {
+	svc := benchmarkServiceWithNotes(b, 10_000)
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := svc.GetBacklinks("benchmark note 09999", "", 50); err != nil {
+			b.Fatalf("GetBacklinks: %v", err)
+		}
+	}
+}
+
 func benchmarkServiceWithNotes(b *testing.B, count int) *Service {
 	b.Helper()
 	dir := b.TempDir()
@@ -45,42 +86,31 @@ func benchmarkServiceWithNotes(b *testing.B, count int) *Service {
 	}
 	b.Cleanup(func() { _ = svc.Close() })
 
-	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
-	idx, ok := svc.index.(*sqliteIndex)
+	idx, ok := svc.index.(*memoryIndex)
 	if !ok {
 		b.Fatalf("unexpected index type %T", svc.index)
 	}
-	tx, err := idx.db.Begin()
-	if err != nil {
-		b.Fatalf("begin benchmark seed: %v", err)
+	for _, note := range benchmarkNotes(count) {
+		if err := idx.Upsert(note); err != nil {
+			b.Fatalf("seed benchmark: %v", err)
+		}
 	}
-	stmt, err := tx.Prepare(`
-        INSERT INTO notes (relative_path, title, content, size, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    `)
-	if err != nil {
-		_ = tx.Rollback()
-		b.Fatalf("prepare benchmark seed: %v", err)
-	}
-	defer stmt.Close()
+	return svc
+}
+
+func benchmarkNotes(count int) []domain.Note {
+	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+	notes := make([]domain.Note, 0, count)
 	for i := 0; i < count; i++ {
 		folder := fmt.Sprintf("notes/folder-%03d/section-%02d", i%100, i%10)
 		content := fmt.Sprintf("# Benchmark Note %05d\n\nContent for benchmark note %05d.", i, i)
-		_, err := stmt.Exec(
-			fmt.Sprintf("%s/note-%05d.md", folder, i),
-			fmt.Sprintf("Benchmark Note %05d", i),
-			content,
-			len(content),
-			now.Unix(),
-			now.Add(time.Duration(i)*time.Second).Unix(),
-		)
-		if err != nil {
-			_ = tx.Rollback()
-			b.Fatalf("insert benchmark note: %v", err)
-		}
+		notes = append(notes, domain.Note{
+			RelativePath: fmt.Sprintf("%s/note-%05d.md", folder, i),
+			Title:        fmt.Sprintf("Benchmark Note %05d", i),
+			Content:      content,
+			CreatedAt:    now,
+			UpdatedAt:    now.Add(time.Duration(i) * time.Second),
+		})
 	}
-	if err := tx.Commit(); err != nil {
-		b.Fatalf("commit benchmark seed: %v", err)
-	}
-	return svc
+	return notes
 }

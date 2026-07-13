@@ -62,7 +62,7 @@ type Index interface {
 // StatsBucketsResult regroupe les agrégats calculés par l'index.
 // Created/Modified sont des séries ordonnées du plus ancien au plus récent,
 // alignées sur la fenêtre [now-windowDays, now). Words est la somme des
-// compteurs de mots (calculé en SQL via un CASE WHEN).
+// compteurs de mots calculée en mémoire.
 type StatsBucketsResult struct {
 	Created  []DayCount
 	Modified []DayCount

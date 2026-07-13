@@ -10,22 +10,25 @@
     open: boolean;
     notes: NoteSummary[];
     defaultFilename: string;
+    encrypted?: boolean;
     onClose: () => void;
     onSuccess: (path: string) => void;
   };
 
-  let { open, notes, defaultFilename, onClose, onSuccess }: Props = $props();
+  let { open, notes, defaultFilename, encrypted = false, onClose, onSuccess }: Props = $props();
 
   let selected = $state<Set<string>>(new Set());
   let filename = $state('');
   let busy = $state(false);
   let error = $state('');
+  let plaintextConfirmed = $state(false);
 
   $effect(() => {
     if (open) {
       selected = new Set();
       filename = defaultFilename;
       error = '';
+      plaintextConfirmed = false;
     }
   });
 
@@ -46,6 +49,10 @@
   async function commit(): Promise<void> {
     if (selected.size === 0) {
       error = 'Sélectionnez au moins une note.';
+      return;
+    }
+    if (encrypted && !plaintextConfirmed) {
+      error = 'Confirmez que l’archive contiendra les notes en clair.';
       return;
     }
     const name = filename.trim() || defaultFilename;
@@ -178,6 +185,13 @@
           />
         </label>
 
+        {#if encrypted}
+          <label class="flex items-start gap-2 border-l-2 border-danger px-3 py-2 text-xs leading-5 text-subtle">
+            <input class="mt-1 h-3.5 w-3.5 accent-accent" type="checkbox" bind:checked={plaintextConfirmed} />
+            <span>Je confirme que cette archive contiendra du Markdown en clair et ne sera plus protégée par le chiffrement du coffre.</span>
+          </label>
+        {/if}
+
         {#if error}
           <p class="rounded-md border border-danger/40 bg-panel px-3 py-2 text-xs text-danger" role="alert">
             {error}
@@ -200,7 +214,7 @@
             type="button"
             class="inline-flex items-center gap-1.5 rounded-md border border-accent bg-accent px-3 py-1.5 text-sm font-medium text-accent-foreground hover:bg-accent-hover"
             onclick={() => void commit()}
-            disabled={busy || selected.size === 0}
+            disabled={busy || selected.size === 0 || (encrypted && !plaintextConfirmed)}
           >
             <Download size={13} strokeWidth={2} aria-hidden="true" />
             {busy ? 'Export…' : 'Exporter'}

@@ -375,15 +375,8 @@ func summaryPaths(notes []domain.NoteSummary) map[string]bool {
 
 func assertLastFullIndexAt(t *testing.T, svc *Service) {
 	t.Helper()
-	idx, ok := svc.index.(*sqliteIndex)
+	_, ok := svc.index.(*memoryIndex)
 	if !ok {
-		t.Fatalf("index type = %T, want *sqliteIndex", svc.index)
-	}
-	var value string
-	if err := idx.db.QueryRow(`SELECT value FROM meta WHERE key = ?`, indexMetaLastFullIndexAt).Scan(&value); err != nil {
-		t.Fatalf("last_full_index_at absent: %v", err)
-	}
-	if _, err := time.Parse(time.RFC3339, value); err != nil {
-		t.Fatalf("last_full_index_at invalide %q: %v", value, err)
+		t.Fatalf("index type = %T, want *memoryIndex", svc.index)
 	}
 }

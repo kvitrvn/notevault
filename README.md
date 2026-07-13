@@ -7,12 +7,14 @@ compte, serveur distant ou service de synchronisation n'est nécessaire.
 ## Fonctionnalités
 
 - Éditeur Markdown riche avec tableaux, tâches, code et images locales.
-- Recherche plein texte SQLite, filtres, tags, dossiers et notes épinglées.
+- Recherche plein texte en mémoire, filtres, tags, dossiers et notes épinglées.
 - Liens wiki, suggestions de navigation et backlinks.
 - Autosauvegarde, sauvegarde manuelle et récupération des modifications.
 - Historique, comparaison de versions, restauration et corbeille.
 - Modèles, thèmes, note quotidienne, statistiques et export ZIP.
 - Surveillance des modifications apportées aux fichiers hors de l'application.
+- Chiffrement optionnel du contenu des notes, de l’historique et du brouillon
+  de récupération avec une phrase secrète locale.
 
 Les images distantes ne sont pas chargées automatiquement : elles restent dans
 le Markdown mais sont bloquées dans l'éditeur afin de préserver la confidentialité
@@ -30,15 +32,23 @@ Au premier démarrage, NoteVault crée par défaut :
 ├── themes/
 └── .notevault/
     ├── config.json
-    └── index.db
+    └── pins.json
 ```
 
-SQLite est un index secondaire reconstruisible. Les fichiers Markdown restent
-la source de vérité.
+L’index est reconstruit en mémoire. Les fichiers Markdown restent
+la source de vérité. Lorsque le chiffrement est activé, leur extension reste
+`.md`, mais leur contenu n’est lisible qu’après déverrouillage dans NoteVault.
+Les noms de fichiers, l’arborescence, les épingles et les assets ne sont pas
+chiffrés. Un export ZIP produit toujours du Markdown en clair.
+
+La phrase secrète n’est jamais enregistrée et il n’existe pas de clé de
+secours : une phrase oubliée rend les notes irrécupérables. L’activation retire
+les anciens fichiers `index.db`, sans pouvoir garantir leur effacement
+forensique sur un SSD, un snapshot ou une sauvegarde.
 
 ## Stack
 
-- Go 1.25, Wails 2 et SQLite via `modernc.org/sqlite`.
+- Go 1.25 et Wails 2.
 - Svelte 5, TypeScript, Vite, Tailwind CSS et Tiptap.
 - Vitest pour les tests unitaires frontend.
 

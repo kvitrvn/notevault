@@ -79,7 +79,12 @@
     UpdateConfig,
     VaultPath,
     AssetURL,
-    ImportAssetFromFilePath
+    ImportAssetFromFilePath,
+    VaultStatus,
+    UnlockVault,
+    EnableEncryption,
+    ChangePassphrase,
+    DisableEncryption
   } from '../wailsjs/go/main/App';
 
   type Note = domain.Note;
@@ -175,6 +180,25 @@
   let recoveryOpen = $state(false);
   let customThemes = $state<vault.Theme[]>([]);
   let dirtyBufferTimer: ReturnType<typeof setTimeout> | null = null;
+
+  let vaultStatus = $state<vault.VaultStatusInfo | null>(null);
+  let unlockPassphrase = $state('');
+  let unlockInput: HTMLInputElement | undefined = $state();
+  let unlockError = $state('');
+  let unlocking = $state(false);
+  let encryptionDialogOpen = $state(false);
+  let encryptionAction = $state<'enable' | 'change' | 'disable'>('enable');
+  let currentPassphrase = $state('');
+  let replacementPassphrase = $state('');
+  let confirmationPassphrase = $state('');
+  let encryptionError = $state('');
+  let encryptionBusy = $state(false);
+
+  $effect(() => {
+    if (vaultStatus?.state === 'locked') {
+      requestAnimationFrame(() => unlockInput?.focus());
+    }
+  });
 
   // Vault sync awareness
   let vaultIsSynced = $state(false);
@@ -1300,8 +1324,88 @@
     vaultPickerOpen = false;
   }
 
-  void refresh();
-  void checkStartup();
+  void bootstrapVault();
+
+  async function bootstrapVault(): Promise<void> {
+    try {
+      vaultStatus = await VaultStatus();
+      vaultPath = await VaultPath();
+      if (vaultStatus.state === 'locked') {
+        loading = false;
+        return;
+      }
+      await refresh();
+      await checkStartup();
+    } catch (err) {
+      error = `Impossible d’initialiser le coffre : ${err}`;
+      loading = false;
+    }
+  }
+
+  async function unlockVault(): Promise<void> {
+    if (unlocking) return;
+    unlocking = true;
+    unlockError = '';
+    try {
+      await UnlockVault(unlockPassphrase);
+      unlockPassphrase = '';
+      vaultStatus = await VaultStatus();
+      await refresh();
+      await checkStartup();
+      if (vaultStatus.warnings.length > 0) {
+        showToast('error', 'Certaines notes illisibles ont été exclues de l’index.');
+      }
+    } catch {
+      unlockError = 'Impossible de déverrouiller le coffre. Vérifiez la phrase secrète.';
+      requestAnimationFrame(() => document.getElementById('vault-passphrase')?.focus());
+    } finally {
+      unlocking = false;
+    }
+  }
+
+  function openEncryptionDialog(): void {
+    encryptionAction = vaultStatus?.encryptionEnabled ? 'change' : 'enable';
+    currentPassphrase = '';
+    replacementPassphrase = '';
+    confirmationPassphrase = '';
+    encryptionError = '';
+    encryptionDialogOpen = true;
+  }
+
+  async function submitEncryption(): Promise<void> {
+    encryptionError = '';
+    if (encryptionAction !== 'disable' && replacementPassphrase !== confirmationPassphrase) {
+      encryptionError = 'Les deux phrases secrètes ne correspondent pas.';
+      return;
+    }
+    encryptionBusy = true;
+    try {
+      if (encryptionAction === 'enable') {
+        await EnableEncryption(replacementPassphrase);
+      } else if (encryptionAction === 'change') {
+        await ChangePassphrase(currentPassphrase, replacementPassphrase);
+      } else {
+        await DisableEncryption(currentPassphrase);
+      }
+      vaultStatus = await VaultStatus();
+      encryptionDialogOpen = false;
+      showToast('info', encryptionAction === 'disable' ? 'Chiffrement désactivé.' : 'Chiffrement mis à jour.');
+    } catch (err) {
+      encryptionError = `${err}`;
+      vaultStatus = await VaultStatus();
+      if (vaultStatus.state === 'locked') {
+        encryptionDialogOpen = false;
+        selected = null;
+        notes = [];
+        pinned = [];
+      }
+    } finally {
+      currentPassphrase = '';
+      replacementPassphrase = '';
+      confirmationPassphrase = '';
+      encryptionBusy = false;
+    }
+  }
 
   async function checkStartup(): Promise<void> {
     try {
@@ -1373,6 +1477,42 @@
 <div class="grid h-full min-h-0 grid-rows-[2.25rem_minmax(0,1fr)] bg-background text-foreground">
   <WindowTitleBar onClose={onWindowClose} />
 
+  {#if vaultStatus?.state === 'locked'}
+    <main class="grid min-h-0 place-items-center px-6" aria-labelledby="unlock-title">
+      <form class="w-full max-w-sm" onsubmit={(event) => { event.preventDefault(); void unlockVault(); }}>
+        <h1 id="unlock-title" class="text-lg font-semibold">Coffre verrouillé</h1>
+        <p class="mt-2 text-sm leading-6 text-subtle">
+          Saisissez votre phrase secrète pour charger les notes et reconstruire l’index local.
+        </p>
+        <label for="vault-passphrase" class="mt-6 block text-sm font-medium">Phrase secrète</label>
+        <input
+          id="vault-passphrase"
+          bind:this={unlockInput}
+          class="mt-2 h-10 w-full rounded-md border border-border-strong bg-panel px-3 text-foreground"
+          type="password"
+          autocomplete="current-password"
+          bind:value={unlockPassphrase}
+          aria-describedby="unlock-feedback"
+          disabled={unlocking}
+        />
+        <div id="unlock-feedback" class="mt-2 min-h-6 text-sm text-danger" role="status" aria-live="polite">
+          {unlocking ? 'Déverrouillage et reconstruction de l’index en cours…' : unlockError}
+        </div>
+        <button
+          class="mt-3 h-10 w-full rounded-md border border-accent bg-accent px-4 text-sm font-medium text-accent-foreground hover:bg-accent-hover"
+          type="submit"
+          disabled={unlocking || unlockPassphrase.length === 0}
+        >
+          {unlocking ? 'Déverrouillage et indexation…' : 'Déverrouiller'}
+        </button>
+        {#if vaultStatus.warnings.length > 0}
+          <div class="mt-5 border-l-2 border-danger pl-3 text-sm text-subtle" role="status">
+            Certains fichiers ont demandé votre attention lors de la dernière ouverture.
+          </div>
+        {/if}
+      </form>
+    </main>
+  {:else}
   <div class="grid h-full min-h-0 grid-rows-[14rem_minmax(0,1fr)] lg:grid-cols-[20rem_minmax(0,1fr)] lg:grid-rows-none">
     <aside
       bind:this={sidebarEl}
@@ -1399,9 +1539,19 @@
           {vaultPath || 'Chargement du coffre...'}
         </p>
       </div>
-      <span class="ml-2 rounded-md border border-border-strong px-2 py-0.5 text-xs text-subtle">
-        {notes.length}
-      </span>
+      <div class="ml-2 flex items-center gap-1.5">
+        <button
+          class="rounded-md border border-border-strong px-2 py-0.5 text-xs text-subtle hover:text-foreground"
+          type="button"
+          onclick={openEncryptionDialog}
+          aria-label="Configurer le chiffrement"
+        >
+          {vaultStatus?.encryptionEnabled ? 'Chiffré' : 'Sécurité'}
+        </button>
+        <span class="rounded-md border border-border-strong px-2 py-0.5 text-xs text-subtle">
+          {notes.length}
+        </span>
+      </div>
     </div>
 
     <div class="flex min-h-0 flex-1 flex-col gap-2 px-3 py-3">
@@ -1827,7 +1977,65 @@
     </section>
     </main>
   </div>
+  {/if}
 </div>
+
+{#if encryptionDialogOpen}
+  <div class="fixed inset-0 z-50 grid place-items-center px-4">
+    <button
+      class="absolute inset-0 bg-black/55"
+      type="button"
+      aria-label="Fermer les réglages de chiffrement"
+      onclick={() => (encryptionDialogOpen = false)}
+      disabled={encryptionBusy}
+    ></button>
+    <div
+      class="relative w-full max-w-md rounded-lg border border-border bg-panel p-5 shadow-lg"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="encryption-title"
+    >
+    <form
+      aria-busy={encryptionBusy}
+      onsubmit={(event) => { event.preventDefault(); void submitEncryption(); }}
+    >
+      <h2 id="encryption-title" class="text-base font-semibold">Chiffrement du coffre</h2>
+      <p class="mt-2 text-sm leading-6 text-subtle">
+        Une phrase oubliée rend les notes irrécupérables. Les noms de fichiers, dossiers, épingles et assets restent visibles.
+      </p>
+      {#if !vaultStatus?.encryptionEnabled}
+        <p class="mt-2 text-xs leading-5 text-subtle">
+          L’ancien index est supprimé à l’activation, sans garantie d’effacement sur un SSD, un snapshot ou une sauvegarde. Les fichiers <code>.md</code> ne seront plus lisibles par un éditeur externe.
+        </p>
+      {/if}
+
+      {#if vaultStatus?.encryptionEnabled}
+        <div class="mt-5 flex gap-4 border-b border-border pb-2" role="group" aria-label="Action de chiffrement">
+          <button aria-pressed={encryptionAction === 'change'} class="text-sm {encryptionAction === 'change' ? 'text-foreground' : 'text-subtle'}" type="button" onclick={() => (encryptionAction = 'change')}>Changer la phrase</button>
+          <button aria-pressed={encryptionAction === 'disable'} class="text-sm {encryptionAction === 'disable' ? 'text-danger' : 'text-subtle'}" type="button" onclick={() => (encryptionAction = 'disable')}>Désactiver</button>
+        </div>
+        <label for="current-passphrase" class="mt-5 block text-sm font-medium">Phrase secrète actuelle</label>
+        <input id="current-passphrase" class="mt-2 h-10 w-full rounded-md border border-border-strong bg-background px-3" type="password" autocomplete="current-password" bind:value={currentPassphrase} disabled={encryptionBusy} />
+      {/if}
+
+      {#if encryptionAction !== 'disable'}
+        <label for="new-passphrase" class="mt-5 block text-sm font-medium">Nouvelle phrase secrète</label>
+        <input id="new-passphrase" class="mt-2 h-10 w-full rounded-md border border-border-strong bg-background px-3" type="password" autocomplete="new-password" minlength="12" maxlength="1024" bind:value={replacementPassphrase} disabled={encryptionBusy} />
+        <label for="confirm-passphrase" class="mt-4 block text-sm font-medium">Confirmer la phrase secrète</label>
+        <input id="confirm-passphrase" class="mt-2 h-10 w-full rounded-md border border-border-strong bg-background px-3" type="password" autocomplete="new-password" minlength="12" maxlength="1024" bind:value={confirmationPassphrase} disabled={encryptionBusy} />
+      {/if}
+
+      <div class="mt-3 min-h-6 text-sm text-danger" role="status" aria-live="polite">{encryptionBusy ? 'Conversion des fichiers en cours…' : encryptionError}</div>
+      <div class="mt-4 flex justify-end gap-2">
+        <button class="rounded-md border border-border px-3 py-2 text-sm text-subtle" type="button" onclick={() => (encryptionDialogOpen = false)} disabled={encryptionBusy}>Annuler</button>
+        <button class="rounded-md border px-3 py-2 text-sm font-medium {encryptionAction === 'disable' ? 'border-danger bg-danger text-background' : 'border-accent bg-accent text-accent-foreground'}" type="submit" disabled={encryptionBusy}>
+          {encryptionBusy ? 'Traitement…' : encryptionAction === 'enable' ? 'Activer' : encryptionAction === 'change' ? 'Changer' : 'Désactiver'}
+        </button>
+      </div>
+    </form>
+    </div>
+  </div>
+{/if}
 
 <QuickSwitcher
   open={quickSwitcherOpen}
@@ -1889,6 +2097,7 @@
 <ExportDialog
   open={exportOpen}
   notes={notes}
+  encrypted={vaultStatus?.encryptionEnabled ?? false}
   defaultFilename={`notevault-${new Date().toISOString().slice(0, 10)}.zip`}
   onClose={() => (exportOpen = false)}
   onSuccess={onExportSuccess}
