@@ -1,29 +1,12 @@
 <script lang="ts">
-  import Bold from '@lucide/svelte/icons/bold';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import ChevronUp from '@lucide/svelte/icons/chevron-up';
-  import Code from '@lucide/svelte/icons/code';
   import Columns3 from '@lucide/svelte/icons/columns-3';
-  import Heading1 from '@lucide/svelte/icons/heading-1';
-  import Heading2 from '@lucide/svelte/icons/heading-2';
-  import Heading3 from '@lucide/svelte/icons/heading-3';
-  import ImagePlus from '@lucide/svelte/icons/image-plus';
-  import Italic from '@lucide/svelte/icons/italic';
-  import List from '@lucide/svelte/icons/list';
-  import ListChecks from '@lucide/svelte/icons/list-checks';
-  import ListOrdered from '@lucide/svelte/icons/list-ordered';
-  import Minus from '@lucide/svelte/icons/minus';
-  import Pilcrow from '@lucide/svelte/icons/pilcrow';
-  import Quote from '@lucide/svelte/icons/quote';
-  import Redo2 from '@lucide/svelte/icons/redo-2';
   import Rows3 from '@lucide/svelte/icons/rows-3';
-  import Strikethrough from '@lucide/svelte/icons/strikethrough';
-  import TableIcon from '@lucide/svelte/icons/table';
   import Trash2 from '@lucide/svelte/icons/trash-2';
-  import Undo2 from '@lucide/svelte/icons/undo-2';
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
   import { Editor, mergeAttributes } from '@tiptap/core';
   import StarterKit from '@tiptap/starter-kit';
   import Image from '@tiptap/extension-image';
@@ -34,6 +17,7 @@
   import { TaskItem, TaskList } from '@tiptap/extension-list';
   import { WikiLink, refreshWikiLinkDecorations } from '../lib/wiki-link';
   import { WikiLinkSuggestion } from '../lib/wiki-link-suggestion';
+  import EditorToolbar, { type BlockValue, type ToolbarState } from './EditorToolbar.svelte';
   import {
     isRemoteImageSource,
     isSafeEditorImageSource,
@@ -41,22 +25,39 @@
     withTimeout
   } from '../lib/assets';
 
-  export let markdown = '';
-  export let onChange: (value: string) => void = () => {};
-  export let onDirty: () => void = () => {};
-  export let knownTitles: Set<string> = new Set();
-  export let onWikiNavigate: (target: string) => void = () => {};
-  export let onWikiCreate: (target: string) => void = () => {};
-  export let onAssetUpload: (file: File) => Promise<string | null> = async () => null;
-  export let onAssetImportFromPath: (absolutePath: string) => Promise<string | null> = async () => null;
-  export let assetURL: (relPath: string) => Promise<string> = async (rel) => rel;
-  export let onReady: (state: { isEditable: boolean; isFocused: boolean }) => void = () => {};
-  export let onError: (error: unknown) => void = () => {};
+  type Props = {
+    markdown?: string;
+    onChange?: (value: string) => void;
+    onDirty?: () => void;
+    knownTitles?: Set<string>;
+    onWikiNavigate?: (target: string) => void;
+    onWikiCreate?: (target: string) => void;
+    onAssetUpload?: (file: File) => Promise<string | null>;
+    onAssetImportFromPath?: (absolutePath: string) => Promise<string | null>;
+    assetURL?: (relPath: string) => Promise<string>;
+    onReady?: (state: { isEditable: boolean; isFocused: boolean }) => void;
+    onError?: (error: unknown) => void;
+  };
 
-  type BlockValue = 'paragraph' | 'heading-1' | 'heading-2' | 'heading-3';
+  let {
+    markdown = '',
+    onChange = () => {},
+    onDirty = () => {},
+    knownTitles = new Set(),
+    onWikiNavigate = () => {},
+    onWikiCreate = () => {},
+    onAssetUpload = async () => null,
+    onAssetImportFromPath = async () => null,
+    assetURL = async (rel) => rel,
+    onReady = () => {},
+    onError = () => {}
+  }: Props = $props();
 
-  let host: HTMLDivElement;
-  let editor: Editor | null = null;
+  let host: HTMLDivElement | undefined = $state();
+  // `$state.raw` : seule la réassignation (null → instance) est réactive.
+  // Surtout pas `$state` — le proxy profond casserait ProseMirror. Les
+  // changements internes à l'instance sont signalés par `editorVersion`.
+  let editor: Editor | null = $state.raw(null);
   let lastMarkdown = markdown;
   // Suit la dernière valeur de la prop `markdown` que NoteEditor a vue.
   // Sert à distinguer un vrai changement externe (autre note ouverte,
@@ -66,25 +67,23 @@
   // sporadiquement pendant le cycle save et dispatchait un `replaceWith`
   // complet qui démontait/remontait les décorations wiki-link → flicker.
   let lastSeenPropMarkdown = markdown;
-  let editorReady = false;
-  let editorEditable = false;
-  // Compteur incrémenté à chaque transaction ProseMirror. C'est lui qui
-  // sert de signal à Svelte 5 pour re-évaluer les expressions du template
-  // dépendant de l'état de l'éditeur (`canUndo`, `canRedo`, `isActive`,
-  // etc.). Sans ça, `editor = editor` était un no-op : Svelte compare
-  // l'identité des objets en `===` strict, donc une réassignation vers
-  // la même référence n'invalide rien et les boutons restent figés.
-  let editorTick = 0;
+  let editorReady = $state(false);
+  let editorEditable = $state(false);
+  // Tick incrémenté à chaque transaction ProseMirror : c'est le signal
+  // d'invalidation du snapshot `toolbar` ($derived). L'instance `editor`
+  // étant en $state.raw, ses mutations internes sont invisibles pour
+  // Svelte — ce compteur primitif force la ré-évaluation.
+  let editorVersion = $state(0);
   let pendingChangeTimer: ReturnType<typeof setTimeout> | null = null;
   let hasPendingChange = false;
 
   // Menu flottant ancré au curseur, visible uniquement quand le curseur
   // est dans une cellule de tableau. Positionné en `fixed` à partir des
   // coords écran fournies par `editor.view.coordsAtPos`.
-  let tableMenuVisible = false;
-  let tableMenuX = 0;
-  let tableMenuY = 0;
-  let tableMenuPlacement: 'top' | 'bottom' = 'top';
+  let tableMenuVisible = $state(false);
+  let tableMenuX = $state(0);
+  let tableMenuY = $state(0);
+  let tableMenuPlacement: 'top' | 'bottom' = $state('top');
   const TABLE_MENU_HEIGHT = 36;
 
   const lowlight = createLowlight(common);
@@ -109,53 +108,67 @@
     }
   });
 
-  const iconButtonBase =
-    'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border text-subtle transition-colors hover:text-foreground disabled:pointer-events-none disabled:opacity-40';
-  const selectBase =
-    'h-8 rounded-md border border-transparent bg-transparent px-2 text-sm text-foreground hover:bg-panel-muted focus:bg-panel-muted';
-
-// Toute transaction ProseMirror (saisie, sélection, meta) passe par
-// `onTransaction`, donc on centralise la notification ici. On incrémente
-// `editorTick` plutôt que `editor = editor` parce que Svelte 5 utilise
-// `===` strict pour décider d'invalider une variable legacy : deux
-// références identiques vers le même objet ne déclenchent rien, donc les
-// expressions du template (`canUndo`, `isActive`, etc.) ne se réévalueraient
-// jamais. Le tick est une valeur primitive qui change forcément.
-function notifyEditorChange(): void {
-  editorTick++;
-}
-
-  function iconButtonClass(active = false): string {
-    return active
-      ? `${iconButtonBase} border-accent bg-accent text-accent-foreground hover:bg-accent-hover hover:text-accent-foreground`
-      : `${iconButtonBase} border-transparent bg-transparent hover:bg-panel-muted`;
+  // Toute transaction ProseMirror (saisie, sélection, meta) passe par
+  // `onTransaction`, donc on centralise la notification ici.
+  function notifyEditorChange(): void {
+    editorVersion++;
   }
 
-  function canUndo(): boolean {
-    // Lecture de `editorTick` pour que Svelte enregistre la dépendance
-    // et re-évalue cette fonction à chaque transaction.
-    editorTick;
-    return editor?.can().undo() ?? false;
-  }
+  const DISABLED_ITEM = { active: false, enabled: false };
+  const DISABLED_TOOLBAR_STATE: ToolbarState = {
+    canUndo: false,
+    canRedo: false,
+    block: 'paragraph',
+    blockEnabled: false,
+    bold: DISABLED_ITEM,
+    italic: DISABLED_ITEM,
+    strike: DISABLED_ITEM,
+    bulletList: DISABLED_ITEM,
+    orderedList: DISABLED_ITEM,
+    taskList: DISABLED_ITEM,
+    blockquote: DISABLED_ITEM,
+    codeBlock: DISABLED_ITEM,
+    canInsertTable: false,
+    canInsertHorizontalRule: false
+  };
 
-  function canRedo(): boolean {
-    editorTick;
-    return editor?.can().redo() ?? false;
-  }
+  // Snapshot de l'état éditeur consommé par <EditorToolbar>. `editorVersion`
+  // est lu en premier et inconditionnellement : c'est lui qui invalide le
+  // snapshot à chaque transaction, y compris tant que `editor` est null.
+  // `enabled` vient de `can()` : le schéma interdit certaines commandes
+  // selon le contexte (citation dans un task item, gras dans un code
+  // block, etc.) — le bouton correspondant est grisé plutôt qu'inerte.
+  const toolbar: ToolbarState = $derived.by(() => {
+    editorVersion;
+    const ed = editor;
+    if (!ed || ed.isDestroyed) return DISABLED_TOOLBAR_STATE;
 
-  function isActive(name: string, attributes: Record<string, unknown> | undefined = undefined): boolean {
-    editorTick;
-    return editor?.isActive(name, attributes) ?? false;
-  }
+    const can = ed.can();
+    const block: BlockValue = ed.isActive('heading', { level: 1 })
+      ? 'heading-1'
+      : ed.isActive('heading', { level: 2 })
+        ? 'heading-2'
+        : ed.isActive('heading', { level: 3 })
+          ? 'heading-3'
+          : 'paragraph';
 
-  function currentBlock(): BlockValue {
-    editorTick;
-    if (editor?.isActive('heading', { level: 1 })) return 'heading-1';
-    if (editor?.isActive('heading', { level: 2 })) return 'heading-2';
-    if (editor?.isActive('heading', { level: 3 })) return 'heading-3';
-
-    return 'paragraph';
-  }
+    return {
+      canUndo: can.undo(),
+      canRedo: can.redo(),
+      block,
+      blockEnabled: can.setParagraph() || can.toggleHeading({ level: 1 }),
+      bold: { active: ed.isActive('bold'), enabled: can.toggleBold() },
+      italic: { active: ed.isActive('italic'), enabled: can.toggleItalic() },
+      strike: { active: ed.isActive('strike'), enabled: can.toggleStrike() },
+      bulletList: { active: ed.isActive('bulletList'), enabled: can.toggleBulletList() },
+      orderedList: { active: ed.isActive('orderedList'), enabled: can.toggleOrderedList() },
+      taskList: { active: ed.isActive('taskList'), enabled: can.toggleTaskList() },
+      blockquote: { active: ed.isActive('blockquote'), enabled: can.toggleBlockquote() },
+      codeBlock: { active: ed.isActive('codeBlock'), enabled: can.toggleCodeBlock() },
+      canInsertTable: can.insertTable({ rows: 3, cols: 3, withHeaderRow: true }),
+      canInsertHorizontalRule: can.setHorizontalRule()
+    };
+  });
 
   // Recalcule la position du menu flottant. Appelée à chaque transaction
   // (sélection, frappe, etc.). Le menu se place au-dessus du curseur par
@@ -180,6 +193,7 @@ function notifyEditorChange(): void {
   }
 
   onMount(() => {
+    if (!host) return;
     try {
       editor = new Editor({
         element: host,
@@ -342,8 +356,8 @@ function notifyEditorChange(): void {
     emitPendingChange();
   }
 
-  let isUploading = false;
-  let uploadError = '';
+  let isUploading = $state(false);
+  let uploadError = $state('');
 
   // Les fichiers locaux sont importés par Go. Les URL distantes sont refusées
   // pour préserver la promesse local-first et éviter les pixels de suivi.
@@ -434,17 +448,29 @@ function notifyEditorChange(): void {
   // Si la prop diffère au niveau string mais que le JSON parsé est
   // structurellement identique au doc courant, on aligne les références
   // sans dispatcher de transaction (évite un re-instantiate de décorations).
-  $: if (editor && markdown !== lastSeenPropMarkdown) {
-    lastSeenPropMarkdown = markdown;
-    if (markdown !== lastMarkdown) {
-      const ed = editor;
+  //
+  // Dépendances trackées : uniquement `markdown` et `editor` (capturés
+  // AVANT untrack). Tout le corps est sous `untrack` parce que le dispatch
+  // déclenche `onTransaction`, qui écrit `editorVersion` et les états du
+  // menu tableau : si l'un d'eux devenait une dépendance, l'effet
+  // bouclerait (effect_update_depth_exceeded). Les trackers `lastMarkdown`,
+  // `lastSeenPropMarkdown`, `pendingChangeTimer` et `hasPendingChange`
+  // restent des `let` non réactifs pour la même raison.
+  $effect(() => {
+    const md = markdown;
+    const ed = editor;
+    if (!ed) return;
+    untrack(() => {
+      if (md === lastSeenPropMarkdown) return;
+      lastSeenPropMarkdown = md;
+      if (md === lastMarkdown) return;
       if (pendingChangeTimer) {
         clearTimeout(pendingChangeTimer);
         pendingChangeTimer = null;
       }
       hasPendingChange = false;
       try {
-        const json = ed.markdown?.parse(markdown) ?? { type: 'doc', content: [] };
+        const json = ed.markdown?.parse(md) ?? { type: 'doc', content: [] };
         const nextDoc = ed.schema.nodeFromJSON(json);
         const currentJSON = ed.state.doc.toJSON();
         if (JSON.stringify(currentJSON) !== JSON.stringify(nextDoc.toJSON())) {
@@ -458,15 +484,19 @@ function notifyEditorChange(): void {
       } catch (err) {
         console.error('[editor] setContent failed:', err);
       }
-      lastMarkdown = markdown;
-    }
-  }
+      lastMarkdown = md;
+    });
+  });
 
   // Rafraîchit les décorations wiki-link quand la liste des titres connus
-  // change (création, suppression, ouverture d'une autre note).
-  $: if (editor && knownTitles) {
-    refreshWikiLinkDecorations(editor);
-  }
+  // change (création, suppression, ouverture d'une autre note). Seule
+  // l'identité de la prop `knownTitles` est trackée.
+  $effect(() => {
+    knownTitles;
+    const ed = editor;
+    if (!ed) return;
+    untrack(() => refreshWikiLinkDecorations(ed));
+  });
 
   function undo(): void {
     editor?.chain().focus().undo().run();
@@ -488,8 +518,7 @@ function notifyEditorChange(): void {
     editor?.chain().focus().toggleStrike().run();
   }
 
-  function changeBlock(event: Event): void {
-    const value = (event.currentTarget as HTMLSelectElement).value as BlockValue;
+  function changeBlock(value: BlockValue): void {
     const chain = editor?.chain().focus();
 
     if (!chain) return;
@@ -521,7 +550,7 @@ function notifyEditorChange(): void {
 
   // Bouton "Image" : ouvre un file picker, plus fiable que le drag&drop
   // qui est mal supporté par WebKit sur Linux pour les fichiers locaux.
-  let fileInput: HTMLInputElement | null = null;
+  let fileInput: HTMLInputElement | null = $state(null);
   function openImagePicker(): void {
     fileInput?.click();
   }
@@ -592,7 +621,7 @@ function notifyEditorChange(): void {
 
   // Drag-over visuel : on tracke les events dragenter/dragleave sur l'host
   // pour afficher un overlay "Déposez l'image ici".
-  let dragOverCount = 0;
+  let dragOverCount = $state(0);
   function onHostDragEnter(event: DragEvent): void {
     if (!event.dataTransfer) return;
     const types = Array.from(event.dataTransfer.types ?? []);
@@ -614,69 +643,23 @@ function notifyEditorChange(): void {
 </script>
 
 <div class="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-background text-foreground">
-  <div class="flex shrink-0 items-center gap-0.5 overflow-x-auto bg-background px-3 py-2" aria-label="Outils de mise en forme">
-    <button class={iconButtonClass()} type="button" title="Annuler" aria-label="Annuler" onclick={undo} disabled={!canUndo()}>
-      <Undo2 size={16} strokeWidth={2} aria-hidden="true" />
-    </button>
-    <button class={`${iconButtonClass()} mr-3`} type="button" title="Rétablir" aria-label="Rétablir" onclick={redo} disabled={!canRedo()}>
-      <Redo2 size={16} strokeWidth={2} aria-hidden="true" />
-    </button>
-
-    <label class="sr-only" for="note-editor-block-type">Style de bloc</label>
-    <select id="note-editor-block-type" class={selectBase} value={currentBlock()} onchange={changeBlock} title="Style de bloc">
-      <option value="paragraph">Texte</option>
-      <option value="heading-1">Titre 1</option>
-      <option value="heading-2">Titre 2</option>
-      <option value="heading-3">Titre 3</option>
-    </select>
-    <span class="mr-3 hidden items-center px-1 text-faint sm:inline-flex" aria-hidden="true">
-      {#if currentBlock() === 'heading-1'}
-        <Heading1 size={16} strokeWidth={2} />
-      {:else if currentBlock() === 'heading-2'}
-        <Heading2 size={16} strokeWidth={2} />
-      {:else if currentBlock() === 'heading-3'}
-        <Heading3 size={16} strokeWidth={2} />
-      {:else}
-        <Pilcrow size={16} strokeWidth={2} />
-      {/if}
-    </span>
-
-    <button class={iconButtonClass(isActive('bold'))} type="button" title="Gras" aria-label="Gras" aria-pressed={isActive('bold')} onclick={toggleBold}>
-      <Bold size={16} strokeWidth={2} aria-hidden="true" />
-    </button>
-    <button class={iconButtonClass(isActive('italic'))} type="button" title="Italique" aria-label="Italique" aria-pressed={isActive('italic')} onclick={toggleItalic}>
-      <Italic size={16} strokeWidth={2} aria-hidden="true" />
-    </button>
-    <button class={`${iconButtonClass(isActive('strike'))} mr-3`} type="button" title="Barré" aria-label="Barré" aria-pressed={isActive('strike')} onclick={toggleStrike}>
-      <Strikethrough size={16} strokeWidth={2} aria-hidden="true" />
-    </button>
-
-    <button class={iconButtonClass(isActive('bulletList'))} type="button" title="Liste à puces" aria-label="Liste à puces" aria-pressed={isActive('bulletList')} onclick={toggleBulletList}>
-      <List size={16} strokeWidth={2} aria-hidden="true" />
-    </button>
-    <button class={iconButtonClass(isActive('orderedList'))} type="button" title="Liste numérotée" aria-label="Liste numérotée" aria-pressed={isActive('orderedList')} onclick={toggleOrderedList}>
-      <ListOrdered size={16} strokeWidth={2} aria-hidden="true" />
-    </button>
-    <button class={`${iconButtonClass(isActive('taskList'))} mr-3`} type="button" title="Liste de tâches" aria-label="Liste de tâches" aria-pressed={isActive('taskList')} onclick={toggleTaskList}>
-      <ListChecks size={16} strokeWidth={2} aria-hidden="true" />
-    </button>
-
-    <button class={iconButtonClass(isActive('blockquote'))} type="button" title="Citation" aria-label="Citation" aria-pressed={isActive('blockquote')} onclick={toggleBlockquote}>
-      <Quote size={16} strokeWidth={2} aria-hidden="true" />
-    </button>
-    <button class={iconButtonClass(isActive('codeBlock'))} type="button" title="Bloc de code" aria-label="Bloc de code" aria-pressed={isActive('codeBlock')} onclick={toggleCodeBlock}>
-      <Code size={16} strokeWidth={2} aria-hidden="true" />
-    </button>
-    <button class={iconButtonClass()} type="button" title="Insérer un tableau" aria-label="Insérer un tableau" onclick={insertTable}>
-      <TableIcon size={16} strokeWidth={2} aria-hidden="true" />
-    </button>
-    <button class={`${iconButtonClass()} mr-3`} type="button" title="Insérer une image" aria-label="Insérer une image" onclick={openImagePicker}>
-      <ImagePlus size={16} strokeWidth={2} aria-hidden="true" />
-    </button>
-    <button class={iconButtonClass()} type="button" title="Insérer une séparation" aria-label="Insérer une séparation" onclick={insertHorizontalRule}>
-      <Minus size={16} strokeWidth={2} aria-hidden="true" />
-    </button>
-  </div>
+  <EditorToolbar
+    {toolbar}
+    onUndo={undo}
+    onRedo={redo}
+    onChangeBlock={changeBlock}
+    onToggleBold={toggleBold}
+    onToggleItalic={toggleItalic}
+    onToggleStrike={toggleStrike}
+    onToggleBulletList={toggleBulletList}
+    onToggleOrderedList={toggleOrderedList}
+    onToggleTaskList={toggleTaskList}
+    onToggleBlockquote={toggleBlockquote}
+    onToggleCodeBlock={toggleCodeBlock}
+    onInsertTable={insertTable}
+    onInsertImage={openImagePicker}
+    onInsertHorizontalRule={insertHorizontalRule}
+  />
 
   <div
     class="relative min-h-0 flex-1 overflow-auto bg-background text-foreground"
@@ -921,7 +904,26 @@ function notifyEditorChange(): void {
     padding-left: 1.55rem;
   }
 
+  /* Preflight Tailwind v4 met `list-style: none` sur tous les ul/ol :
+     on doit restaurer les marqueurs explicitement. Le opt-out taskList
+     ci-dessous garde la priorité grâce à son sélecteur d'attribut. */
+  :global(.note-editor-content ul) {
+    list-style-type: disc;
+  }
+
+  :global(.note-editor-content ul ul) {
+    list-style-type: circle;
+  }
+
+  :global(.note-editor-content ol) {
+    list-style-type: decimal;
+  }
+
   :global(.note-editor-content li) {
+    margin: 0.25rem 0;
+  }
+
+  :global(.note-editor-content li > p) {
     margin: 0.25rem 0;
   }
 
@@ -934,15 +936,33 @@ function notifyEditorChange(): void {
     list-style: none;
   }
 
-  :global(.note-editor-content li[data-type='taskItem']) {
+  :global(.note-editor-content ul[data-type='taskList'] ul[data-type='taskList']) {
+    padding-left: 1.55rem;
+    margin: 0.25rem 0;
+  }
+
+  /* Cible `ul[data-type='taskList'] > li` et non `li[data-type='taskItem']` :
+     le NodeView de TaskItem ne pose que `data-checked` sur le <li> rendu
+     en live (`data-type` n'existe que dans le HTML sérialisé). Le <ul>
+     parent, sans NodeView, conserve son attribut. */
+  :global(.note-editor-content ul[data-type='taskList'] > li) {
     display: flex;
     gap: 0.6rem;
     align-items: flex-start;
   }
 
-  :global(.note-editor-content li[data-type='taskItem'] > label) {
+  :global(.note-editor-content ul[data-type='taskList'] > li > label) {
     flex: 0 0 auto;
     margin-top: 0.18rem;
+  }
+
+  :global(.note-editor-content ul[data-type='taskList'] > li > div) {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  :global(.note-editor-content ul[data-type='taskList'] > li > div > p) {
+    margin: 0;
   }
 
   :global(.note-editor-content input[type='checkbox']) {
