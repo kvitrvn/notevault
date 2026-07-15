@@ -23,6 +23,8 @@
   import Download from '@lucide/svelte/icons/download';
   import Keyboard from '@lucide/svelte/icons/keyboard';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import PanelLeftClose from '@lucide/svelte/icons/panel-left-close';
+  import PanelLeftOpen from '@lucide/svelte/icons/panel-left-open';
 
   import NoteEditor from './components/NoteEditor.svelte';
   import SaveIndicator from './components/SaveIndicator.svelte';
@@ -144,6 +146,7 @@
     (window.localStorage.getItem('notevault-view') as 'flat' | 'tree') || 'flat'
   );
   let sidebarFocused = $state(false);
+  let sidebarCollapsed = $state(window.localStorage.getItem('notevault-sidebar-collapsed') === '1');
   let activeFilter = $state('');
   let activeChips: { kind: string; text: string }[] = $state([]);
   let parsedFilter: {
@@ -304,6 +307,11 @@
   function setView(v: 'flat' | 'tree'): void {
     view = v;
     window.localStorage.setItem('notevault-view', v);
+  }
+
+  function toggleSidebar(): void {
+    sidebarCollapsed = !sidebarCollapsed;
+    window.localStorage.setItem('notevault-sidebar-collapsed', sidebarCollapsed ? '1' : '0');
   }
 
   function buildQuery(): FilterQuery {
@@ -1137,6 +1145,11 @@
       openHistory();
       return;
     }
+    if (meta && event.shiftKey && event.key.toLowerCase() === 'b') {
+      event.preventDefault();
+      toggleSidebar();
+      return;
+    }
     if (meta && event.key.toLowerCase() === 'p') {
       event.preventDefault();
       quickSwitcherOpen = !quickSwitcherOpen;
@@ -1673,13 +1686,47 @@
       </form>
     </main>
   {:else}
-  <div class="grid h-full min-h-0 grid-rows-[14rem_minmax(0,1fr)] lg:grid-cols-[20rem_minmax(0,1fr)] lg:grid-rows-none">
+  <div class={sidebarCollapsed
+    ? 'grid h-full min-h-0 grid-rows-[3rem_minmax(0,1fr)] lg:grid-cols-[3.25rem_minmax(0,1fr)] lg:grid-rows-none'
+    : 'grid h-full min-h-0 grid-rows-[14rem_minmax(0,1fr)] lg:grid-cols-[20rem_minmax(0,1fr)] lg:grid-rows-none'}>
     <aside
       bind:this={sidebarEl}
       class="flex min-h-0 flex-col border-b border-border bg-sidebar lg:border-b-0 lg:border-r"
       onfocusin={onSidebarFocus}
       aria-label="Navigation des notes"
     >
+    {#if sidebarCollapsed}
+    <div class="flex min-h-0 flex-1 items-center gap-1.5 px-2 py-1.5 lg:flex-col lg:px-0 lg:py-2">
+      <button
+        class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-panel-muted text-subtle hover:bg-panel hover:text-foreground"
+        type="button"
+        title="Déplier la barre latérale (Ctrl+Shift+B)"
+        aria-label="Déplier la barre latérale"
+        aria-expanded="false"
+        onclick={toggleSidebar}
+      >
+        <PanelLeftOpen size={15} strokeWidth={2} aria-hidden="true" />
+      </button>
+      <button
+        class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-panel-muted text-subtle hover:bg-panel hover:text-foreground"
+        type="button"
+        title="Recherche rapide (Ctrl+P)"
+        aria-label="Recherche rapide"
+        onclick={() => (quickSwitcherOpen = true)}
+      >
+        <Search size={15} strokeWidth={2} aria-hidden="true" />
+      </button>
+      <button
+        class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-panel-muted text-subtle hover:bg-panel hover:text-foreground"
+        type="button"
+        title="Nouvelle note (Ctrl+N)"
+        aria-label="Nouvelle note"
+        onclick={() => openTemplatePicker()}
+      >
+        <Plus size={15} strokeWidth={2} aria-hidden="true" />
+      </button>
+    </div>
+    {:else}
     <div class="relative flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
       <div class="min-w-0 flex-1">
         <button
@@ -1712,6 +1759,16 @@
         {/if}
       </div>
       <div class="ml-2 flex items-center gap-1.5">
+        <button
+          class="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-panel text-subtle hover:bg-panel-muted hover:text-foreground"
+          type="button"
+          title="Replier la barre latérale (Ctrl+Shift+B)"
+          aria-label="Replier la barre latérale"
+          aria-expanded="true"
+          onclick={toggleSidebar}
+        >
+          <PanelLeftClose size={13} strokeWidth={2} aria-hidden="true" />
+        </button>
         <button
           class="rounded-md border border-border-strong px-2 py-0.5 text-xs text-subtle hover:text-foreground"
           type="button"
@@ -1935,6 +1992,7 @@
       <span>j/k · ↑/↓ &nbsp;Entrée ouvre</span>
       <span>{sidebarFocused ? 'sidebar active' : 'éditeur actif'}</span>
     </div>
+    {/if}
   </aside>
 
   <main class="grid min-h-0 grid-rows-[3.5rem_minmax(0,1fr)] bg-background">

@@ -24,6 +24,7 @@
         { keys: 'Ctrl+Shift+F', label: 'Focus sur la barre de filtres' },
         { keys: 'Ctrl+Shift+D', label: 'Ouvrir la note du jour' },
         { keys: 'Ctrl+Shift+H', label: 'Ouvrir l’historique de la note' },
+        { keys: 'Ctrl+Shift+B', label: 'Replier / déplier la barre latérale' },
         { keys: 'j / k', label: 'Naviguer dans la liste (haut / bas)' },
         { keys: 'h / l', label: 'Sidebar ↔ éditeur' }
       ]
