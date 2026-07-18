@@ -6,7 +6,7 @@ pkgrel=1
 pkgdesc="Local-first desktop note-taking application"
 arch=('x86_64')
 url="https://github.com/kvitrvn/notevault"
-license=('MIT')
+license=('MIT' 'GPL-3.0-only')
 depends=(
   'at-spi2-core'
   'cairo'
@@ -21,8 +21,8 @@ depends=(
   'xorg-xwayland'
   'zlib'
 )
-source=('notevault' 'notevault.desktop' 'notevault.svg' 'notevault.png' 'LICENSE')
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+source=('notevault' 'notevault.desktop' 'notevault.svg' 'notevault.png' 'LICENSE' 'THIRD_PARTY_NOTICES.md')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 package() {
   install -Dm755 notevault "$pkgdir/usr/bin/notevault"
@@ -30,4 +30,5 @@ package() {
   install -Dm644 notevault.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/notevault.svg"
   install -Dm644 notevault.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/notevault.png"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/notevault/LICENSE"
+  install -Dm644 THIRD_PARTY_NOTICES.md "$pkgdir/usr/share/licenses/notevault/THIRD_PARTY_NOTICES.md"
 }

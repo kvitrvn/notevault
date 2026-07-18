@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kvitrvn/notevault/internal/appconfig"
+	"github.com/kvitrvn/notevault/internal/chat"
 	"github.com/kvitrvn/notevault/internal/domain"
 	"github.com/kvitrvn/notevault/internal/vault"
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
@@ -283,6 +284,45 @@ func TestAppReturnsStableSwitchingError(t *testing.T) {
 	defer app.switching.Store(false)
 	if _, err := app.ListNotes(); !errors.Is(err, ErrVaultSwitching) {
 		t.Fatalf("error = %v, want ErrVaultSwitching", err)
+	}
+}
+
+func TestAppChatRefusesEncryptedVaultWithoutCreatingDerivedState(t *testing.T) {
+	app := setupAppForTest(t)
+	if err := app.session.service.EnableEncryption("phrase secrète robuste"); err != nil {
+		t.Fatalf("EnableEncryption: %v", err)
+	}
+
+	_, err := app.PrepareChat(chat.PrepareRequest{
+		NotePaths: []string{"notes/inconnue.md"},
+		Question:  "Que contient la note ?",
+		Provider:  chat.ProviderOllama,
+		Model:     "local",
+	})
+	if !errors.Is(err, chat.ErrEncryptedVault) {
+		t.Fatalf("PrepareChat error = %v, want ErrEncryptedVault", err)
+	}
+	if app.session.chat != nil {
+		t.Fatal("le service de chat a été créé pour un coffre chiffré")
+	}
+	if _, statErr := os.Stat(filepath.Join(app.session.service.Root(), ".notevault", "chat")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("état dérivé créé pour le coffre chiffré : %v", statErr)
+	}
+}
+
+func TestAppChatRejectsNoteTraversalBeforeInitializingModels(t *testing.T) {
+	app := setupAppForTest(t)
+	_, err := app.PrepareChat(chat.PrepareRequest{
+		NotePaths: []string{"notes/../../secret.md"},
+		Question:  "Lis ce fichier",
+		Provider:  chat.ProviderOllama,
+		Model:     "local",
+	})
+	if err == nil {
+		t.Fatal("PrepareChat a accepté un chemin traversant")
+	}
+	if app.session.chat != nil {
+		t.Fatal("le service de chat a été initialisé avant la validation des notes")
 	}
 }
 

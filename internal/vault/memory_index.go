@@ -560,7 +560,12 @@ func (i *memoryIndex) Close() error {
 }
 
 func summaryOf(note domain.Note) domain.NoteSummary {
-	return domain.NoteSummary{RelativePath: note.RelativePath, Title: note.Title, UpdatedAt: note.UpdatedAt}
+	return domain.NoteSummary{
+		RelativePath: note.RelativePath,
+		Title:        note.Title,
+		UpdatedAt:    note.UpdatedAt,
+		Tags:         append([]string(nil), note.Tags...),
+	}
 }
 
 func summaries(ranked []rankedSummary, limit int) []domain.NoteSummary {

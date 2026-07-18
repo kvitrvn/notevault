@@ -97,6 +97,21 @@ third parties by default.
   size.
 - Detect relevant file changes made outside the application.
 
+### Private note chat
+
+- Start a conversation from explicit notes or tags, while always showing and
+  allowing adjustment of the resolved note list before retrieval.
+- Retrieve relevant Markdown sections locally through an ephemeral in-memory
+  index and keep note files as the sole source of truth.
+- Anonymize the question and retrieved sections locally, with stable
+  pseudonyms for the lifetime of the conversation.
+- Require review of the exact anonymized payload before every model call.
+- Support loopback-only Ollama and explicit remote OpenAI, Mistral, or
+  OpenRouter calls; remote mode is never enabled automatically.
+- Keep API keys and pseudonym mappings in process memory only.
+- Keep the first chat version unavailable for encrypted vaults rather than
+  persisting plaintext-derived state.
+
 ### Assets and external content
 
 - Import, store, and display local assets from the vault's `assets/` directory.
@@ -156,6 +171,13 @@ The local asset server must remain confined to `assets/`, bind only to loopback,
 and allow only supported file types. Logs must not contain secrets, note
 content, or unnecessary personal paths. Important persisted state should use
 atomic writes.
+
+Chat adds an explicit outbound trust boundary. Retrieval and anonymization run
+locally. Provider payloads contain only the reviewed anonymized question,
+reviewed anonymized passages, and opaque `SOURCE_n` identifiers. Filenames,
+paths, API keys, pseudonym mappings, and cleartext conversation history must not
+be logged or persisted. Anonymization is risk reduction, not a guarantee of
+complete de-identification.
 
 ### Encryption scope and limitations
 

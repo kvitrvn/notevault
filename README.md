@@ -1,7 +1,8 @@
 # NoteVault
 
 [![CI](https://github.com/kvitrvn/notevault/actions/workflows/ci.yml/badge.svg)](https://github.com/kvitrvn/notevault/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Source license: MIT](https://img.shields.io/badge/source-MIT-6a737d.svg)](LICENSE)
+[![Binary license: GPL-3.0](https://img.shields.io/badge/binary-GPL--3.0-6a737d.svg)](THIRD_PARTY_NOTICES.md)
 
 > [!IMPORTANT]
 > NoteVault is under active development. Features, vault behavior, and release
@@ -41,6 +42,9 @@ features while keeping the vault as the source of truth.
 - Creation, opening, and instant switching between vaults, with up to eight
   recent vaults.
 - Optional passphrase-based encryption for notes, history, and recovery drafts.
+- Opt-in chat over an explicit note selection, with local Amoxtli retrieval,
+  local go-anon anonymization, a mandatory payload preview, and local or remote
+  OpenAI-compatible models.
 
 See [PRODUCT.md](PRODUCT.md) for the product vision, principles, current scope,
 and explicit non-goals.
@@ -97,7 +101,8 @@ A vault has the following structure:
 ├── themes/
 └── .notevault/
     ├── config.json
-    └── pins.json
+    ├── pins.json
+    └── chat/models/     # downloaded go-anon models; no note index
 ```
 
 The search index is rebuilt in memory; Markdown files remain the source of
@@ -114,11 +119,34 @@ backups.
 Remote images remain in Markdown but are blocked in the editor to avoid
 unexpected network requests. Local files can be imported into `assets/`.
 
+## Chat and network privacy
+
+Chat is disabled by default and starts only from the **Chat** action. The user
+selects notes directly or adds all notes carrying one or more tags, adjusts the
+resolved list, enters a model, and reviews the exact anonymized payload before
+sending it. Tag selection is resolved to explicit note paths locally; no tag or
+mutable filter is sent to the provider. NoteVault uses an ephemeral in-memory
+Amoxtli index; it does not persist note chunks or embeddings. Note paths and
+titles are replaced with local `SOURCE_n` identifiers in the provider payload.
+
+The first preview downloads the required French, English, or Spanish go-anon
+model from go-anon's HTTPS manifest, verifies its SHA-256 checksum, and caches
+it inside `.notevault/chat/models/`. A language model is currently around 200
+MiB, so the first preview can take a moment. Anonymization and retrieval always
+run locally. Ollama calls are restricted to `127.0.0.1:11434`; remote mode
+supports fixed OpenAI, Mistral, and OpenRouter endpoints. API keys remain in
+WebView and Go process memory and are never persisted.
+
+Anonymization reduces disclosure risk but cannot guarantee that every sensitive
+value is detected. The preview is therefore required for local and remote
+providers. Chat is not available for encrypted vaults in this first version,
+so no plaintext derived index can weaken vault encryption.
+
 ## Development
 
 ### Prerequisites
 
-- Go 1.25
+- Go 1.25.5 or later
 - Node.js 22 or another current LTS release
 - npm
 - The [Wails v2 platform dependencies](https://wails.io/docs/gettingstarted/installation)
@@ -174,6 +202,7 @@ Generated files under `frontend/wailsjs/` and build artifacts under
 ├── internal/domain/      Models shared by Go and the frontend
 ├── internal/config/      Configuration stored inside a vault
 ├── internal/appconfig/   Application-wide vault and onboarding settings
+├── internal/chat/        Ephemeral retrieval, anonymization, and providers
 ├── internal/vault/       Vault files, index, history, trash, and recovery
 ├── frontend/src/         Svelte desktop interface and components
 └── scripts/              Packaging and Wails binding utilities
@@ -212,6 +241,9 @@ workflow retains the same files as artifacts without creating a release.
 
 ## License
 
-NoteVault is available under the [MIT License](LICENSE).
+NoteVault's original source code is available under the [MIT License](LICENSE).
+The desktop executable links GPL-3.0-licensed go-anon and must therefore be
+distributed under GPL-3.0-compliant terms. See
+[third-party notices](THIRD_PARTY_NOTICES.md) for pinned versions and details.
 
 Copyright © 2026 Benjamin Gaudé.

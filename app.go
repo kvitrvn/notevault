@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kvitrvn/notevault/internal/appconfig"
+	"github.com/kvitrvn/notevault/internal/chat"
 	"github.com/kvitrvn/notevault/internal/config"
 	"github.com/kvitrvn/notevault/internal/domain"
 	"github.com/kvitrvn/notevault/internal/vault"
@@ -28,6 +29,8 @@ type vaultSession struct {
 	service   *vault.Service
 	assetSrv  *vault.AssetServer
 	assetPort int
+	chatMu    sync.Mutex
+	chat      *chat.Service
 }
 
 func (s *vaultSession) close() {
@@ -37,9 +40,29 @@ func (s *vaultSession) close() {
 	if s.assetSrv != nil {
 		_ = s.assetSrv.Stop()
 	}
+	s.chatMu.Lock()
+	if s.chat != nil {
+		s.chat.Close()
+		s.chat = nil
+	}
+	s.chatMu.Unlock()
 	if s.service != nil {
 		_ = s.service.Close()
 	}
+}
+
+func (s *vaultSession) chatService() (*chat.Service, error) {
+	s.chatMu.Lock()
+	defer s.chatMu.Unlock()
+	if s.chat != nil {
+		return s.chat, nil
+	}
+	service, err := chat.New(filepath.Join(s.service.Root(), ".notevault", "chat"))
+	if err != nil {
+		return nil, err
+	}
+	s.chat = service
+	return service, nil
 }
 
 type appOptions struct {
@@ -583,4 +606,76 @@ func (a *App) SetDirtyBuffer(path, buffer string, mtime time.Time) error {
 }
 func (a *App) ClearDirtyBuffer() error {
 	return a.sessionError(func(s *vault.Service) error { return s.ClearDirtyBuffer() })
+}
+
+// PrepareChat récupère localement les passages pertinents, puis construit un
+// aperçu anonymisé. Aucun appel au fournisseur de modèle n'est effectué ici.
+func (a *App) PrepareChat(request chat.PrepareRequest) (chat.Preview, error) {
+	s, release, err := a.acquireSession()
+	if err != nil {
+		return chat.Preview{}, err
+	}
+	if s.service.VaultStatus().EncryptionEnabled {
+		release()
+		return chat.Preview{}, chat.ErrEncryptedVault
+	}
+	notes := make([]chat.Note, 0, len(request.NotePaths))
+	for _, path := range request.NotePaths {
+		note, openErr := s.service.OpenNote(path)
+		if openErr != nil {
+			release()
+			return chat.Preview{}, fmt.Errorf("ouvrir une note sélectionnée : %w", openErr)
+		}
+		notes = append(notes, chat.Note{Path: note.RelativePath, Title: note.Title, Content: note.Content})
+	}
+	service, err := s.chatService()
+	release()
+	if err != nil {
+		return chat.Preview{}, err
+	}
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return service.Prepare(ctx, request, notes)
+}
+
+// SendPreparedChat envoie uniquement la charge anonymisée précédemment
+// prévisualisée. La clé API n'est ni persistée ni conservée par le service.
+func (a *App) SendPreparedChat(request chat.SendRequest) (chat.Response, error) {
+	s, release, err := a.acquireSession()
+	if err != nil {
+		return chat.Response{}, err
+	}
+	if s.service.VaultStatus().EncryptionEnabled {
+		release()
+		return chat.Response{}, chat.ErrEncryptedVault
+	}
+	service, err := s.chatService()
+	release()
+	if err != nil {
+		return chat.Response{}, err
+	}
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return service.Send(ctx, request)
+}
+
+// ResetChatConversation oublie immédiatement l'historique anonymisé et les
+// correspondances de pseudonymes gardées en mémoire pour cette conversation.
+func (a *App) ResetChatConversation(conversationID string) error {
+	s, release, err := a.acquireSession()
+	if err != nil {
+		return err
+	}
+	s.chatMu.Lock()
+	service := s.chat
+	s.chatMu.Unlock()
+	release()
+	if service == nil {
+		return nil
+	}
+	return service.Reset(conversationID)
 }

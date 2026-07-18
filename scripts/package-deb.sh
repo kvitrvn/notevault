@@ -32,6 +32,8 @@ install -Dm644 build/appicon.png \
   "$package_root/usr/share/icons/hicolor/512x512/apps/notevault.png"
 install -Dm644 packaging/debian/copyright \
   "$package_root/usr/share/doc/notevault/copyright"
+install -Dm644 THIRD_PARTY_NOTICES.md \
+  "$package_root/usr/share/doc/notevault/THIRD_PARTY_NOTICES.md"
 install -d -m755 "$package_root/DEBIAN"
 sed "s/@VERSION@/$version/" packaging/debian/control >"$package_root/DEBIAN/control"
 chmod 0644 "$package_root/DEBIAN/control"

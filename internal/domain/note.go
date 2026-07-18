@@ -17,4 +17,5 @@ type NoteSummary struct {
 	RelativePath string    `json:"relativePath"`
 	Title        string    `json:"title"`
 	UpdatedAt    time.Time `json:"updatedAt"`
+	Tags         []string  `json:"tags"`
 }

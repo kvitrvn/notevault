@@ -192,6 +192,7 @@ jobs:
           install -m644 build/appicon.svg packaging/arch/notevault.svg
           install -m644 build/appicon.png packaging/arch/notevault.png
           install -m644 LICENSE packaging/arch/LICENSE
+          install -m644 THIRD_PARTY_NOTICES.md packaging/arch/THIRD_PARTY_NOTICES.md
           chown -R builder:builder packaging/arch
           runuser -u builder -- sh -c 'cd packaging/arch && updpkgsums'
           runuser -u builder -- env NOTEAULT_VERSION="$VERSION" \

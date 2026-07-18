@@ -44,7 +44,7 @@ frontend-install:
 frontend/node_modules/.package-lock.json: frontend/package.json frontend/package-lock.json
 	cd frontend && npm ci
 
-frontend/wailsjs/go/models.ts: $(WAILS) *.go internal/domain/*.go internal/vault/*.go internal/config/*.go
+frontend/wailsjs/go/models.ts: $(WAILS) *.go internal/chat/*.go internal/domain/*.go internal/vault/*.go internal/config/*.go
 	$(WAILS) generate module
 	./scripts/patch-models.sh
 

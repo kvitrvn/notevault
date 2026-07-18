@@ -25,6 +25,7 @@
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import PanelLeftClose from '@lucide/svelte/icons/panel-left-close';
   import PanelLeftOpen from '@lucide/svelte/icons/panel-left-open';
+  import MessageSquare from '@lucide/svelte/icons/message-square';
 
   import NoteEditor from './components/NoteEditor.svelte';
   import SaveIndicator from './components/SaveIndicator.svelte';
@@ -47,6 +48,7 @@
   import ExportDialog from './components/ExportDialog.svelte';
   import RecoveryDialog from './components/RecoveryDialog.svelte';
   import WindowTitleBar from './components/WindowTitleBar.svelte';
+  import ChatPanel from './components/ChatPanel.svelte';
   import type { SaveState } from './components/SaveIndicator.svelte';
   import { isLocalAssetPath, precomputeAssetURLs as resolveAssetURLs } from './lib/assets';
   import { shouldShowVaultUnlock } from './lib/vault-manager';
@@ -116,6 +118,7 @@
   const AUTO_SAVE_DEBOUNCE_MS = 1500;
 
   let notes: NoteSummary[] = $state([]);
+  let chatNotes: NoteSummary[] = $state([]);
   let pinned: NoteSummary[] = $state([]);
   let folders: FolderInfo[] = $state([]);
   let tags: TagCount[] = $state([]);
@@ -189,6 +192,7 @@
   let shortcutsOpen = $state(false);
   let statsOpen = $state(false);
   let exportOpen = $state(false);
+  let chatOpen = $state(false);
   let recoverySnapshot = $state<vault.RecoverySnapshot | null>(null);
   let recoveryOpen = $state(false);
   let customThemes = $state<vault.Theme[]>([]);
@@ -368,6 +372,7 @@
       pinned = (pin ?? []) as NoteSummary[];
       vaultPath = vp ?? '';
       if (fetchAll) {
+        chatNotes = (list ?? []) as NoteSummary[];
         allEntries = ((list ?? []) as NoteSummary[]).map((n) => ({
           relativePath: n.relativePath,
           title: n.title,
@@ -405,6 +410,7 @@
       tags = (tg ?? []) as TagCount[];
       customThemes = (themes ?? []) as vault.Theme[];
       if (!fetchAll) {
+        chatNotes = (all ?? []) as NoteSummary[];
         allEntries = ((all ?? []) as NoteSummary[]).map((n) => ({
           relativePath: n.relativePath,
           title: n.title,
@@ -564,6 +570,11 @@
     if (!selected) return;
     selected.tags = next;
     selected = selected;
+    chatNotes = chatNotes.map((note) =>
+      note.relativePath === selected?.relativePath
+        ? domain.NoteSummary.createFrom({ ...note, tags: next })
+        : note
+    );
     scheduleAutoSave();
   }
 
@@ -1185,6 +1196,11 @@
       exportOpen = !exportOpen;
       return;
     }
+    if (meta && event.shiftKey && event.key.toLowerCase() === 'c') {
+      event.preventDefault();
+      void openChat();
+      return;
+    }
     if (!inEditable && (event.key === 'j' || event.key === 'k' || event.key === 'h' || event.key === 'l')) {
       onSidebarKey(event);
     }
@@ -1370,6 +1386,7 @@
     refreshSeq += 1;
     clearSaveTimers();
     notes = [];
+    chatNotes = [];
     pinned = [];
     folders = [];
     tags = [];
@@ -1393,6 +1410,7 @@
     historyOpen = false;
     statsOpen = false;
     exportOpen = false;
+    chatOpen = false;
     encryptionDialogOpen = false;
   }
 
@@ -1621,6 +1639,23 @@
   function onStatsPickTag(tag: string): void {
     statsOpen = false;
     onFilterChange(`tag:${tag}`);
+  }
+
+  async function openChat(): Promise<void> {
+    if (vaultStatus?.encryptionEnabled) {
+      chatOpen = true;
+      return;
+    }
+    if (!(await beforeChatPrepare())) return;
+    chatOpen = true;
+  }
+
+  async function beforeChatPrepare(): Promise<boolean> {
+    noteEditor?.flushPendingChange();
+    if (!selected || (!hasUnsavedChanges && saveState !== 'dirty' && saveState !== 'saving')) {
+      return true;
+    }
+    return flushSave();
   }
 </script>
 
@@ -2029,6 +2064,19 @@
           </button>
         {/if}
         <button
+          class={chatOpen
+            ? 'inline-flex h-9 items-center gap-1.5 rounded-md border border-accent bg-accent/15 px-2.5 text-xs font-medium text-accent'
+            : 'inline-flex h-9 items-center gap-1.5 rounded-md border border-border bg-panel-muted px-2.5 text-xs text-subtle hover:bg-sidebar hover:text-foreground'}
+          type="button"
+          title="Discuter avec les notes (Ctrl+Shift+C)"
+          aria-label="Discuter avec les notes"
+          aria-pressed={chatOpen}
+          onclick={() => (chatOpen ? (chatOpen = false) : void openChat())}
+        >
+          <MessageSquare size={14} strokeWidth={2} aria-hidden="true" />
+          <span class="hidden 2xl:inline">Chat</span>
+        </button>
+        <button
           class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-panel-muted text-subtle hover:bg-sidebar hover:text-foreground"
           type="button"
           title="Activité (Ctrl+Shift+G)"
@@ -2059,7 +2107,10 @@
       </div>
     </header>
 
-    <section class="flex min-h-0 flex-col overflow-hidden" aria-label="Éditeur de note">
+    <div class={chatOpen
+      ? 'grid h-full min-h-0 overflow-hidden xl:grid-cols-[minmax(0,1fr)_30rem]'
+      : 'grid h-full min-h-0 overflow-hidden'}>
+    <section class="flex min-h-0 min-w-0 flex-col overflow-hidden" aria-label="Éditeur de note">
       {#if error}
         <p class="mx-4 mt-4 rounded-lg border border-danger/40 bg-panel px-3 py-2 text-sm text-danger" role="alert">
           {error}
@@ -2205,6 +2256,19 @@
         </div>
       {/if}
     </section>
+    {#key vaultPath}
+      <ChatPanel
+        open={chatOpen}
+        notes={chatNotes}
+        availableTags={tags}
+        currentPath={selected?.relativePath ?? ''}
+        encrypted={vaultStatus?.encryptionEnabled ?? false}
+        beforePrepare={beforeChatPrepare}
+        onOpenNote={(path) => void openNote(path)}
+        onClose={() => (chatOpen = false)}
+      />
+    {/key}
+    </div>
     </main>
   </div>
   {/if}

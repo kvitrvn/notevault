@@ -21,7 +21,9 @@ case $package in
       ./usr/bin/notevault \
       ./usr/share/applications/notevault.desktop \
       ./usr/share/icons/hicolor/scalable/apps/notevault.svg \
-      ./usr/share/icons/hicolor/512x512/apps/notevault.png; do
+      ./usr/share/icons/hicolor/512x512/apps/notevault.png \
+      ./usr/share/doc/notevault/copyright \
+      ./usr/share/doc/notevault/THIRD_PARTY_NOTICES.md; do
       grep -Fxq "$required" <<<"$contents" || {
         echo "missing package path: $required" >&2
         exit 1
@@ -57,7 +59,9 @@ case $package in
       usr/bin/notevault \
       usr/share/applications/notevault.desktop \
       usr/share/icons/hicolor/scalable/apps/notevault.svg \
-      usr/share/icons/hicolor/512x512/apps/notevault.png; do
+      usr/share/icons/hicolor/512x512/apps/notevault.png \
+      usr/share/licenses/notevault/LICENSE \
+      usr/share/licenses/notevault/THIRD_PARTY_NOTICES.md; do
       grep -Fxq "$required" <<<"$contents" || {
         echo "missing package path: $required" >&2
         exit 1
