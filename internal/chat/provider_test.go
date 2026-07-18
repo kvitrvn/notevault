@@ -1,9 +1,18 @@
 package chat
 
 import (
+	"context"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 )
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
 
 func TestProviderEndpointUsesFixedDestinations(t *testing.T) {
 	t.Parallel()
@@ -31,6 +40,37 @@ func TestProviderEndpointUsesFixedDestinations(t *testing.T) {
 				t.Fatalf("got (%q, %p), want (%q, %p)", gotURL, gotClient, test.wantURL, test.want)
 			}
 		})
+	}
+}
+
+func TestProviderClientKeepsAPIKeyOutOfPayload(t *testing.T) {
+	t.Parallel()
+	const apiKey = "header-only-secret"
+	client := &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatalf("ReadAll: %v", err)
+		}
+		if strings.Contains(string(body), apiKey) {
+			t.Fatal("la clé API apparaît dans le payload JSON")
+		}
+		if request.Header.Get("Authorization") != "Bearer "+apiKey {
+			t.Fatalf("Authorization = %q", request.Header.Get("Authorization"))
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"ok"}}]}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	provider := &providerClient{local: client, remote: client}
+	answer, err := provider.Complete(context.Background(), completionConfig{
+		Provider: ProviderOpenAI,
+		Model:    "model",
+		APIKey:   apiKey,
+	}, []safeMessage{{Role: "user", Content: "question"}})
+	if err != nil || answer != "ok" {
+		t.Fatalf("Complete = %q, %v", answer, err)
 	}
 }
 

@@ -25,6 +25,7 @@ type Service struct {
 	cancel        context.CancelFunc
 	privacy       privacyEngine
 	completer     completer
+	secrets       SecretStore
 	prepared      map[string]*preparedRequest
 	conversations map[string]*conversation
 	now           func() time.Time
@@ -51,21 +52,22 @@ type preparedRequest struct {
 	createdAt      time.Time
 }
 
-func New(cacheDir string) (*Service, error) {
+func New(cacheDir string, secrets SecretStore) (*Service, error) {
 	privacy, err := newGoAnonPrivacy(filepath.Join(cacheDir, "models"))
 	if err != nil {
 		return nil, err
 	}
-	return newService(privacy, newProviderClient()), nil
+	return newService(privacy, newProviderClient(), secrets), nil
 }
 
-func newService(privacy privacyEngine, completer completer) *Service {
+func newService(privacy privacyEngine, completer completer, secrets SecretStore) *Service {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Service{
 		ctx:           ctx,
 		cancel:        cancel,
 		privacy:       privacy,
 		completer:     completer,
+		secrets:       secrets,
 		prepared:      make(map[string]*preparedRequest),
 		conversations: make(map[string]*conversation),
 		now:           time.Now,
@@ -196,10 +198,15 @@ func (s *Service) Send(ctx context.Context, request SendRequest) (Response, erro
 	messages = append(messages, safeMessage{Role: "system", Content: systemPrompt()})
 	messages = append(messages, conv.messages...)
 	messages = append(messages, safeMessage{Role: "user", Content: prepared.prompt})
-	config := completionConfig{Provider: prepared.provider, Model: prepared.model, APIKey: request.APIKey}
+	config := completionConfig{Provider: prepared.provider, Model: prepared.model}
 	s.mu.Unlock()
 
-	answer, err := s.completer.Complete(requestCtx, config, messages)
+	apiKey, err := s.resolveAPIKey(config.Provider, request.APIKey)
+	config.APIKey = apiKey
+	var answer string
+	if err == nil {
+		answer, err = s.completer.Complete(requestCtx, config, messages)
+	}
 	cancel()
 
 	s.mu.Lock()
@@ -226,6 +233,23 @@ func (s *Service) Send(ctx context.Context, request SendRequest) (Response, erro
 		Answer:         s.privacy.Deanonymize(conv.privacy, answer),
 		Citations:      append([]Citation(nil), prepared.citations...),
 	}, nil
+}
+
+func (s *Service) resolveAPIKey(provider Provider, explicit string) (string, error) {
+	if provider == ProviderOllama {
+		return "", nil
+	}
+	if !provider.IsRemote() {
+		return "", ErrInvalidRequest
+	}
+	if s.secrets == nil || s.secrets.Available() != nil {
+		return "", ErrKeyringUnavailable
+	}
+	explicit = strings.TrimSpace(explicit)
+	if explicit != "" {
+		return explicit, nil
+	}
+	return s.secrets.Get(provider)
 }
 
 func (s *Service) Reset(conversationID string) error {
@@ -345,7 +369,7 @@ func (s *Service) deletePreparedLocked(conversationID string) {
 }
 
 func validatePrepareRequest(request PrepareRequest, notes []Note) error {
-	if request.Provider != ProviderOllama && request.Provider != ProviderOpenAI && request.Provider != ProviderMistral && request.Provider != ProviderOpenRouter {
+	if !request.Provider.IsKnown() {
 		return fmt.Errorf("%w : fournisseur inconnu", ErrInvalidRequest)
 	}
 	if request.Model == "" || utf8.RuneCountInString(request.Model) > maxModelRunes {

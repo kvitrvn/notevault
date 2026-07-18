@@ -108,7 +108,9 @@ third parties by default.
 - Require review of the exact anonymized payload before every model call.
 - Support loopback-only Ollama and explicit remote OpenAI, Mistral, or
   OpenRouter calls; remote mode is never enabled automatically.
-- Keep API keys and pseudonym mappings in process memory only.
+- Keep pseudonym mappings in process memory only. API keys remain ephemeral by
+  default and may be saved only with explicit consent in the operating
+  system's credential store, never in the vault or ordinary configuration.
 - Keep the first chat version unavailable for encrypted vaults rather than
   persisting plaintext-derived state.
 
@@ -155,10 +157,14 @@ global state outside the vault:
 - the active vault path;
 - up to eight recent vault paths and their last-opened times;
 - the application configuration format version;
-- the automatic onboarding display preference.
+- the automatic onboarding display preference;
+- the last chat provider and the last model selected for each supported
+  provider.
 
 This global state lives in the operating system's configuration directory.
-Passphrases and encryption keys are never stored there.
+Passphrases, encryption keys, and chat API keys are never stored there. Chat
+API keys explicitly remembered by the user live in the system credential store
+under one entry per remote provider.
 
 ## Security and privacy boundaries
 
@@ -176,8 +182,16 @@ Chat adds an explicit outbound trust boundary. Retrieval and anonymization run
 locally. Provider payloads contain only the reviewed anonymized question,
 reviewed anonymized passages, and opaque `SOURCE_n` identifiers. Filenames,
 paths, API keys, pseudonym mappings, and cleartext conversation history must not
-be logged or persisted. Anonymization is risk reduction, not a guarantee of
-complete de-identification.
+be logged or persisted in ordinary files. The only exception is an API key
+explicitly saved in the system credential store. Anonymization is risk
+reduction, not a guarantee of complete de-identification.
+
+Remembering a remote provider key always requires explicit consent. On Linux,
+NoteVault uses the desktop Secret Service through D-Bus. If that service is
+locked or unavailable, remote providers are disabled while loopback-only
+Ollama remains usable. The credential store protects secrets at rest, but a
+malicious process running in the same unlocked user session may still access
+them.
 
 ### Encryption scope and limitations
 

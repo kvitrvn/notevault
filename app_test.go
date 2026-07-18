@@ -15,6 +15,68 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
 )
 
+type fakeAppSecretStore struct {
+	keys           map[chat.Provider]string
+	availableErr   error
+	availableCalls int
+	getCalls       int
+}
+
+func (f *fakeAppSecretStore) Available() error {
+	f.availableCalls++
+	return f.availableErr
+}
+
+func (f *fakeAppSecretStore) Get(provider chat.Provider) (string, error) {
+	f.getCalls++
+	if f.availableErr != nil {
+		return "", f.availableErr
+	}
+	key := f.keys[provider]
+	if key == "" {
+		return "", chat.ErrAPIKeyNotFound
+	}
+	return key, nil
+}
+
+func (f *fakeAppSecretStore) Set(provider chat.Provider, apiKey string) error {
+	if f.availableErr != nil {
+		return f.availableErr
+	}
+	if f.keys == nil {
+		f.keys = make(map[chat.Provider]string)
+	}
+	f.keys[provider] = apiKey
+	return nil
+}
+
+func (f *fakeAppSecretStore) Delete(provider chat.Provider) error {
+	if f.availableErr != nil {
+		return f.availableErr
+	}
+	delete(f.keys, provider)
+	return nil
+}
+
+func TestNewAppDoesNotAccessKeyringAtStartup(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	secrets := &fakeAppSecretStore{keys: make(map[chat.Provider]string)}
+	app, err := newApp(appOptions{
+		configPath: filepath.Join(root, "config", "app.json"),
+		legacyPath: filepath.Join(root, "legacy"),
+		now:        time.Now,
+		secrets:    secrets,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { app.Shutdown(t.Context()) })
+	if secrets.availableCalls != 0 || secrets.getCalls != 0 {
+		t.Fatalf("accès au démarrage: available=%d get=%d", secrets.availableCalls, secrets.getCalls)
+	}
+}
+
 func setupAppForTest(t *testing.T) *App {
 	t.Helper()
 	service, err := vault.New(vault.Options{Root: t.TempDir()})
@@ -27,6 +89,7 @@ func setupAppForTest(t *testing.T) *App {
 		config:  appconfig.Default(),
 		store:   store,
 		now:     time.Now,
+		secrets: &fakeAppSecretStore{keys: make(map[chat.Provider]string)},
 	}
 	t.Cleanup(func() { app.Shutdown(t.Context()) })
 	return app
@@ -323,6 +386,64 @@ func TestAppChatRejectsNoteTraversalBeforeInitializingModels(t *testing.T) {
 	}
 	if app.session.chat != nil {
 		t.Fatal("le service de chat a été initialisé avant la validation des notes")
+	}
+}
+
+func TestAppChatSettingsAndSecretLifecycle(t *testing.T) {
+	app := setupAppForTest(t)
+	secrets := &fakeAppSecretStore{keys: make(map[chat.Provider]string)}
+	app.secrets = secrets
+
+	if err := app.UpdateChatPreferences(chat.ProviderOpenAI, " gpt-test "); err != nil {
+		t.Fatalf("UpdateChatPreferences: %v", err)
+	}
+	if err := app.StoreChatAPIKey(chat.ProviderOpenAI, "first-secret"); err != nil {
+		t.Fatalf("StoreChatAPIKey: %v", err)
+	}
+	if err := app.StoreChatAPIKey(chat.ProviderOpenAI, "replacement-secret"); err != nil {
+		t.Fatalf("replace StoreChatAPIKey: %v", err)
+	}
+	settings, err := app.GetChatSettings()
+	if err != nil {
+		t.Fatalf("GetChatSettings: %v", err)
+	}
+	if settings.Provider != chat.ProviderOpenAI || settings.Models[chat.ProviderOpenAI] != "gpt-test" || !settings.KeyringAvailable {
+		t.Fatalf("settings = %+v", settings)
+	}
+	if len(settings.ProvidersWithAPIKey) != 1 || settings.ProvidersWithAPIKey[0] != chat.ProviderOpenAI {
+		t.Fatalf("providers with key = %+v", settings.ProvidersWithAPIKey)
+	}
+	raw, err := os.ReadFile(app.store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "first-secret") || strings.Contains(string(raw), "replacement-secret") || strings.Contains(string(raw), "apiKey") {
+		t.Fatal("une clé API apparaît dans app.json")
+	}
+	if err := app.DeleteChatAPIKey(chat.ProviderOpenAI); err != nil {
+		t.Fatalf("DeleteChatAPIKey: %v", err)
+	}
+	if err := app.DeleteChatAPIKey(chat.ProviderOpenAI); err != nil {
+		t.Fatalf("DeleteChatAPIKey idempotent: %v", err)
+	}
+	settings, err = app.GetChatSettings()
+	if err != nil || len(settings.ProvidersWithAPIKey) != 0 {
+		t.Fatalf("settings after delete = %+v, %v", settings, err)
+	}
+}
+
+func TestAppChatSettingsReportUnavailableKeyring(t *testing.T) {
+	app := setupAppForTest(t)
+	app.secrets = &fakeAppSecretStore{availableErr: chat.ErrKeyringUnavailable}
+	settings, err := app.GetChatSettings()
+	if err != nil {
+		t.Fatalf("GetChatSettings: %v", err)
+	}
+	if settings.KeyringAvailable || len(settings.ProvidersWithAPIKey) != 0 {
+		t.Fatalf("settings = %+v", settings)
+	}
+	if err := app.StoreChatAPIKey(chat.ProviderMistral, "secret"); !errors.Is(err, chat.ErrKeyringUnavailable) {
+		t.Fatalf("StoreChatAPIKey error = %v", err)
 	}
 }
 

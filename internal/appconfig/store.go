@@ -8,13 +8,19 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
-	CurrentVersion = 1
-	MaxRecent      = 8
+	CurrentVersion      = 2
+	MaxRecent           = 8
+	maxModelRunes       = 120
+	defaultChatProvider = "ollama"
 )
+
+var chatProviders = [...]string{"ollama", "openai", "mistral", "openrouter"}
 
 type RecentVault struct {
 	Path         string    `json:"path"`
@@ -22,14 +28,25 @@ type RecentVault struct {
 }
 
 type Config struct {
-	Version             int           `json:"version"`
-	ActiveVault         string        `json:"activeVault,omitempty"`
-	RecentVaults        []RecentVault `json:"recentVaults,omitempty"`
-	OnboardingDismissed bool          `json:"onboardingDismissed"`
+	Version             int               `json:"version"`
+	ActiveVault         string            `json:"activeVault,omitempty"`
+	RecentVaults        []RecentVault     `json:"recentVaults,omitempty"`
+	OnboardingDismissed bool              `json:"onboardingDismissed"`
+	ChatProvider        string            `json:"chatProvider"`
+	ChatModels          map[string]string `json:"chatModels"`
 }
 
 func Default() Config {
-	return Config{Version: CurrentVersion, RecentVaults: []RecentVault{}}
+	models := make(map[string]string, len(chatProviders))
+	for _, provider := range chatProviders {
+		models[provider] = ""
+	}
+	return Config{
+		Version:      CurrentVersion,
+		RecentVaults: []RecentVault{},
+		ChatProvider: defaultChatProvider,
+		ChatModels:   models,
+	}
 }
 
 type Store struct {
@@ -60,7 +77,13 @@ func (s *Store) Load() (Config, bool, error) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return cfg, true, fmt.Errorf("décoder la configuration globale : %w", err)
 	}
+	loadedVersion := cfg.Version
 	cfg.Normalize()
+	if loadedVersion != CurrentVersion {
+		if err := s.Save(cfg); err != nil {
+			return cfg, true, fmt.Errorf("migrer la configuration globale : %w", err)
+		}
+	}
 	return cfg, true, nil
 }
 
@@ -102,6 +125,18 @@ func (s *Store) Save(cfg Config) error {
 
 func (c *Config) Normalize() {
 	c.Version = CurrentVersion
+	if !knownChatProvider(c.ChatProvider) {
+		c.ChatProvider = defaultChatProvider
+	}
+	models := make(map[string]string, len(chatProviders))
+	for _, provider := range chatProviders {
+		model := strings.TrimSpace(c.ChatModels[provider])
+		if utf8.RuneCountInString(model) > maxModelRunes {
+			model = ""
+		}
+		models[provider] = model
+	}
+	c.ChatModels = models
 	seen := make(map[string]int, len(c.RecentVaults))
 	recent := make([]RecentVault, 0, len(c.RecentVaults))
 	for _, item := range c.RecentVaults {
@@ -127,6 +162,15 @@ func (c *Config) Normalize() {
 		recent = recent[:MaxRecent]
 	}
 	c.RecentVaults = recent
+}
+
+func knownChatProvider(provider string) bool {
+	for _, known := range chatProviders {
+		if provider == known {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Config) RecordOpen(path string, openedAt time.Time) {

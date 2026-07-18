@@ -1,6 +1,10 @@
 package chat
 
-import "errors"
+import (
+	"errors"
+	"strings"
+	"unicode/utf8"
+)
 
 const (
 	maxSelectedNotes = 50
@@ -29,6 +33,37 @@ const (
 	ProviderMistral    Provider = "mistral"
 	ProviderOpenRouter Provider = "openrouter"
 )
+
+func (p Provider) IsKnown() bool {
+	return p == ProviderOllama || p.IsRemote()
+}
+
+func (p Provider) IsRemote() bool {
+	return p == ProviderOpenAI || p == ProviderMistral || p == ProviderOpenRouter
+}
+
+func ValidatePreferences(provider Provider, model string) error {
+	model = strings.TrimSpace(model)
+	if !provider.IsKnown() || model == "" || utf8.RuneCountInString(model) > maxModelRunes {
+		return ErrInvalidRequest
+	}
+	return nil
+}
+
+func ValidateAPIKey(provider Provider, apiKey string) error {
+	apiKey = strings.TrimSpace(apiKey)
+	if !provider.IsRemote() || apiKey == "" || len(apiKey) > maxAPIKeyBytes {
+		return ErrInvalidRequest
+	}
+	return nil
+}
+
+type Settings struct {
+	Provider            Provider            `json:"provider"`
+	Models              map[Provider]string `json:"models"`
+	ProvidersWithAPIKey []Provider          `json:"providersWithAPIKey"`
+	KeyringAvailable    bool                `json:"keyringAvailable"`
+}
 
 type PrepareRequest struct {
 	ConversationID string   `json:"conversationID"`

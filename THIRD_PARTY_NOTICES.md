@@ -23,3 +23,13 @@ binaries.
 
 NoteVault uses Amoxtli's Markdown parser and Bleve adapter to create an
 ephemeral, in-memory retrieval index for the notes selected by the user.
+
+## go-keyring
+
+- Project: <https://github.com/zalando/go-keyring>
+- Version: `v0.2.8`
+- License: MIT
+
+NoteVault uses go-keyring to create, read, replace, and delete remote chat API
+keys in the operating system credential store. Its Linux implementation uses
+the Secret Service API over D-Bus.

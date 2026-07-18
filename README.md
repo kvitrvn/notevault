@@ -70,6 +70,11 @@ The packages target Debian 12 or 13 and Ubuntu 24.04 or later.
 sudo apt install ./notevault_0.1.0_amd64.deb
 ```
 
+`gnome-keyring` is recommended to remember remote chat API keys through the
+Linux Secret Service. Another Secret Service-compatible credential store can
+be used instead. Without an available, unlocked Secret Service, remote chat
+providers are disabled and local Ollama remains available.
+
 Download `SHA256SUMS` alongside the package and verify its integrity before
 installation:
 
@@ -135,7 +140,12 @@ it inside `.notevault/chat/models/`. A language model is currently around 200
 MiB, so the first preview can take a moment. Anonymization and retrieval always
 run locally. Ollama calls are restricted to `127.0.0.1:11434`; remote mode
 supports fixed OpenAI, Mistral, and OpenRouter endpoints. API keys remain in
-WebView and Go process memory and are never persisted.
+WebView and Go process memory by default. A key can be remembered only after
+the user checks the explicit consent option; it is then stored as a
+provider-specific entry in the operating system credential store, never in
+`app.json`, the vault, logs, or chat history. On Linux this uses Secret Service
+through D-Bus. If the credential store is locked or unavailable, remote
+providers are disabled; Ollama never accesses it.
 
 Anonymization reduces disclosure risk but cannot guarantee that every sensitive
 value is detected. The preview is therefore required for local and remote
@@ -151,6 +161,8 @@ so no plaintext derived index can weaken vault encryption.
 - npm
 - The [Wails v2 platform dependencies](https://wails.io/docs/gettingstarted/installation)
   for your operating system
+- A Secret Service implementation such as GNOME Keyring (optional, recommended
+  for remote chat providers on Linux)
 
 On Arch Linux and Omarchy, install WebKitGTK 4.1 if needed:
 

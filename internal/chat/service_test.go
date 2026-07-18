@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,44 @@ type fakeCompleter struct {
 	messages []safeMessage
 }
 
+type fakeSecretStore struct {
+	keys           map[Provider]string
+	availableErr   error
+	availableCalls int
+	getCalls       int
+	setCalls       int
+	deleteCalls    int
+}
+
+func (f *fakeSecretStore) Available() error {
+	f.availableCalls++
+	return f.availableErr
+}
+
+func (f *fakeSecretStore) Get(provider Provider) (string, error) {
+	f.getCalls++
+	key := f.keys[provider]
+	if key == "" {
+		return "", ErrAPIKeyNotFound
+	}
+	return key, nil
+}
+
+func (f *fakeSecretStore) Set(provider Provider, apiKey string) error {
+	f.setCalls++
+	if f.keys == nil {
+		f.keys = make(map[Provider]string)
+	}
+	f.keys[provider] = apiKey
+	return nil
+}
+
+func (f *fakeSecretStore) Delete(provider Provider) error {
+	f.deleteCalls++
+	delete(f.keys, provider)
+	return nil
+}
+
 type blockingCompleter struct {
 	started chan struct{}
 }
@@ -62,7 +101,8 @@ func (f *fakeCompleter) Complete(_ context.Context, config completionConfig, mes
 func TestServicePreviewThenSendKeepsCleartextLocal(t *testing.T) {
 	t.Parallel()
 	completion := &fakeCompleter{answer: "[PERSON_1] travaille à [LOCATION_1] [SOURCE_1]."}
-	service := newService(fakePrivacy{}, completion)
+	secrets := &fakeSecretStore{keys: map[Provider]string{ProviderOpenAI: "stored-secret"}}
+	service := newService(fakePrivacy{}, completion, secrets)
 	notes := []Note{{
 		Path:    "notes/Alice Dupont.md",
 		Title:   "Dossier Alice Dupont",
@@ -96,6 +136,9 @@ func TestServicePreviewThenSendKeepsCleartextLocal(t *testing.T) {
 	if completion.config.APIKey != "secret-in-memory" {
 		t.Fatalf("clé non transmise au client de test")
 	}
+	if secrets.getCalls != 0 {
+		t.Fatalf("clé enregistrée consultée malgré la clé ponctuelle: %d", secrets.getCalls)
+	}
 	for _, message := range completion.messages {
 		if strings.Contains(message.Content, "Alice Dupont") || strings.Contains(message.Content, notes[0].Path) {
 			t.Fatalf("message fournisseur en clair : %q", message.Content)
@@ -108,7 +151,7 @@ func TestServicePreviewThenSendKeepsCleartextLocal(t *testing.T) {
 
 func TestServiceRejectsExpiredPreview(t *testing.T) {
 	t.Parallel()
-	service := newService(fakePrivacy{}, &fakeCompleter{answer: "ok"})
+	service := newService(fakePrivacy{}, &fakeCompleter{answer: "ok"}, &fakeSecretStore{})
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
 	notes := []Note{{Path: "notes/a.md", Title: "A", Content: "# A\n\nContenu utile."}}
@@ -127,7 +170,7 @@ func TestServiceRejectsExpiredPreview(t *testing.T) {
 func TestServiceCloseCancelsPendingCompletion(t *testing.T) {
 	t.Parallel()
 	completion := &blockingCompleter{started: make(chan struct{})}
-	service := newService(fakePrivacy{}, completion)
+	service := newService(fakePrivacy{}, completion, &fakeSecretStore{})
 	preview, err := service.Prepare(context.Background(), PrepareRequest{
 		NotePaths: []string{"notes/a.md"}, Question: "Contenu ?", Provider: ProviderOllama, Model: "local",
 	}, []Note{{Path: "notes/a.md", Title: "A", Content: "# A\n\nContenu utile."}})
@@ -177,12 +220,82 @@ func TestValidatePrepareRequestLimitsSelection(t *testing.T) {
 
 func TestServiceRejectsOversizedAPIKey(t *testing.T) {
 	t.Parallel()
-	service := newService(fakePrivacy{}, &fakeCompleter{answer: "ok"})
+	service := newService(fakePrivacy{}, &fakeCompleter{answer: "ok"}, &fakeSecretStore{})
 	_, err := service.Send(context.Background(), SendRequest{
 		PreviewID: strings.Repeat("p", 24),
 		APIKey:    strings.Repeat("k", maxAPIKeyBytes+1),
 	})
 	if err != ErrInvalidRequest {
 		t.Fatalf("Send error = %v, want ErrInvalidRequest", err)
+	}
+}
+
+func TestServiceResolvesStoredAPIKey(t *testing.T) {
+	t.Parallel()
+	completion := &fakeCompleter{answer: "ok"}
+	secrets := &fakeSecretStore{keys: map[Provider]string{ProviderMistral: "stored-secret"}}
+	service := newService(fakePrivacy{}, completion, secrets)
+	preview, err := service.Prepare(context.Background(), PrepareRequest{
+		NotePaths: []string{"notes/a.md"}, Question: "Contenu ?", Provider: ProviderMistral, Model: "model",
+	}, []Note{{Path: "notes/a.md", Title: "A", Content: "# A\n\nContenu utile."}})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if _, err := service.Send(context.Background(), SendRequest{PreviewID: preview.ID}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if completion.config.APIKey != "stored-secret" || secrets.getCalls != 1 {
+		t.Fatalf("résolution = %q, lectures = %d", completion.config.APIKey, secrets.getCalls)
+	}
+}
+
+func TestServiceRemoteKeyFailures(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		secrets *fakeSecretStore
+		want    error
+	}{
+		{name: "missing key", secrets: &fakeSecretStore{}, want: ErrAPIKeyNotFound},
+		{name: "unavailable keyring", secrets: &fakeSecretStore{availableErr: ErrKeyringUnavailable}, want: ErrKeyringUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			completion := &fakeCompleter{answer: "must not run"}
+			service := newService(fakePrivacy{}, completion, test.secrets)
+			preview, err := service.Prepare(context.Background(), PrepareRequest{
+				NotePaths: []string{"notes/a.md"}, Question: "Contenu ?", Provider: ProviderOpenRouter, Model: "model",
+			}, []Note{{Path: "notes/a.md", Title: "A", Content: "# A\n\nContenu utile."}})
+			if err != nil {
+				t.Fatalf("Prepare: %v", err)
+			}
+			_, err = service.Send(context.Background(), SendRequest{PreviewID: preview.ID})
+			if !errors.Is(err, test.want) {
+				t.Fatalf("Send error = %v, want %v", err, test.want)
+			}
+			if len(completion.messages) != 0 {
+				t.Fatal("le fournisseur a été appelé après l’échec de résolution")
+			}
+		})
+	}
+}
+
+func TestServiceOllamaNeverTouchesKeyring(t *testing.T) {
+	t.Parallel()
+	completion := &fakeCompleter{answer: "ok"}
+	secrets := &fakeSecretStore{availableErr: ErrKeyringUnavailable}
+	service := newService(fakePrivacy{}, completion, secrets)
+	preview, err := service.Prepare(context.Background(), PrepareRequest{
+		NotePaths: []string{"notes/a.md"}, Question: "Contenu ?", Provider: ProviderOllama, Model: "local",
+	}, []Note{{Path: "notes/a.md", Title: "A", Content: "# A\n\nContenu utile."}})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if _, err := service.Send(context.Background(), SendRequest{PreviewID: preview.ID, APIKey: "ignored"}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if secrets.availableCalls != 0 || secrets.getCalls != 0 || completion.config.APIKey != "" {
+		t.Fatalf("accès trousseau = available %d, get %d, clé %q", secrets.availableCalls, secrets.getCalls, completion.config.APIKey)
 	}
 }

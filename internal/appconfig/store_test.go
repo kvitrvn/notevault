@@ -1,6 +1,7 @@
 package appconfig
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -29,6 +30,66 @@ func TestStoreRoundTripAndPermissions(t *testing.T) {
 	}
 	if got.ActiveVault != "/vault/a" || !got.OnboardingDismissed {
 		t.Fatalf("configuration perdue: %+v", got)
+	}
+	if got.Version != CurrentVersion || got.ChatProvider != "ollama" || len(got.ChatModels) != 4 {
+		t.Fatalf("réglages de chat invalides: %+v", got)
+	}
+}
+
+func TestStoreMigratesVersionOneChatDefaults(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "app.json")
+	if err := os.WriteFile(path, []byte(`{"version":1,"onboardingDismissed":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(path)
+	cfg, exists, err := store.Load()
+	if err != nil || !exists {
+		t.Fatalf("Load() = %+v, %v, %v", cfg, exists, err)
+	}
+	if cfg.Version != 2 || cfg.ChatProvider != "ollama" {
+		t.Fatalf("migration = %+v", cfg)
+	}
+	for _, provider := range chatProviders {
+		if cfg.ChatModels[provider] != "" {
+			t.Fatalf("modèle %s = %q, want empty", provider, cfg.ChatModels[provider])
+		}
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted map[string]any
+	if err := json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted["version"] != float64(CurrentVersion) {
+		t.Fatalf("version persistée = %v", persisted["version"])
+	}
+	if _, leaked := persisted["apiKey"]; leaked {
+		t.Fatal("la configuration contient un champ apiKey")
+	}
+}
+
+func TestConfigNormalizeRestrictsChatPreferences(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		ChatProvider: "custom",
+		ChatModels: map[string]string{
+			"ollama": "  qwen3:4b  ",
+			"openai": string(make([]rune, maxModelRunes+1)),
+			"custom": "secret-model",
+		},
+	}
+	cfg.Normalize()
+	if cfg.ChatProvider != "ollama" || cfg.ChatModels["ollama"] != "qwen3:4b" || cfg.ChatModels["openai"] != "" {
+		t.Fatalf("normalisation chat = %+v", cfg)
+	}
+	if len(cfg.ChatModels) != len(chatProviders) {
+		t.Fatalf("fournisseurs = %+v", cfg.ChatModels)
+	}
+	if _, exists := cfg.ChatModels["custom"]; exists {
+		t.Fatal("fournisseur inconnu conservé")
 	}
 }
 

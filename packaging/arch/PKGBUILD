@@ -21,6 +21,7 @@ depends=(
   'xorg-xwayland'
   'zlib'
 )
+optdepends=('gnome-keyring: remember remote chat API keys through Secret Service')
 source=('notevault' 'notevault.desktop' 'notevault.svg' 'notevault.png' 'LICENSE' 'THIRD_PARTY_NOTICES.md')
 sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 

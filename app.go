@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,13 +52,13 @@ func (s *vaultSession) close() {
 	}
 }
 
-func (s *vaultSession) chatService() (*chat.Service, error) {
+func (s *vaultSession) chatService(secrets chat.SecretStore) (*chat.Service, error) {
 	s.chatMu.Lock()
 	defer s.chatMu.Unlock()
 	if s.chat != nil {
 		return s.chat, nil
 	}
-	service, err := chat.New(filepath.Join(s.service.Root(), ".notevault", "chat"))
+	service, err := chat.New(filepath.Join(s.service.Root(), ".notevault", "chat"), secrets)
 	if err != nil {
 		return nil, err
 	}
@@ -69,6 +70,7 @@ type appOptions struct {
 	configPath string
 	legacyPath string
 	now        func() time.Time
+	secrets    chat.SecretStore
 }
 
 // App est la façade Wails. La session est absente tant qu'aucun coffre
@@ -84,6 +86,7 @@ type App struct {
 	configMu sync.Mutex
 	config   appconfig.Config
 	store    *appconfig.Store
+	secrets  chat.SecretStore
 
 	now func() time.Time
 }
@@ -108,6 +111,9 @@ func newApp(opts appOptions) (*App, error) {
 	if opts.now == nil {
 		opts.now = time.Now
 	}
+	if opts.secrets == nil {
+		opts.secrets = chat.NewKeyringStore()
+	}
 	store := appconfig.NewStore(opts.configPath)
 	cfg, exists, err := store.Load()
 	if err != nil {
@@ -124,9 +130,10 @@ func newApp(opts appOptions) (*App, error) {
 	}
 
 	app := &App{
-		config: cfg,
-		store:  store,
-		now:    opts.now,
+		config:  cfg,
+		store:   store,
+		now:     opts.now,
+		secrets: opts.secrets,
 	}
 	if cfg.ActiveVault != "" {
 		prepared, prepareErr := app.prepareSession(cfg.ActiveVault)
@@ -628,7 +635,7 @@ func (a *App) PrepareChat(request chat.PrepareRequest) (chat.Preview, error) {
 		}
 		notes = append(notes, chat.Note{Path: note.RelativePath, Title: note.Title, Content: note.Content})
 	}
-	service, err := s.chatService()
+	service, err := s.chatService(a.secrets)
 	release()
 	if err != nil {
 		return chat.Preview{}, err
@@ -641,7 +648,8 @@ func (a *App) PrepareChat(request chat.PrepareRequest) (chat.Preview, error) {
 }
 
 // SendPreparedChat envoie uniquement la charge anonymisée précédemment
-// prévisualisée. La clé API n'est ni persistée ni conservée par le service.
+// prévisualisée. Une clé ponctuelle prime sur celle du trousseau et n'est pas
+// conservée par le service.
 func (a *App) SendPreparedChat(request chat.SendRequest) (chat.Response, error) {
 	s, release, err := a.acquireSession()
 	if err != nil {
@@ -651,7 +659,7 @@ func (a *App) SendPreparedChat(request chat.SendRequest) (chat.Response, error) 
 		release()
 		return chat.Response{}, chat.ErrEncryptedVault
 	}
-	service, err := s.chatService()
+	service, err := s.chatService(a.secrets)
 	release()
 	if err != nil {
 		return chat.Response{}, err
@@ -661,6 +669,80 @@ func (a *App) SendPreparedChat(request chat.SendRequest) (chat.Response, error) 
 		ctx = context.Background()
 	}
 	return service.Send(ctx, request)
+}
+
+// GetChatSettings retourne uniquement les préférences non sensibles et la
+// présence éventuelle de clés. Les secrets ne quittent jamais le backend.
+func (a *App) GetChatSettings() (chat.Settings, error) {
+	a.configMu.Lock()
+	cfg := a.config
+	a.configMu.Unlock()
+
+	settings := chat.Settings{
+		Provider:            chat.Provider(cfg.ChatProvider),
+		Models:              make(map[chat.Provider]string, len(cfg.ChatModels)),
+		ProvidersWithAPIKey: []chat.Provider{},
+	}
+	for provider, model := range cfg.ChatModels {
+		settings.Models[chat.Provider(provider)] = model
+	}
+	if a.secrets == nil || a.secrets.Available() != nil {
+		return settings, nil
+	}
+	settings.KeyringAvailable = true
+	for _, provider := range []chat.Provider{chat.ProviderOpenAI, chat.ProviderMistral, chat.ProviderOpenRouter} {
+		if _, err := a.secrets.Get(provider); err == nil {
+			settings.ProvidersWithAPIKey = append(settings.ProvidersWithAPIKey, provider)
+		} else if !errors.Is(err, chat.ErrAPIKeyNotFound) {
+			settings.KeyringAvailable = false
+			settings.ProvidersWithAPIKey = []chat.Provider{}
+			break
+		}
+	}
+	return settings, nil
+}
+
+func (a *App) UpdateChatPreferences(provider chat.Provider, model string) error {
+	model = strings.TrimSpace(model)
+	if err := chat.ValidatePreferences(provider, model); err != nil {
+		return err
+	}
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+	next := a.config
+	next.ChatProvider = string(provider)
+	models := make(map[string]string, len(a.config.ChatModels)+1)
+	for knownProvider, knownModel := range a.config.ChatModels {
+		models[knownProvider] = knownModel
+	}
+	models[string(provider)] = model
+	next.ChatModels = models
+	if err := a.store.Save(next); err != nil {
+		return err
+	}
+	a.config = next
+	return nil
+}
+
+func (a *App) StoreChatAPIKey(provider chat.Provider, apiKey string) error {
+	apiKey = strings.TrimSpace(apiKey)
+	if err := chat.ValidateAPIKey(provider, apiKey); err != nil {
+		return err
+	}
+	if a.secrets == nil {
+		return chat.ErrKeyringUnavailable
+	}
+	return a.secrets.Set(provider, apiKey)
+}
+
+func (a *App) DeleteChatAPIKey(provider chat.Provider) error {
+	if !provider.IsRemote() {
+		return chat.ErrInvalidRequest
+	}
+	if a.secrets == nil {
+		return chat.ErrKeyringUnavailable
+	}
+	return a.secrets.Delete(provider)
 }
 
 // ResetChatConversation oublie immédiatement l'historique anonymisé et les

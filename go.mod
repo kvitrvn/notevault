@@ -9,6 +9,7 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/wailsapp/wails/v2 v2.12.0
 	github.com/yuin/goldmark v1.7.17
+	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/crypto v0.50.0
 	golang.org/x/text v0.36.0
 )
@@ -38,8 +39,9 @@ require (
 	github.com/blevesearch/zapx/v15 v15.4.1 // indirect
 	github.com/blevesearch/zapx/v16 v16.2.2 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
+	github.com/danieljoos/wincred v1.2.3 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
-	github.com/godbus/dbus/v5 v5.1.0 // indirect
+	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/golang/geo v0.0.0-20210211234256-740aa86cb551 // indirect
 	github.com/golang/protobuf v1.3.2 // indirect
 	github.com/golang/snappy v0.0.4 // indirect

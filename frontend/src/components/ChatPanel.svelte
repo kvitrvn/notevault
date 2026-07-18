@@ -12,11 +12,26 @@
   import X from '@lucide/svelte/icons/x';
 
   import { chat, domain, vault } from '../../wailsjs/go/models';
-  import { PrepareChat, ResetChatConversation, SendPreparedChat } from '../../wailsjs/go/main/App';
+  import {
+    DeleteChatAPIKey,
+    GetChatSettings,
+    PrepareChat,
+    ResetChatConversation,
+    SendPreparedChat,
+    StoreChatAPIKey,
+    UpdateChatPreferences
+  } from '../../wailsjs/go/main/App';
   import { resolveChatPaths } from '../lib/chat-selection';
+  import {
+    availableProvider,
+    hasStoredAPIKey,
+    isRemoteProvider,
+    modelForProvider,
+    updateStoredAPIKey,
+    type ChatProvider
+  } from '../lib/chat-settings';
   import ChatMarkdown from './ChatMarkdown.svelte';
 
-  type Provider = 'ollama' | 'openai' | 'mistral' | 'openrouter';
   type ChatMessage = {
     id: number;
     role: 'user' | 'assistant';
@@ -37,9 +52,15 @@
 
   let { open, notes, availableTags, currentPath, encrypted, beforePrepare, onOpenNote, onClose }: Props = $props();
 
-  let provider: Provider = $state('ollama');
+  let provider: ChatProvider = $state('ollama');
   let model = $state('');
   let apiKey = $state('');
+  let rememberAPIKey = $state(false);
+  let chatModels: Record<string, string> = $state({});
+  let storedAPIKeyProviders: ChatProvider[] = $state([]);
+  let keyringAvailable = $state(false);
+  let settingsLoaded = $state(false);
+  let settingsLoading = $state(false);
   let noteFilter = $state('');
   let manualSelectedPaths: string[] = $state([]);
   let excludedPaths: string[] = $state([]);
@@ -54,6 +75,7 @@
   let sequence = 0;
   let transcript: HTMLDivElement | undefined = $state();
   let initializedForOpen = false;
+  let previousProvider: ChatProvider = 'ollama';
 
   const filteredNotes = $derived(
     notes.filter((note) => {
@@ -61,19 +83,53 @@
       return !query || note.title.toLocaleLowerCase('fr-FR').includes(query) || note.relativePath.toLocaleLowerCase('fr-FR').includes(query);
     })
   );
-  const remote = $derived(provider !== 'ollama');
+  const remote = $derived(isRemoteProvider(provider));
+  const hasStoredKey = $derived(hasStoredAPIKey(storedAPIKeyProviders, provider));
   const selectedPaths = $derived(resolveChatPaths(notes, manualSelectedPaths, selectedTags, excludedPaths));
 
   $effect(() => {
     if (!open) {
       initializedForOpen = false;
+      apiKey = '';
+      rememberAPIKey = false;
       return;
     }
     if (!initializedForOpen) {
       initializedForOpen = true;
       if (selectedPaths.length === 0 && currentPath) manualSelectedPaths = [currentPath];
     }
+    if (!settingsLoaded && !settingsLoading) void loadChatSettings();
   });
+
+  $effect(() => {
+    provider;
+    if (!settingsLoaded || provider === previousProvider) return;
+    previousProvider = provider;
+    model = modelForProvider(chatModels, provider);
+    apiKey = '';
+    rememberAPIKey = false;
+    error = '';
+  });
+
+  async function loadChatSettings(): Promise<void> {
+    settingsLoading = true;
+    try {
+      const settings = await GetChatSettings();
+      chatModels = settings.models ?? {};
+      keyringAvailable = settings.keyringAvailable;
+      storedAPIKeyProviders = (settings.providersWithAPIKey ?? []) as ChatProvider[];
+      const requested = (settings.provider || 'ollama') as ChatProvider;
+      provider = availableProvider(requested, keyringAvailable);
+      previousProvider = provider;
+      model = modelForProvider(chatModels, provider);
+      settingsLoaded = true;
+    } catch (err) {
+      error = `Impossible de charger les réglages du chat : ${String(err)}`;
+    } finally {
+      settingsLoaded = true;
+      settingsLoading = false;
+    }
+  }
 
   function togglePath(path: string): void {
     const note = notes.find((item) => item.relativePath === path);
@@ -110,6 +166,10 @@
       error = 'Indiquez le modèle à utiliser.';
       return;
     }
+    if (remote && !keyringAvailable) {
+      error = 'Les fournisseurs distants sont désactivés car le trousseau système est verrouillé ou indisponible.';
+      return;
+    }
     if (selectedPaths.length === 0) {
       error = 'Sélectionnez au moins une note.';
       return;
@@ -134,6 +194,8 @@
       preview = result;
       conversationID = result.conversationID;
       pendingQuestion = trimmed;
+      await UpdateChatPreferences(provider, model.trim());
+      chatModels = { ...chatModels, [provider]: model.trim() };
     } catch (err) {
       error = String(err);
     } finally {
@@ -143,14 +205,23 @@
 
   async function sendPrepared(): Promise<void> {
     if (!preview) return;
-    if (remote && !apiKey.trim()) {
-      error = 'La clé API est requise pour ce fournisseur.';
+    if (remote && !keyringAvailable) {
+      error = 'Les fournisseurs distants sont désactivés car le trousseau système est verrouillé ou indisponible.';
+      return;
+    }
+    if (remote && !apiKey.trim() && !hasStoredKey) {
+      error = 'Saisissez une clé API ou enregistrez-en une dans le trousseau système.';
       return;
     }
     error = '';
     busy = 'sending';
     try {
-      const response = await SendPreparedChat({ previewID: preview.id, apiKey });
+      const oneTimeAPIKey = apiKey.trim();
+      if (remote && oneTimeAPIKey && rememberAPIKey) {
+        await StoreChatAPIKey(provider, oneTimeAPIKey);
+        storedAPIKeyProviders = updateStoredAPIKey(storedAPIKeyProviders, provider, true);
+      }
+      const response = await SendPreparedChat({ previewID: preview.id, apiKey: oneTimeAPIKey });
       messages = [
         ...messages,
         { id: ++sequence, role: 'user', content: pendingQuestion, citations: [] },
@@ -168,7 +239,21 @@
     } catch (err) {
       error = String(err);
     } finally {
+      apiKey = '';
+      rememberAPIKey = false;
       busy = '';
+    }
+  }
+
+  async function forgetAPIKey(): Promise<void> {
+    error = '';
+    try {
+      await DeleteChatAPIKey(provider);
+      storedAPIKeyProviders = updateStoredAPIKey(storedAPIKeyProviders, provider, false);
+      apiKey = '';
+      rememberAPIKey = false;
+    } catch (err) {
+      error = String(err);
     }
   }
 
@@ -187,7 +272,7 @@
     }
   }
 
-  function providerLabel(value: Provider): string {
+  function providerLabel(value: ChatProvider): string {
     if (value === 'openai') return 'OpenAI';
     if (value === 'mistral') return 'Mistral';
     if (value === 'openrouter') return 'OpenRouter';
@@ -260,9 +345,9 @@
                 disabled={busy !== '' || conversationID !== ''}
               >
                 <option value="ollama">Ollama local</option>
-                <option value="openai">OpenAI</option>
-                <option value="mistral">Mistral</option>
-                <option value="openrouter">OpenRouter</option>
+                <option value="openai" disabled={!keyringAvailable}>OpenAI</option>
+                <option value="mistral" disabled={!keyringAvailable}>Mistral</option>
+                <option value="openrouter" disabled={!keyringAvailable}>OpenRouter</option>
               </select>
             </label>
             <label class="text-xs font-medium text-foreground">
@@ -276,18 +361,51 @@
               />
             </label>
           </div>
+          {#if settingsLoaded && !keyringAvailable}
+            <p class="mt-2 border-l-2 border-danger pl-2 text-xs leading-5 text-danger" role="status">
+              Trousseau système verrouillé ou indisponible. Les fournisseurs distants sont désactivés ; Ollama reste utilisable.
+            </p>
+          {/if}
           {#if remote}
-            <label class="mt-2 block text-xs font-medium text-foreground">
-              Clé API — conservée uniquement en mémoire
+            <label class="mt-2 block text-xs font-medium text-foreground" for="chat-api-key">
+              Clé API
               <input
+                id="chat-api-key"
                 class="mt-1 h-9 w-full rounded-md border border-border-strong bg-panel px-2 font-mono text-sm text-foreground placeholder:text-faint"
                 bind:value={apiKey}
                 type="password"
                 autocomplete="off"
                 placeholder={`Clé ${providerLabel(provider)}`}
-                disabled={busy !== ''}
+                disabled={busy !== '' || !keyringAvailable}
               />
             </label>
+            <div class="mt-2 flex items-start justify-between gap-3">
+              <label class="flex min-w-0 items-start gap-2 text-xs leading-5 text-subtle">
+                <input
+                  class="mt-0.5"
+                  type="checkbox"
+                  bind:checked={rememberAPIKey}
+                  disabled={busy !== '' || !keyringAvailable || !apiKey.trim()}
+                />
+                <span>Mémoriser dans le trousseau système</span>
+              </label>
+              {#if hasStoredKey}
+                <button
+                  class="shrink-0 text-xs text-subtle underline decoration-border-strong underline-offset-2 hover:text-foreground"
+                  type="button"
+                  onclick={() => void forgetAPIKey()}
+                  disabled={busy !== '' || !keyringAvailable}
+                >Oublier la clé</button>
+              {/if}
+            </div>
+            {#if hasStoredKey}
+              <p class="mt-1 inline-flex items-center gap-1 text-[11px] text-subtle" role="status">
+                <ShieldCheck size={12} aria-hidden="true" />
+                Clé enregistrée dans le trousseau
+              </p>
+            {:else}
+              <p class="mt-1 text-[11px] text-faint">Sans mémorisation, la saisie sert uniquement au prochain envoi.</p>
+            {/if}
           {/if}
 
           <details class="mt-3" open>
@@ -491,7 +609,7 @@
             <button
               class="inline-flex h-9 items-center gap-1.5 rounded-md border border-accent bg-accent px-3 text-xs font-medium text-accent-foreground hover:bg-accent-hover disabled:opacity-60"
               type="submit"
-              disabled={busy !== '' || preview !== null || !question.trim() || !model.trim() || selectedPaths.length === 0 || selectedPaths.length > 50}
+              disabled={busy !== '' || preview !== null || !question.trim() || !model.trim() || selectedPaths.length === 0 || selectedPaths.length > 50 || (remote && !keyringAvailable)}
             >
               {#if busy === 'preparing'}<Loader2 size={13} class="animate-spin" aria-hidden="true" />{:else}<Send size={13} aria-hidden="true" />{/if}
               {busy === 'preparing' ? 'Recherche et anonymisation…' : 'Préparer l’aperçu'}
