@@ -297,7 +297,7 @@
     onclick={onClose}
   ></button>
   <aside
-    class="fixed bottom-0 right-0 top-[5.75rem] z-40 flex h-full min-h-0 w-full max-w-[34rem] min-w-0 flex-col overflow-hidden border-l border-border bg-panel shadow-lg xl:static xl:z-auto xl:w-auto xl:max-w-none xl:shadow-none"
+    class="fixed bottom-0 right-0 top-[5.75rem] z-40 flex min-h-0 w-full max-w-[34rem] min-w-0 flex-col overflow-hidden border-l border-border bg-panel shadow-lg xl:static xl:z-auto xl:h-full xl:w-auto xl:max-w-none xl:shadow-none"
     aria-label="Discussion avec les notes"
   >
     <header class="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border px-3">
