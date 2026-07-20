@@ -46,10 +46,11 @@ func BenchmarkBuildIndex_10k(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		idx := &memoryIndex{
-			notes:    make(map[string]domain.Note),
-			tokens:   make(map[string]map[string]int),
-			noteKeys: make(map[string]map[string]int),
-			pins:     make(map[string]time.Time),
+			notes:        make(map[string]domain.Note),
+			tokens:       make(map[string]map[string]int),
+			noteKeys:     make(map[string]map[string]int),
+			foldedBodies: make(map[string]string),
+			pins:         make(map[string]time.Time),
 		}
 		for _, note := range notes {
 			if err := idx.Upsert(note); err != nil {

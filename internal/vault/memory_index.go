@@ -34,21 +34,23 @@ type rankedSummary struct {
 // memoryIndex is the complete process-local secondary index. Vault files are
 // the source of truth; only pin order is persisted.
 type memoryIndex struct {
-	mu       sync.RWMutex
-	notes    map[string]domain.Note
-	tokens   map[string]map[string]int
-	noteKeys map[string]map[string]int
-	pins     map[string]time.Time
-	pinsPath string
+	mu           sync.RWMutex
+	notes        map[string]domain.Note
+	tokens       map[string]map[string]int
+	noteKeys     map[string]map[string]int
+	foldedBodies map[string]string
+	pins         map[string]time.Time
+	pinsPath     string
 }
 
 func newMemoryIndex(root string) (Index, error) {
 	i := &memoryIndex{
-		notes:    make(map[string]domain.Note),
-		tokens:   make(map[string]map[string]int),
-		noteKeys: make(map[string]map[string]int),
-		pins:     make(map[string]time.Time),
-		pinsPath: filepath.Join(root, ".notevault", "pins.json"),
+		notes:        make(map[string]domain.Note),
+		tokens:       make(map[string]map[string]int),
+		noteKeys:     make(map[string]map[string]int),
+		foldedBodies: make(map[string]string),
+		pins:         make(map[string]time.Time),
+		pinsPath:     filepath.Join(root, ".notevault", "pins.json"),
 	}
 	if err := i.loadPins(); err != nil {
 		return nil, err
@@ -143,6 +145,7 @@ func (i *memoryIndex) Upsert(note domain.Note) error {
 	i.notes[note.RelativePath] = note
 	keys := tokenizeUnicode(note.Title + "\n" + note.Content)
 	i.noteKeys[note.RelativePath] = keys
+	i.foldedBodies[note.RelativePath] = foldUnicode(note.Title + "\n" + note.Content)
 	for token, count := range keys {
 		paths := i.tokens[token]
 		if paths == nil {
@@ -162,6 +165,7 @@ func (i *memoryIndex) deleteTokensLocked(path string) {
 		}
 	}
 	delete(i.noteKeys, path)
+	delete(i.foldedBodies, path)
 }
 
 func (i *memoryIndex) Delete(path string) error {
@@ -209,7 +213,9 @@ func (i *memoryIndex) List(filter ListFilter) ([]domain.NoteSummary, error) {
 		if !matchesListFilter(note, filter) {
 			continue
 		}
-		score, ok := matchQuery(note, filter.Query)
+		keys := i.noteKeys[path]
+		folded := i.foldedBodies[path]
+		score, ok := scoreQuery(note, keys, folded, filter.Query)
 		if strings.TrimSpace(filter.Query) != "" && !ok {
 			continue
 		}
@@ -329,23 +335,26 @@ func parseQueryParts(query string) []queryPart {
 	return parts
 }
 
-func matchQuery(note domain.Note, query string) (int, bool) {
+// scoreQuery calcule le score d'un candidat en réutilisant les structures
+// pré-construites à l'Upsert : keys est la tokenisation de Title+"\n"+Content,
+// folded est le même texte plié Unicode. Seuls les dérivés du titre (titre
+// plié, tokens du titre) sont recalculés par candidat car leur coût est
+// proportionnel à la taille du titre et non du contenu.
+func scoreQuery(note domain.Note, keys map[string]int, folded string, query string) (int, bool) {
 	parts := parseQueryParts(query)
 	if len(parts) == 0 {
 		return 0, true
 	}
-	title := foldUnicode(note.Title)
-	content := foldUnicode(note.Content)
-	keys := tokenizeUnicode(note.Title + "\n" + note.Content)
+	titleFolded := foldUnicode(note.Title)
 	titleKeys := tokenizeUnicode(note.Title)
 	score := 0
 	for _, part := range parts {
 		if part.phrase {
-			if !strings.Contains(title, part.value) && !strings.Contains(content, part.value) {
+			if !strings.Contains(folded, part.value) {
 				return 0, false
 			}
 			score += 8
-			if strings.Contains(title, part.value) {
+			if strings.Contains(titleFolded, part.value) {
 				score += 12
 			}
 			continue
@@ -464,14 +473,18 @@ func (i *memoryIndex) GetBacklinks(title string, opts SearchOpts) ([]domain.Note
 	}
 	out := make([]rankedSummary, 0)
 	for path := range i.queryCandidatesLocked(`"` + title + `"`) {
-		note, exists := i.notes[path]
-		if !exists {
-			continue
-		}
 		if path == opts.ExcludePath {
 			continue
 		}
-		if count := strings.Count(foldUnicode(note.Title+"\n"+note.Content), title); count > 0 {
+		folded, ok := i.foldedBodies[path]
+		if !ok {
+			continue
+		}
+		if count := strings.Count(folded, title); count > 0 {
+			note, exists := i.notes[path]
+			if !exists {
+				continue
+			}
 			out = append(out, rankedSummary{summary: summaryOf(note), score: count})
 		}
 	}
@@ -552,6 +565,7 @@ func (i *memoryIndex) reset() {
 	i.notes = make(map[string]domain.Note)
 	i.tokens = make(map[string]map[string]int)
 	i.noteKeys = make(map[string]map[string]int)
+	i.foldedBodies = make(map[string]string)
 }
 
 func (i *memoryIndex) Close() error {
