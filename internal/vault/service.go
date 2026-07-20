@@ -40,7 +40,22 @@ type Service struct {
 	migrationCurrent   int
 	migrationTotal     int
 	watcherWanted      bool
+
+	recentWriteMu sync.Mutex
+	// recentWrites mémorise les chemins absolus que le service vient
+	// d'écrire, pour ignorer l'écho du watcher fsnotify (cf. audit 2.1).
+	// Consommé/consommé-expire automatiquement par consumeInternalWrite.
+	recentWrites map[string]time.Time
 }
+
+// recentWriteWindow borne la durée pendant laquelle une écriture interne
+// est considérée comme « récente » et déclenche un skip de reindex.
+// Doit rester largement supérieur au debounce du watcher (200 ms).
+const recentWriteWindow = 5 * time.Second
+
+// recentWriteCleanupThreshold borne la taille de recentWrites avant un
+// nettoyage opportuniste des entrées expirées.
+const recentWriteCleanupThreshold = 32
 
 // Options configure la construction du service.
 type Options struct {
@@ -243,6 +258,15 @@ func (s *Service) reindexFromPath(absPath string) {
 	if _, err := os.Stat(absPath); err != nil {
 		// Fichier supprimé.
 		_ = s.index.Delete(rel)
+		s.consumeInternalWrite(absPath)
+		return
+	}
+	// Ignorer l'écho d'une écriture interne récente : SaveNote,
+	// MoveNote et RestoreFromTrash ont déjà réindexé en mémoire juste
+	// après l'écriture atomique. Sans ce court-circuit, chaque sauvegarde
+	// déclencherait une seconde lecture complète + re-tokenisation par le
+	// watcher (cf. audit perf 2.1).
+	if _, ok := s.consumeInternalWrite(absPath); ok {
 		return
 	}
 	note, err := s.readAbsolute(absPath)
@@ -252,6 +276,45 @@ func (s *Service) reindexFromPath(absPath string) {
 		return
 	}
 	_ = s.index.Upsert(note)
+}
+
+// markInternalWrite enregistre absPath comme venant d'être écrit par
+// le service. Le watcher fsnotify observe ses propres écritures : cette
+// marque permet à reindexFromPath d'ignorer l'écho pendant recentWriteWindow.
+func (s *Service) markInternalWrite(absPath string) {
+	s.recentWriteMu.Lock()
+	defer s.recentWriteMu.Unlock()
+	if s.recentWrites == nil {
+		s.recentWrites = make(map[string]time.Time)
+	}
+	s.recentWrites[absPath] = time.Now()
+	if len(s.recentWrites) > recentWriteCleanupThreshold {
+		cutoff := time.Now().Add(-recentWriteWindow)
+		for path, t := range s.recentWrites {
+			if t.Before(cutoff) {
+				delete(s.recentWrites, path)
+			}
+		}
+	}
+}
+
+// consumeInternalWrite consulte et retire la marque d'écriture pour
+// absPath. Retourne (t, true) si une écriture récente par le service
+// est confirmée : reindexFromPath doit alors ignorer la note (l'index est
+// déjà à jour). Retourne (zero, false) sinon, ou si la marque a expiré.
+func (s *Service) consumeInternalWrite(absPath string) (time.Time, bool) {
+	s.recentWriteMu.Lock()
+	defer s.recentWriteMu.Unlock()
+	t, ok := s.recentWrites[absPath]
+	if !ok {
+		return time.Time{}, false
+	}
+	if time.Since(t) > recentWriteWindow {
+		delete(s.recentWrites, absPath)
+		return time.Time{}, false
+	}
+	delete(s.recentWrites, absPath)
+	return t, true
 }
 
 func (s *Service) ListNotes() ([]domain.NoteSummary, error) {
@@ -413,6 +476,7 @@ func (s *Service) SaveNote(note domain.Note) (domain.Note, error) {
 	if err := s.writePayload(note.RelativePath, []byte(serialize(note)), 0o644); err != nil {
 		return domain.Note{}, err
 	}
+	s.markInternalWrite(path)
 	if err := s.index.Upsert(note); err != nil {
 		return domain.Note{}, fmt.Errorf("mettre à jour l'index : %w", err)
 	}
@@ -477,6 +541,7 @@ func (s *Service) RestoreFromTrash(id string) (domain.Note, error) {
 	if err != nil {
 		return domain.Note{}, err
 	}
+	s.markInternalWrite(filepath.Join(s.root, filepath.FromSlash(originalPath)))
 	note, err := s.OpenNote(originalPath)
 	if err != nil {
 		return domain.Note{}, err
@@ -572,6 +637,7 @@ func (s *Service) MoveNote(oldPath, newPath string) (domain.Note, error) {
 	if err := s.writePayload(newPath, raw, 0o644); err != nil {
 		return domain.Note{}, fmt.Errorf("déplacer : %w", err)
 	}
+	s.markInternalWrite(dst)
 	if err := os.Remove(src); err != nil {
 		_ = os.Remove(dst)
 		return domain.Note{}, fmt.Errorf("supprimer l'ancienne note : %w", err)
