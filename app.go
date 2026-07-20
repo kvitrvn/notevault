@@ -580,6 +580,37 @@ func (a *App) CreateNote(parentRelPath, title, key string) (domain.Note, error) 
 func (a *App) CreateFolder(parentRelPath, name string) (domain.Note, error) {
 	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.CreateFolder(parentRelPath, name) })
 }
+
+// MoveFolder déplace (ou renomme) un dossier sous notes/. oldRel et
+// newRel sont des chemins relatifs préfixés par "notes/". Le dossier
+// cible ne doit pas déjà exister ; on refuse aussi de déplacer un
+// dossier dans lui-même ou dans un de ses descendants.
+func (a *App) MoveFolder(oldRel, newRel string) error {
+	return a.sessionError(func(s *vault.Service) error { return s.MoveFolder(oldRel, newRel) })
+}
+
+// RenameFolder renomme uniquement le dernier segment d'un dossier.
+// newName est slugifié côté backend pour rester cohérent avec CreateFolder.
+func (a *App) RenameFolder(rel, newName string) error {
+	return a.sessionError(func(s *vault.Service) error { return s.RenameFolder(rel, newName) })
+}
+
+// DeleteFolder supprime un dossier. Si force=false et que le dossier
+// contient des notes ou des sous-dossiers, renvoie vault.ErrFolderNotEmpty
+// que le frontend traduit en modale de confirmation. Avec force=true,
+// le sous-arbre complet est déplacé dans la corbeille et les notes
+// quittent l'index.
+func (a *App) DeleteFolder(rel string, force bool) error {
+	return a.sessionError(func(s *vault.Service) error { return s.DeleteFolder(rel, force) })
+}
+
+// FolderContents retourne le nombre de notes et de sous-dossiers contenus
+// directement ou indirectement dans le dossier. Sert au frontend pour
+// afficher l'avertissement "Supprimer N notes et M sous-dossiers" avant
+// une suppression forcée.
+func (a *App) FolderContents(rel string) (vault.FolderContentsInfo, error) {
+	return withSession(a, func(s *vaultSession) (vault.FolderContentsInfo, error) { return s.service.FolderContents(rel) })
+}
 func (a *App) SaveNote(note domain.Note) (domain.Note, error) {
 	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.SaveNote(note) })
 }

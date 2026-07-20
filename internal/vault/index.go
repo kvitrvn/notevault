@@ -41,6 +41,14 @@ type FolderInfo struct {
 	Count int    `json:"count"` // nombre de notes dans ce dossier
 }
 
+// FolderContentsInfo décrit le contenu d'un dossier pour les opérations
+// destructives (suppression forcée). Notes est le nombre de notes dans
+// le sous-arbre, Subdirs le nombre de sous-dossiers immédiats.
+type FolderContentsInfo struct {
+	Notes   int `json:"notes"`
+	Subdirs int `json:"subdirs"`
+}
+
 // Index est l'interface de stockage secondaire (cache requêtable).
 // Toute mutation d'une note via le Service doit être propagée à l'index.
 type Index interface {
@@ -76,6 +84,17 @@ var ErrNotFound = errors.New("note introuvable dans l'index")
 
 // ErrFolderExists est renvoyé par CreateFolder quand le dossier cible existe déjà.
 var ErrFolderExists = errors.New("dossier déjà existant")
+
+// ErrFolderNotEmpty est renvoyé par DeleteFolder quand le dossier contient
+// encore des notes ou des sous-dossiers et que l'appelant n'a pas passé
+// force=true. Le frontend l'utilise pour afficher la confirmation adaptée.
+var ErrFolderNotEmpty = errors.New("dossier non vide")
+
+// ErrFolderNotFound est renvoyé par les opérations sur dossiers (move,
+// rename, delete) quand le chemin source n'existe pas ou n'est pas un
+// dossier. Centralisé ici pour que le frontend puisse le reconnaître
+// indépendamment du formatage du message.
+var ErrFolderNotFound = errors.New("dossier introuvable")
 
 // nowUTC exporté pour les tests.
 var nowUTC = func() time.Time { return time.Now().UTC() }

@@ -15,18 +15,28 @@
     updatedAt: string;
   };
 
+  type FolderInfo = {
+    path: string;
+    name: string;
+    count: number;
+  };
+
   type Props = {
     notes: NoteSummary[];
     pinned: NoteSummary[];
     selectedPath: string;
+    extraFolders?: FolderInfo[];
     onOpen: (relativePath: string) => void;
     onTogglePin?: (relativePath: string) => void;
     onDragStart?: (event: DragEvent, relativePath: string) => void;
     onDragEnd?: () => void;
+    onFolderDragStart?: (event: DragEvent, folder: string) => void;
+    onFolderDragEnd?: () => void;
     onFolderDragOver?: (event: DragEvent, folder: string) => void;
     onFolderDragLeave?: (folder: string) => void;
     onFolderDrop?: (event: DragEvent, folder: string) => void;
     onContextMenu?: (event: MouseEvent, relativePath: string) => void;
+    onFolderContextMenu?: (event: MouseEvent, folder: string) => void;
     onFolderNewNote?: (folder: string) => void;
     onFolderNewFolder?: (folder: string) => void;
     dragOverFolder?: string | null;
@@ -36,14 +46,18 @@
     notes,
     pinned,
     selectedPath,
+    extraFolders = [],
     onOpen,
     onTogglePin,
     onDragStart,
     onDragEnd,
+    onFolderDragStart,
+    onFolderDragEnd,
     onFolderDragOver,
     onFolderDragLeave,
     onFolderDrop,
     onContextMenu,
+    onFolderContextMenu,
     onFolderNewNote,
     onFolderNewFolder,
     dragOverFolder
@@ -72,7 +86,15 @@
     depth: number;
   };
 
-  type FlatRow = FolderRow | NoteRow;
+  type RootRow = {
+    kind: 'root';
+    path: string;
+    name: string;
+    dragOver: boolean;
+    noteCount: number;
+  };
+
+  type FlatRow = RootRow | FolderRow | NoteRow;
 
   const ROW_HEIGHT = 30;
   const OVERSCAN = 6;
@@ -89,6 +111,32 @@
     if (label) console.time(label);
     const root: TreeNode = { name: '', path: '', children: [], notes: [] };
     const childMaps = new WeakMap<TreeNode, Map<string, TreeNode>>();
+
+    const locate = (relPath: string): TreeNode | null => {
+      // Ouvre (ou crée) le chemin de dossiers depuis la racine et retourne
+      // le dernier TreeNode. Utilisé pour greffer les dossiers vides
+      // scannés depuis le disque sans déranger ceux déjà dérivés des notes.
+      const parts = relPath.split('/');
+      if (parts[0] !== 'notes' || parts.length < 2) return null;
+      let cursor = root;
+      let cumulative = 'notes';
+      for (let i = 1; i < parts.length; i++) {
+        cumulative = cumulative + '/' + parts[i];
+        let map = childMaps.get(cursor);
+        if (!map) {
+          map = new Map<string, TreeNode>();
+          childMaps.set(cursor, map);
+        }
+        let child = map.get(cumulative);
+        if (!child) {
+          child = { name: parts[i], path: cumulative, children: [], notes: [] };
+          map.set(cumulative, child);
+          cursor.children.push(child);
+        }
+        cursor = child;
+      }
+      return cursor;
+    };
 
     for (const note of notes) {
       const parts = note.relativePath.split('/');
@@ -115,6 +163,15 @@
       }
       cursor.notes.push(note);
     }
+
+    // Les `extraFolders` (renvoyés par le backend via scan disque)
+    // incluent les dossiers vides qui n'ont aucune note. locate() les
+    // fusionne dans l'arbre sans remplacer ceux déjà présents.
+    for (const folder of extraFolders) {
+      if (!folder.path) continue;
+      locate('notes/' + folder.path);
+    }
+
     sortTree(root);
     if (label) console.timeEnd(label);
     return root;
@@ -122,6 +179,14 @@
 
   const flatRows = $derived.by(() => {
     const rows: FlatRow[] = [];
+    const totalNotes = notes.length;
+    rows.push({
+      kind: 'root',
+      path: 'notes',
+      name: 'Notes',
+      dragOver: dragOverFolder === 'notes',
+      noteCount: totalNotes
+    });
     const visit = (node: TreeNode, depth: number): void => {
       for (const child of node.children) {
         const open = isOpen(child.path);
@@ -240,6 +305,9 @@
       : 'group relative flex h-full w-full items-center gap-1 rounded-md px-2 text-sm font-medium text-subtle hover:bg-panel-muted hover:text-foreground'}
     use:clickOutside={{ handler: () => (folderMenuPath = null), enabled: folderMenuPath === row.path }}
     style="padding-left: {0.5 + row.depth * 0.85}rem"
+    draggable="true"
+    ondragstart={(e) => onFolderDragStart?.(e, row.path)}
+    ondragend={() => onFolderDragEnd?.()}
     ondragover={(e) => onFolderDragOver?.(e, row.path)}
     ondragleave={() => onFolderDragLeave?.(row.path)}
     ondrop={(e) => onFolderDrop?.(e, row.path)}
@@ -247,6 +315,7 @@
     tabindex="0"
     aria-expanded={row.open}
     onclick={() => toggle(row.path)}
+    oncontextmenu={(e) => onFolderContextMenu?.(e, row.path)}
     onkeydown={(e) => {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
@@ -333,6 +402,24 @@
   </div>
 {/snippet}
 
+{#snippet rootRowContent(row: RootRow)}
+  <div
+    class={row.dragOver
+      ? 'flex h-full w-full items-center gap-1.5 rounded-md border border-accent bg-accent/15 px-2 text-sm font-semibold text-foreground'
+      : 'flex h-full w-full items-center gap-1.5 rounded-md border border-transparent px-2 text-sm font-semibold text-foreground hover:border-border hover:bg-panel-muted'}
+    ondragover={(e) => onFolderDragOver?.(e, 'notes')}
+    ondragleave={() => onFolderDragLeave?.('notes')}
+    ondrop={(e) => onFolderDrop?.(e, 'notes')}
+    role="button"
+    tabindex="0"
+    aria-label="Dossier racine"
+  >
+    <Folder size={13} strokeWidth={2} class="shrink-0" aria-hidden="true" />
+    <span class="min-w-0 flex-1 truncate text-left">{row.name}</span>
+    <span class="shrink-0 text-xs text-faint">{row.noteCount}</span>
+  </div>
+{/snippet}
+
 <div class="flex h-full min-h-0 flex-col px-1">
   <VirtualList
     items={flatRows}
@@ -342,7 +429,9 @@
     ariaLabel="Notes"
   >
     {#snippet children(row: FlatRow)}
-      {#if row.kind === 'folder'}
+      {#if row.kind === 'root'}
+        {@render rootRowContent(row)}
+      {:else if row.kind === 'folder'}
         {@render folderRowContent(row)}
       {:else}
         {@render noteRowContent(row.note, row.depth)}

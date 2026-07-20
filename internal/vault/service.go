@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/kvitrvn/notevault/internal/config"
@@ -505,6 +506,344 @@ func (s *Service) CreateFolder(parentRelPath, name string) (domain.Note, error) 
 		return domain.Note{}, fmt.Errorf("créer le dossier : %w", err)
 	}
 	return domain.Note{}, nil
+}
+
+// validateFolderRelPath vérifie qu'un chemin relatif de dossier est
+// utilisable en interne : sous notes/, pas de traversée, pas d'absolu,
+// pas vide. Différent de validateNoteRelPath (pas d'exigence d'extension).
+func validateFolderRelPath(p string) error {
+	cleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(p)))
+	if cleaned == "" || cleaned == "." || cleaned == "/" {
+		return errors.New("chemin de dossier invalide")
+	}
+	if filepath.IsAbs(cleaned) || strings.HasPrefix(cleaned, "..") {
+		return errors.New("chemin de dossier invalide")
+	}
+	if !strings.HasPrefix(cleaned, "notes/") {
+		return errors.New("un dossier doit être rangé sous notes/")
+	}
+	if strings.HasSuffix(cleaned, "/") {
+		return errors.New("un dossier ne doit pas finir par /")
+	}
+	return nil
+}
+
+// countFolderContents compte les notes directement présentes dans dirAbs
+// (récursivement, à travers les sous-dossiers) et le nombre de
+// sous-dossiers immédiats. Pour la modale de confirmation de suppression.
+func countFolderContents(dirAbs string) (notes int, subdirs int, err error) {
+	err = filepath.WalkDir(dirAbs, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, fs.ErrNotExist) {
+				return nil
+			}
+			return walkErr
+		}
+		if path == dirAbs {
+			return nil
+		}
+		if d.IsDir() {
+			if filepath.Dir(path) == dirAbs {
+				subdirs++
+			}
+			return nil
+		}
+		if strings.ToLower(filepath.Ext(path)) == ".md" {
+			notes++
+		}
+		return nil
+	})
+	return notes, subdirs, err
+}
+
+// moveOrCopyDir renomme/déplace srcAbs vers dstAbs. Préfère os.Rename
+// (atomique, rapide). Tombe en fallback sur un copy + remove quand
+// src et dst sont sur des filesystems différents (os.Rename échoue
+// alors avec EXDEV).
+func moveOrCopyDir(srcAbs, dstAbs string) error {
+	if err := os.Rename(srcAbs, dstAbs); err == nil {
+		return nil
+	} else if !errors.Is(err, syscall.EXDEV) {
+		return err
+	}
+	if err := copyDir(srcAbs, dstAbs); err != nil {
+		return err
+	}
+	return os.RemoveAll(srcAbs)
+}
+
+func copyDir(srcAbs, dstAbs string) error {
+	if err := os.MkdirAll(dstAbs, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(srcAbs)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		src := filepath.Join(srcAbs, entry.Name())
+		dst := filepath.Join(dstAbs, entry.Name())
+		if entry.IsDir() {
+			if err := copyDir(src, dst); err != nil {
+				return err
+			}
+			continue
+		}
+		data, err := os.ReadFile(src)
+		if err != nil {
+			return err
+		}
+		if err := writeAtomic(dst, data, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MoveFolder déplace (ou renomme) un dossier sous notes/. Si newRel existe,
+// l'opération échoue. Les notes contenues sont réindexées en série sous
+// mutationMu : on supprime les anciens chemins et on insère les nouveaux.
+// Le sous-dossier destination du parent est créé à la volée par os.Rename.
+func (s *Service) MoveFolder(oldRel, newRel string) error {
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	if err := s.requireUnlocked(); err != nil {
+		return err
+	}
+	oldRel = filepath.ToSlash(filepath.Clean(filepath.FromSlash(oldRel)))
+	newRel = filepath.ToSlash(filepath.Clean(filepath.FromSlash(newRel)))
+	if err := validateFolderRelPath(oldRel); err != nil {
+		return err
+	}
+	if err := validateFolderRelPath(newRel); err != nil {
+		return err
+	}
+	if oldRel == newRel {
+		return nil
+	}
+	oldAbs := filepath.Join(s.root, oldRel)
+	newAbs := filepath.Join(s.root, newRel)
+	srcInfo, err := os.Stat(oldAbs)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w : %s", ErrFolderNotFound, oldRel)
+		}
+		return fmt.Errorf("vérifier le dossier source : %w", err)
+	}
+	if !srcInfo.IsDir() {
+		return fmt.Errorf("%w : %s", ErrFolderNotFound, oldRel)
+	}
+	// Empêche de déplacer un dossier dans lui-même ou sous lui-même :
+	// on refuse toute cible qui commence par l'ancien chemin.
+	if newRel == oldRel || strings.HasPrefix(newRel+"/", oldRel+"/") {
+		return errors.New("impossible de déplacer un dossier dans lui-même")
+	}
+	if _, err := os.Stat(newAbs); err == nil {
+		return fmt.Errorf("un dossier existe déjà à %s", newRel)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("vérifier la destination : %w", err)
+	}
+	// os.Rename exige que le parent de destination existe : on le crée
+	// à la volée (cohérent avec MoveNote qui crée les dossiers manquants).
+	newParentAbs := filepath.Dir(newAbs)
+	if err := os.MkdirAll(newParentAbs, 0o755); err != nil {
+		return fmt.Errorf("préparer le dossier parent : %w", err)
+	}
+	// Collecte des chemins de notes à réindexer AVANT le rename (la cible
+	// des notes change d'emplacement disque après).
+	type relocation struct {
+		oldPath string // chemin relatif à s.root
+		newPath string
+	}
+	var relocations []relocation
+	if err := filepath.WalkDir(oldAbs, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if strings.ToLower(filepath.Ext(path)) != ".md" {
+			return nil
+		}
+		rel, relErr := filepath.Rel(s.root, path)
+		if relErr != nil {
+			return relErr
+		}
+		newPath := newRel + strings.TrimPrefix(filepath.ToSlash(rel), oldRel)
+		relocations = append(relocations, relocation{
+			oldPath: filepath.ToSlash(rel),
+			newPath: newPath,
+		})
+		return nil
+	}); err != nil {
+		return fmt.Errorf("parcourir le dossier : %w", err)
+	}
+	if err := moveOrCopyDir(oldAbs, newAbs); err != nil {
+		return fmt.Errorf("déplacer le dossier : %w", err)
+	}
+	s.markInternalWrite(newAbs)
+	// Réindex : on supprime les anciens chemins puis on upsert les nouveaux
+	// en s'appuyant sur la lecture disque (gère le chiffrement, le parseur,
+	// les dates mtime). En cas d'échec, on remet au mieux l'ancien index en
+	// place : les fichiers existent toujours, juste ailleurs sur le disque.
+	for _, r := range relocations {
+		if err := s.index.Delete(r.oldPath); err != nil && !errors.Is(err, ErrNotFound) {
+			return fmt.Errorf("réindex après déplacement : %w", err)
+		}
+	}
+	for _, r := range relocations {
+		note, openErr := s.OpenNote(r.newPath)
+		if openErr != nil {
+			continue
+		}
+		if err := s.index.Upsert(note); err != nil {
+			return fmt.Errorf("réindex après déplacement : %w", err)
+		}
+	}
+	return nil
+}
+
+// RenameFolder renomme un dossier (change uniquement le dernier segment).
+// Valide le nouveau nom via slug() pour rester cohérent avec CreateFolder.
+func (s *Service) RenameFolder(rel, newName string) error {
+	rel = filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))
+	if err := validateFolderRelPath(rel); err != nil {
+		return err
+	}
+	trimmed := strings.TrimSpace(newName)
+	if trimmed == "" || strings.ContainsAny(trimmed, "/\\") || strings.Contains(trimmed, "..") {
+		return errors.New("nom de dossier invalide")
+	}
+	folderSlug := slug(trimmed)
+	if folderSlug == "" || (folderSlug == "note" && !strings.EqualFold(trimmed, "note")) {
+		return errors.New("nom de dossier invalide")
+	}
+	parent := filepath.ToSlash(filepath.Dir(rel))
+	if parent == "." {
+		parent = "notes"
+	}
+	newRel := filepath.ToSlash(filepath.Join(parent, folderSlug))
+	if newRel == rel {
+		return nil
+	}
+	return s.MoveFolder(rel, newRel)
+}
+
+// DeleteFolder supprime un dossier de notes/. Si force=false et que le
+// dossier contient des notes ou des sous-dossiers, renvoie ErrFolderNotEmpty.
+// Sinon, déplace le sous-arbre complet dans .trash/<yyyy-mm-dd>/<ts>-<basename>/,
+// retire les notes du dossier de l'index, et laisse les fichiers sur disque.
+func (s *Service) DeleteFolder(rel string, force bool) error {
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	if err := s.requireUnlocked(); err != nil {
+		return err
+	}
+	rel = filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))
+	if err := validateFolderRelPath(rel); err != nil {
+		return err
+	}
+	abs := filepath.Join(s.root, rel)
+	info, err := os.Stat(abs)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w : %s", ErrFolderNotFound, rel)
+		}
+		return fmt.Errorf("vérifier le dossier : %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%w : %s", ErrFolderNotFound, rel)
+	}
+	if !force {
+		notes, subdirs, countErr := countFolderContents(abs)
+		if countErr != nil {
+			return fmt.Errorf("compter le contenu : %w", countErr)
+		}
+		if notes > 0 || subdirs > 0 {
+			return ErrFolderNotEmpty
+		}
+	}
+	// Réindex : on retire toutes les notes du dossier de l'index avant
+	// le rename. On collecte d'abord les chemins, on agira sur l'index
+	// uniquement si le déplacement réussit.
+	relocated := make([]string, 0)
+	notePaths := make([]string, 0)
+	if err := filepath.WalkDir(abs, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if strings.ToLower(filepath.Ext(path)) != ".md" {
+			return nil
+		}
+		relPath, relErr := filepath.Rel(s.root, path)
+		if relErr != nil {
+			return relErr
+		}
+		notePaths = append(notePaths, filepath.ToSlash(relPath))
+		return nil
+	}); err != nil {
+		return fmt.Errorf("parcourir le dossier : %w", err)
+	}
+	now := time.Now().UTC()
+	day := now.Format("2006-01-02")
+	trashDir := filepath.Join(s.root, ".trash", day)
+	if err := os.MkdirAll(trashDir, 0o755); err != nil {
+		return fmt.Errorf("préparer la corbeille : %w", err)
+	}
+	dest := filepath.Join(trashDir, fmt.Sprintf("%s-%s", now.Format("20060102T150405.000"), filepath.Base(rel)))
+	// Si par malchance deux suppressions tombent dans la même milliseconde,
+	// on suffixe. Le contenu d'origine reste intouché.
+	if _, err := os.Stat(dest); err == nil {
+		dest = filepath.Join(trashDir, fmt.Sprintf("%s-%s-%d", now.Format("20060102T150405.000"), filepath.Base(rel), len(relocated)+1))
+	}
+	if err := os.Rename(abs, dest); err != nil {
+		return fmt.Errorf("déplacer vers la corbeille : %w", err)
+	}
+	s.markInternalWrite(dest)
+	relocated = append(relocated, dest)
+	for _, p := range notePaths {
+		if err := s.index.Delete(p); err != nil && !errors.Is(err, ErrNotFound) {
+			return fmt.Errorf("retirer la note de l'index : %w", err)
+		}
+	}
+	return nil
+}
+
+// FolderContents retourne le nombre de notes et de sous-dossiers contenus
+// directement ou indirectement dans le dossier. Sert au frontend pour
+// afficher l'avertissement "Supprimer N notes et M sous-dossiers" avant
+// une suppression forcée.
+func (s *Service) FolderContents(rel string) (FolderContentsInfo, error) {
+	if err := s.requireUnlocked(); err != nil {
+		return FolderContentsInfo{}, err
+	}
+	rel = filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))
+	if err := validateFolderRelPath(rel); err != nil {
+		return FolderContentsInfo{}, err
+	}
+	abs := filepath.Join(s.root, rel)
+	info, statErr := os.Stat(abs)
+	if statErr != nil {
+		if errors.Is(statErr, fs.ErrNotExist) {
+			return FolderContentsInfo{}, fmt.Errorf("%w : %s", ErrFolderNotFound, rel)
+		}
+		return FolderContentsInfo{}, statErr
+	}
+	if !info.IsDir() {
+		return FolderContentsInfo{}, fmt.Errorf("%w : %s", ErrFolderNotFound, rel)
+	}
+	notes, subs, countErr := countFolderContents(abs)
+	if countErr != nil {
+		return FolderContentsInfo{}, countErr
+	}
+	return FolderContentsInfo{Notes: notes, Subdirs: subs}, nil
 }
 
 // resolveNoteParent normalise un chemin parent fourni par l'API. Une chaîne

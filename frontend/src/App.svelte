@@ -16,8 +16,8 @@
   import CopyPlus from '@lucide/svelte/icons/copy-plus';
   import ExternalLink from '@lucide/svelte/icons/external-link';
   import FolderInput from '@lucide/svelte/icons/folder-input';
-import Folder from '@lucide/svelte/icons/folder';
-import FileText from '@lucide/svelte/icons/file-text';
+  import Folder from '@lucide/svelte/icons/folder';
+  import FileText from '@lucide/svelte/icons/file-text';
   import GripVertical from '@lucide/svelte/icons/grip-vertical';
   import History from '@lucide/svelte/icons/history';
   import Cloud from '@lucide/svelte/icons/cloud';
@@ -28,6 +28,7 @@ import FileText from '@lucide/svelte/icons/file-text';
   import PanelLeftClose from '@lucide/svelte/icons/panel-left-close';
   import PanelLeftOpen from '@lucide/svelte/icons/panel-left-open';
   import MessageSquare from '@lucide/svelte/icons/message-square';
+  import X from '@lucide/svelte/icons/x';
 
   import NoteEditor from './components/NoteEditor.svelte';
   import SaveIndicator from './components/SaveIndicator.svelte';
@@ -64,9 +65,11 @@ import FileText from '@lucide/svelte/icons/file-text';
     CreateVault,
     CreateNote,
     CreateFolder,
+    DeleteFolder,
     DeleteNote,
     DuplicateNote,
     EnsureDailyNote,
+    FolderContents,
     GetBacklinks,
     GetConfig,
     IsNotePinned,
@@ -77,11 +80,13 @@ import FileText from '@lucide/svelte/icons/file-text';
     ListTags,
     ListTemplates,
     ListThemes,
+    MoveFolder,
     MoveNote,
     OpenDailyNote,
     OpenInExplorer,
     OpenNote,
     PinNote,
+    RenameFolder,
     RenameTitle,
     RestoreFromHistory,
     SaveAsset,
@@ -234,6 +239,15 @@ import FileText from '@lucide/svelte/icons/file-text';
     }
   });
 
+  // Charge la liste des dossiers dès qu'on affiche la vue arborescente
+  // (sinon les dossiers vides restent invisibles tant qu'on n'ouvre pas
+  // une modale qui les charge paresseusement).
+  $effect(() => {
+    if (view === 'tree' && !foldersLoading) {
+      void loadFolders(true);
+    }
+  });
+
   // Vault sync awareness
   let vaultIsSynced = $state(false);
 
@@ -252,7 +266,16 @@ import FileText from '@lucide/svelte/icons/file-text';
 
   // Drag state
   let dragSource = $state<string | null>(null);
+  let dragKind = $state<'note' | 'folder' | null>(null);
   let dragOverFolder = $state<string | null>(null);
+
+  // Folder actions (rename / move / delete)
+  let folderRenameOpen = $state<{ path: string; name: string } | null>(null);
+  let folderRenameDraft = $state('');
+  let folderMoveOpen = $state<{ path: string } | null>(null);
+  let folderDeleteConfirm = $state<
+    { path: string; noteCount: number; subdirCount: number; deleting: boolean } | null
+  >(null);
 
   let filterBar = $state<FilterBar>();
   let sidebarEl: HTMLElement | undefined = $state();
@@ -469,6 +492,7 @@ import FileText from '@lucide/svelte/icons/file-text';
 
   function invalidateFolders(): void {
     foldersLoaded = false;
+    void loadFolders(true);
   }
 
   async function loadFolders(force = false): Promise<void> {
@@ -883,12 +907,22 @@ import FileText from '@lucide/svelte/icons/file-text';
   function onDragStart(event: DragEvent, relPath: string): void {
     if (!event.dataTransfer) return;
     dragSource = relPath;
+    dragKind = 'note';
     event.dataTransfer.effectAllowed = 'move';
     event.dataTransfer.setData('text/plain', relPath);
   }
 
+  function onFolderDragStart(event: DragEvent, folder: string): void {
+    if (!event.dataTransfer) return;
+    dragSource = folder;
+    dragKind = 'folder';
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', folder);
+  }
+
   function onDragEnd(): void {
     dragSource = null;
+    dragKind = null;
     dragOverFolder = null;
   }
 
@@ -906,20 +940,177 @@ import FileText from '@lucide/svelte/icons/file-text';
   async function onFolderDrop(event: DragEvent, folder: string): Promise<void> {
     event.preventDefault();
     const src = dragSource ?? event.dataTransfer?.getData('text/plain') ?? '';
+    const kind = dragKind;
     dragOverFolder = null;
     dragSource = null;
+    dragKind = null;
     if (!src || !src.startsWith('notes/')) return;
-    const base = src.split('/').pop() ?? 'note.md';
-    const targetFolder = (folder.startsWith('notes/') ? folder : 'notes/' + folder).replace(/\/+$/, '');
-    const target = targetFolder + '/' + base;
-    if (target === src) return;
+    const folderRel = folder.startsWith('notes/') ? folder : 'notes/' + folder;
+    const targetFolder = folderRel.replace(/\/+$/, '');
     try {
-      await MoveNote(src, target);
-      showToast('info', `Note déplacée vers ${targetFolder}/`);
+      if (kind === 'folder') {
+        const base = src.split('/').pop() ?? src;
+        const target = targetFolder + '/' + base;
+        if (target === src) return;
+        await MoveFolder(src, target);
+        showToast('info', `Dossier déplacé vers ${targetFolder}/`);
+      } else {
+        const base = src.split('/').pop() ?? 'note.md';
+        const target = targetFolder + '/' + base;
+        if (target === src) return;
+        await MoveNote(src, target);
+        showToast('info', `Note déplacée vers ${targetFolder}/`);
+      }
       invalidateFolders();
       await refresh();
     } catch (err) {
       showToast('error', `Échec : ${err}`);
+    }
+  }
+
+  // --- Folder context menu -------------------------------------------------
+  function openFolderContextMenu(event: MouseEvent, folderPath: string): void {
+    event.preventDefault();
+    const x = event.clientX;
+    const y = event.clientY;
+    contextMenu = {
+      x,
+      y,
+      items: [
+        {
+          label: 'Renommer le dossier',
+          icon: Pencil,
+          onPick: () => startFolderRename(folderPath)
+        },
+        {
+          label: 'Déplacer le dossier…',
+          icon: FolderInput,
+          onPick: () => startFolderMove(folderPath)
+        },
+        {
+          label: 'Supprimer le dossier',
+          icon: Trash2,
+          danger: true,
+          onPick: () => void requestFolderDelete(folderPath)
+        }
+      ]
+    };
+  }
+
+  function startFolderRename(folderPath: string): void {
+    const name = folderPath.split('/').pop() ?? '';
+    folderRenameDraft = name;
+    folderRenameOpen = { path: folderPath, name };
+    queueMicrotask(() => {
+      const input = document.getElementById('folder-rename-input') as HTMLInputElement | null;
+      input?.focus();
+      input?.select();
+    });
+  }
+
+  function cancelFolderRename(): void {
+    folderRenameOpen = null;
+    folderRenameDraft = '';
+  }
+
+  async function commitFolderRename(): Promise<void> {
+    if (!folderRenameOpen) return;
+    const next = folderRenameDraft.trim();
+    if (!next || next === folderRenameOpen.name) {
+      cancelFolderRename();
+      return;
+    }
+    const path = folderRenameOpen.path;
+    cancelFolderRename();
+    try {
+      await RenameFolder(path, next);
+      invalidateFolders();
+      await refresh();
+      showToast('info', `Dossier renommé.`);
+    } catch (err) {
+      showToast('error', `Échec du renommage : ${err}`);
+    }
+  }
+
+  function startFolderMove(folderPath: string): void {
+    folderMoveOpen = { path: folderPath };
+    void loadFolders(true);
+  }
+
+  function cancelFolderMove(): void {
+    folderMoveOpen = null;
+  }
+
+  async function commitFolderMove(destinationFolder: string): Promise<void> {
+    if (!folderMoveOpen) return;
+    const src = folderMoveOpen.path;
+    folderMoveOpen = null;
+    if (!destinationFolder.startsWith('notes/')) {
+      destinationFolder = 'notes/' + destinationFolder.replace(/^notes\//, '');
+    }
+    destinationFolder = destinationFolder.replace(/\/+$/, '');
+    if (!destinationFolder.startsWith('notes/')) destinationFolder = 'notes';
+    const base = src.split('/').pop() ?? src;
+    const target = destinationFolder === 'notes' ? 'notes/' + base : destinationFolder + '/' + base;
+    if (target === src) return;
+    try {
+      await MoveFolder(src, target);
+      invalidateFolders();
+      await refresh();
+      showToast('info', `Dossier déplacé.`);
+    } catch (err) {
+      showToast('error', `Échec du déplacement : ${err}`);
+    }
+  }
+
+  async function requestFolderDelete(folderPath: string): Promise<void> {
+    try {
+      const info = await safeCall(
+        'FolderContents',
+        FolderContents(folderPath),
+        null
+      );
+      if (!info) {
+        showToast('error', 'Impossible de lire le contenu du dossier.');
+        return;
+      }
+      folderDeleteConfirm = {
+        path: folderPath,
+        noteCount: info.notes ?? 0,
+        subdirCount: info.subdirs ?? 0,
+        deleting: false
+      };
+    } catch (err) {
+      showToast('error', `Échec : ${err}`);
+    }
+  }
+
+  function cancelFolderDelete(): void {
+    if (folderDeleteConfirm?.deleting) return;
+    folderDeleteConfirm = null;
+  }
+
+  async function confirmFolderDelete(force: boolean): Promise<void> {
+    if (!folderDeleteConfirm || folderDeleteConfirm.deleting) return;
+    folderDeleteConfirm = { ...folderDeleteConfirm, deleting: true };
+    const path = folderDeleteConfirm.path;
+    const label = path.split('/').pop() ?? path;
+    try {
+      await DeleteFolder(path, force);
+      invalidateFolders();
+      await refresh();
+      folderDeleteConfirm = null;
+      showToast(
+        'info',
+        force
+          ? `Dossier « ${label} » et son contenu déplacés dans la corbeille.`
+          : `Dossier « ${label} » supprimé.`
+      );
+    } catch (err) {
+      showToast('error', `Échec : ${err}`);
+      if (folderDeleteConfirm) {
+        folderDeleteConfirm = { ...folderDeleteConfirm, deleting: false };
+      }
     }
   }
 
@@ -1183,6 +1374,18 @@ import FileText from '@lucide/svelte/icons/file-text';
     if (event.key === 'Escape') {
       if (contextMenu) {
         contextMenu = null;
+        return;
+      }
+      if (folderRenameOpen) {
+        cancelFolderRename();
+        return;
+      }
+      if (folderMoveOpen) {
+        cancelFolderMove();
+        return;
+      }
+      if (folderDeleteConfirm) {
+        cancelFolderDelete();
         return;
       }
       if (folderPrompt.open) {
@@ -1489,6 +1692,14 @@ import FileText from '@lucide/svelte/icons/file-text';
     exportOpen = false;
     chatOpen = false;
     encryptionDialogOpen = false;
+    folderRenameOpen = null;
+    folderRenameDraft = '';
+    folderMoveOpen = null;
+    folderDeleteConfirm = null;
+    dragSource = null;
+    dragKind = null;
+    dragOverFolder = null;
+    contextMenu = null;
   }
 
   async function finishVaultSwitch(): Promise<void> {
@@ -2065,13 +2276,17 @@ import FileText from '@lucide/svelte/icons/file-text';
               notes={notes}
               pinned={pinned}
               selectedPath={selectedPath}
+              extraFolders={folders}
               onOpen={openNote}
               onDragStart={onDragStart}
               onDragEnd={onDragEnd}
+              onFolderDragStart={onFolderDragStart}
+              onFolderDragEnd={onDragEnd}
               onFolderDragOver={onFolderDragOver}
               onFolderDragLeave={onFolderDragLeave}
               onFolderDrop={onFolderDrop}
               onContextMenu={openContextMenu}
+              onFolderContextMenu={openFolderContextMenu}
               onFolderNewNote={(folder) => openNewNoteAt('notes/' + folder)}
               onFolderNewFolder={(folder) => openNewFolderPrompt('notes/' + folder)}
               dragOverFolder={dragOverFolder}
@@ -2540,6 +2755,207 @@ import FileText from '@lucide/svelte/icons/file-text';
   onMove={moveTo}
   onClose={() => (moveDialogOpen = false)}
 />
+
+{#if folderRenameOpen}
+  <div
+    class="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-4"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Renommer le dossier"
+  >
+    <button
+      type="button"
+      class="absolute inset-0 cursor-default"
+      aria-label="Annuler le renommage"
+      onclick={cancelFolderRename}
+    ></button>
+    <div class="relative w-full max-w-sm rounded-lg border border-border bg-panel p-4 shadow-lg" role="document">
+      <h2 class="text-sm font-semibold text-foreground">Renommer le dossier</h2>
+      <p class="mt-1 truncate text-xs text-subtle">
+        <code class="rounded bg-panel-muted px-1 py-0.5 text-xs">{folderRenameOpen.path}</code>
+      </p>
+      <input
+        id="folder-rename-input"
+        type="text"
+        bind:value={folderRenameDraft}
+        onkeydown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            void commitFolderRename();
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            cancelFolderRename();
+          }
+        }}
+        placeholder="Nouveau nom"
+        class="mt-3 h-9 w-full rounded-md border border-border bg-background px-2 text-sm text-foreground focus:border-accent focus:outline-none"
+      />
+      <p class="mt-2 text-xs text-faint">
+        Le nom est nettoyé pour rester compatible avec le système de fichiers.
+      </p>
+      <div class="mt-3 flex justify-end gap-2">
+        <button
+          type="button"
+          class="h-8 rounded-md border border-border px-3 text-xs text-subtle hover:bg-panel-muted hover:text-foreground"
+          onclick={cancelFolderRename}
+        >
+          Annuler
+        </button>
+        <button
+          type="button"
+          class="h-8 rounded-md border border-accent bg-accent px-3 text-xs font-medium text-accent-foreground hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={folderRenameDraft.trim().length === 0 || folderRenameDraft.trim() === folderRenameOpen.name}
+          onclick={() => void commitFolderRename()}
+        >
+          Renommer
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if folderMoveOpen}
+  {@const folderPath = folderMoveOpen.path}
+  {@const folderBaseName = folderPath.split('/').pop() ?? folderPath}
+  <div
+    class="fixed inset-0 z-50 grid place-items-start px-4 pt-[12vh]"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Déplacer le dossier"
+  >
+    <button
+      class="absolute inset-0 bg-black/55"
+      type="button"
+      aria-label="Fermer"
+      onclick={cancelFolderMove}
+    ></button>
+    <div class="relative w-full max-w-md overflow-hidden rounded-xl border border-border bg-panel shadow-2xl">
+      <div class="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
+        <h2 class="flex items-center gap-1.5 text-base font-semibold text-foreground">
+          <FolderInput size={16} strokeWidth={2} aria-hidden="true" />
+          Déplacer le dossier
+        </h2>
+        <button
+          class="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border bg-background text-subtle hover:bg-panel-muted hover:text-foreground"
+          type="button"
+          aria-label="Fermer"
+          onclick={cancelFolderMove}
+        >
+          <X size={14} strokeWidth={2} aria-hidden="true" />
+        </button>
+      </div>
+      <div class="flex flex-col gap-3 px-4 py-3">
+        <p class="text-xs text-subtle">
+          Choisissez le dossier de destination pour
+          <code class="rounded bg-panel-muted px-1 py-0.5 text-xs">{folderBaseName}</code>.
+        </p>
+        {#if folders.length > 0}
+          <div class="flex flex-col gap-1">
+            <span class="text-xs font-medium text-subtle">Dossiers existants</span>
+            <div class="flex flex-wrap gap-1">
+              {#each folders as f (f.path)}
+                <button
+                  type="button"
+                  class="rounded-full border border-border bg-background px-2 py-0.5 text-xs text-foreground hover:border-accent hover:bg-accent/10"
+                  onclick={() => void commitFolderMove('notes/' + f.path)}
+                >
+                  {f.path}
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
+      </div>
+      <div class="flex items-center justify-end gap-2 border-t border-border bg-background px-4 py-2.5">
+        <button
+          class="rounded-md border border-border bg-transparent px-3 py-1.5 text-sm text-subtle hover:bg-panel-muted hover:text-foreground"
+          type="button"
+          onclick={cancelFolderMove}
+        >
+          Annuler
+        </button>
+        <button
+          class="rounded-md border border-accent bg-accent px-3 py-1.5 text-sm font-medium text-accent-foreground hover:bg-accent-hover"
+          type="button"
+          onclick={() => void commitFolderMove('notes')}
+        >
+          Déplacer à la racine
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if folderDeleteConfirm}
+  {@const total = folderDeleteConfirm.noteCount + folderDeleteConfirm.subdirCount}
+  <div class="fixed inset-0 z-50 grid place-items-center px-4">
+    <button
+      class="absolute inset-0 bg-black/55"
+      type="button"
+      aria-label="Fermer la confirmation"
+      onclick={cancelFolderDelete}
+      disabled={folderDeleteConfirm.deleting}
+    ></button>
+    <div
+      class="relative w-full max-w-md rounded-lg border border-border bg-panel p-4 shadow-xl"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="delete-folder-title"
+    >
+      <h2 id="delete-folder-title" class="flex items-center gap-2 text-base font-semibold text-foreground">
+        <Trash2 size={16} strokeWidth={2} aria-hidden="true" />
+        Supprimer ce dossier ?
+      </h2>
+      <p class="mt-2 truncate rounded-md bg-background px-2 py-1 text-xs text-faint" title={folderDeleteConfirm.path}>
+        {folderDeleteConfirm.path}
+      </p>
+      {#if total === 0}
+        <p class="mt-3 text-sm leading-6 text-subtle">
+          Le dossier est vide. Sa suppression est immédiate.
+        </p>
+      {:else}
+        <p class="mt-3 text-sm leading-6 text-subtle">
+          Le dossier contient
+          {#if folderDeleteConfirm.noteCount > 0}
+            <strong class="text-foreground">{folderDeleteConfirm.noteCount}</strong> note{folderDeleteConfirm.noteCount > 1 ? 's' : ''}{#if folderDeleteConfirm.subdirCount > 0}{/if}
+          {/if}
+          {#if folderDeleteConfirm.noteCount > 0 && folderDeleteConfirm.subdirCount > 0}
+            et
+          {/if}
+          {#if folderDeleteConfirm.subdirCount > 0}
+            <strong class="text-foreground">{folderDeleteConfirm.subdirCount}</strong> sous-dossier{folderDeleteConfirm.subdirCount > 1 ? 's' : ''}
+          {/if}
+          . L'ensemble sera déplacé dans la corbeille : les notes ne pourront pas être restaurées individuellement, mais le dossier complet reste récupérable manuellement dans <code class="rounded bg-panel-muted px-1 py-0.5 text-xs">.trash/</code>.
+        </p>
+      {/if}
+      <div class="mt-4 flex justify-end gap-2">
+        <button
+          class="rounded-md border border-border bg-transparent px-3 py-1.5 text-sm text-subtle hover:bg-panel-muted hover:text-foreground"
+          type="button"
+          onclick={cancelFolderDelete}
+          disabled={folderDeleteConfirm.deleting}
+        >
+          Annuler
+        </button>
+        <button
+          class={total === 0
+            ? 'inline-flex items-center gap-2 rounded-md border border-danger/45 bg-danger px-3 py-1.5 text-sm font-medium text-background hover:opacity-90 disabled:opacity-60'
+            : 'inline-flex items-center gap-2 rounded-md border border-danger bg-danger px-3 py-1.5 text-sm font-medium text-background hover:opacity-90 disabled:opacity-60'}
+          type="button"
+          onclick={() => void confirmFolderDelete(total > 0)}
+          disabled={folderDeleteConfirm.deleting}
+        >
+          <Trash2 size={15} strokeWidth={2} aria-hidden="true" />
+          {folderDeleteConfirm.deleting
+            ? 'Suppression...'
+            : total === 0
+              ? 'Supprimer'
+              : `Supprimer ${folderDeleteConfirm.noteCount} note${folderDeleteConfirm.noteCount > 1 ? 's' : ''} et ${folderDeleteConfirm.subdirCount} sous-dossier${folderDeleteConfirm.subdirCount > 1 ? 's' : ''}`}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <HistoryPanel
   open={historyOpen}
