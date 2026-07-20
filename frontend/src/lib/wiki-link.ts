@@ -10,7 +10,7 @@
 // émet un callback fourni par l'hôte.
 
 import { Extension, type Editor } from '@tiptap/core';
-import { Plugin, PluginKey } from '@tiptap/pm/state';
+import { Plugin, PluginKey, type Transaction } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import type { Node as PMNode } from '@tiptap/pm/model';
 
@@ -50,7 +50,10 @@ export const WikiLink = Extension.create<WikiLinkOptions>({
           init: () => DecorationSet.empty,
           apply(tr, old) {
             if (!tr.docChanged && !tr.getMeta('wiki-link-refresh')) return old;
-            return buildDecorations(tr.doc, opts.resolve());
+            if (tr.getMeta('wiki-link-refresh')) {
+              return buildDecorations(tr.doc, opts.resolve());
+            }
+            return applyIncremental(tr, old, opts.resolve());
           }
         },
         props: {
@@ -78,13 +81,96 @@ export const WikiLink = Extension.create<WikiLinkOptions>({
   }
 });
 
+function applyIncremental(
+  tr: Transaction,
+  old: DecorationSet,
+  resolve: WikiLinkResolve
+): DecorationSet {
+  let set = old.map(tr.mapping, tr.doc);
+
+  const touched = new Map<string, { from: number; to: number }>();
+  for (const step of tr.steps) {
+    const stepMap = step.getMap();
+    stepMap.forEach((_oldStart, _oldEnd, newStart, newEnd) => {
+      if (newEnd > newStart) addTouchedBlock(tr.doc, newStart, touched);
+      if (newEnd > newStart && newEnd !== newStart) {
+        addTouchedBlock(tr.doc, newEnd, touched);
+      }
+    });
+  }
+
+  if (touched.size === 0) return set;
+
+  const toRemove: Decoration[] = [];
+  for (const block of touched.values()) {
+    toRemove.push(...set.find(block.from, block.to));
+  }
+  if (toRemove.length > 0) {
+    set = set.remove(toRemove);
+  }
+  for (const block of touched.values()) {
+    set = set.add(tr.doc, findWikiLinksInRange(tr.doc, block.from, block.to, resolve));
+  }
+
+  return set;
+}
+
+function addTouchedBlock(
+  doc: PMNode,
+  pos: number,
+  touched: Map<string, { from: number; to: number }>
+): void {
+  if (pos <= 0 || pos >= doc.content.size) return;
+  doc.forEach((child, childPos) => {
+    if (!child.isBlock) return;
+    const end = childPos + child.nodeSize;
+    if (pos >= childPos && pos <= end) {
+      touched.set(`${childPos}-${end}`, { from: childPos, to: end });
+    }
+  });
+}
+
+function findWikiLinksInRange(
+  doc: PMNode,
+  from: number,
+  to: number,
+  resolve: WikiLinkResolve
+): Decoration[] {
+  const decorations: Decoration[] = [];
+  doc.nodesBetween(from, to, (node, pos) => {
+    if (!node.isText) return;
+    const text = node.text ?? '';
+    const localFrom = Math.max(0, from - pos);
+    const localTo = Math.min(text.length, to - pos);
+    if (localFrom >= localTo) return;
+    const slice = text.slice(localFrom, localTo);
+    WIKI_LINK_RE.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = WIKI_LINK_RE.exec(slice)) !== null) {
+      const [whole, title] = match;
+      const matchFrom = pos + localFrom + match.index;
+      const matchTo = matchFrom + whole.length;
+      if (matchFrom < from || matchTo > to) continue;
+      const exists = resolve(title);
+      const cls = exists ? 'wiki-link wiki-link--exists' : 'wiki-link wiki-link--missing';
+      decorations.push(
+        Decoration.inline(matchFrom, matchTo, {
+          class: cls,
+          'data-target': title
+        })
+      );
+    }
+  });
+  return decorations;
+}
+
 function buildDecorations(doc: PMNode, resolve: WikiLinkResolve): DecorationSet {
   const decorations: Decoration[] = [];
   doc.descendants((node, pos) => {
     if (!node.isText) return;
     const text = node.text ?? '';
-    let match: RegExpExecArray | null;
     WIKI_LINK_RE.lastIndex = 0;
+    let match: RegExpExecArray | null;
     while ((match = WIKI_LINK_RE.exec(text)) !== null) {
       const [whole, title] = match;
       const from = pos + match.index;
