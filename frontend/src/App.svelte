@@ -1958,8 +1958,7 @@
         {/if}
 
         {#if view === 'tree'}
-          <section aria-label="Notes" class="min-h-0 flex-1 overflow-y-auto">
-            <h2 class="sr-only">Notes</h2>
+          <div class="min-h-0 flex-1">
             <SidebarTree
               notes={notes}
               pinned={pinned}
@@ -1980,7 +1979,7 @@
                 }
               }}
             />
-          </section>
+          </div>
         {:else}
           <div class="min-h-0 flex-1">
             <VirtualList

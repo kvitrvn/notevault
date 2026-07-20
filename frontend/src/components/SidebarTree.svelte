@@ -5,6 +5,7 @@
   import Pin from '@lucide/svelte/icons/pin';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import GripVertical from '@lucide/svelte/icons/grip-vertical';
+  import VirtualList from './VirtualList.svelte';
 
   type NoteSummary = {
     relativePath: string;
@@ -49,6 +50,27 @@
     notes: NoteSummary[];
   };
 
+  type FolderRow = {
+    kind: 'folder';
+    path: string;
+    name: string;
+    depth: number;
+    open: boolean;
+    dragOver: boolean;
+    count: number;
+  };
+
+  type NoteRow = {
+    kind: 'note';
+    note: NoteSummary;
+    depth: number;
+  };
+
+  type FlatRow = FolderRow | NoteRow;
+
+  const ROW_HEIGHT = 30;
+  const OVERSCAN = 6;
+
   const isDev = Boolean((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV);
   let buildSeq = 0;
   let openFolders = $state<Record<string, boolean>>({});
@@ -91,6 +113,30 @@
     return root;
   });
 
+  const flatRows = $derived.by(() => {
+    const rows: FlatRow[] = [];
+    const visit = (node: TreeNode, depth: number): void => {
+      for (const child of node.children) {
+        const open = isOpen(child.path);
+        rows.push({
+          kind: 'folder',
+          path: child.path,
+          name: child.name,
+          depth,
+          open,
+          dragOver: dragOverFolder === child.path,
+          count: child.notes.length + child.children.length
+        });
+        if (open) visit(child, depth + 1);
+      }
+      for (const note of node.notes) {
+        rows.push({ kind: 'note', note, depth });
+      }
+    };
+    visit(tree, 0);
+    return rows;
+  });
+
   function sortTree(node: TreeNode): void {
     node.children.sort((a, b) => a.name.localeCompare(b.name));
     node.notes.sort((a, b) => a.title.localeCompare(b.title));
@@ -112,10 +158,6 @@
     return pinnedPaths.has(relPath);
   }
 
-  function isDragOver(path: string): boolean {
-    return dragOverFolder === path;
-  }
-
   function folderAncestors(path: string): Set<string> {
     const ancestors = new Set<string>();
     const parts = path.split('/');
@@ -128,13 +170,13 @@
   }
 </script>
 
-{#snippet noteRow(note: NoteSummary, indent: number)}
+{#snippet noteRowContent(note: NoteSummary, depth: number)}
   {@const active = selectedPath === note.relativePath}
   <div
     class={active
-      ? 'group flex w-full items-center gap-1.5 rounded-md border border-accent bg-accent/15 px-2 py-1 text-foreground'
-      : 'group flex w-full items-center gap-1.5 rounded-md border border-transparent px-2 py-1 text-foreground hover:border-border hover:bg-panel-muted'}
-    style="padding-left: {0.5 + indent * 0.85}rem"
+      ? 'flex h-full w-full items-center gap-1.5 overflow-hidden rounded-md border border-accent bg-accent/15 px-2 text-foreground'
+      : 'flex h-full w-full items-center gap-1.5 overflow-hidden rounded-md border border-transparent px-2 text-foreground hover:border-border hover:bg-panel-muted'}
+    style="padding-left: {0.5 + depth * 0.85}rem"
     role="button"
     tabindex="0"
     aria-current={active ? 'page' : undefined}
@@ -184,52 +226,49 @@
   </div>
 {/snippet}
 
-{#snippet folderNode(node: TreeNode, depth: number)}
-  {@const open = isOpen(node.path)}
-  {@const dragOver = isDragOver(node.path)}
-  <div>
-    <button
-      type="button"
-      class={dragOver
-        ? 'flex w-full items-center gap-1 rounded-md border border-accent bg-accent/15 px-2 py-1 text-left text-sm font-medium text-foreground'
-        : 'flex w-full items-center gap-1 rounded-md px-2 py-1 text-left text-sm font-medium text-subtle hover:bg-panel-muted hover:text-foreground'}
-      style="padding-left: {0.5 + depth * 0.85}rem"
-      onclick={() => toggle(node.path)}
-      aria-expanded={open}
-      ondragover={(e) => onFolderDragOver?.(e, node.path)}
-      ondragleave={() => onFolderDragLeave?.(node.path)}
-      ondrop={(e) => onFolderDrop?.(e, node.path)}
-    >
-      <ChevronRight
-        size={11}
-        strokeWidth={2.5}
-        class="shrink-0 transition-transform {open ? 'rotate-90' : ''}"
-        aria-hidden="true"
-      />
-      {#if open}
-        <FolderOpen size={13} strokeWidth={2} class="shrink-0" aria-hidden="true" />
-      {:else}
-        <Folder size={13} strokeWidth={2} class="shrink-0" aria-hidden="true" />
-      {/if}
-      <span class="min-w-0 flex-1 truncate">{node.name}</span>
-      <span class="text-xs text-faint">{node.notes.length + node.children.length}</span>
-    </button>
-    {#if open}
-      {#each node.children as child (child.path)}
-        {@render folderNode(child, depth + 1)}
-      {/each}
-      {#each node.notes as note (note.relativePath)}
-        {@render noteRow(note, depth + 1)}
-      {/each}
+{#snippet folderRowContent(row: FolderRow)}
+  <button
+    type="button"
+    class={row.dragOver
+      ? 'flex h-full w-full items-center gap-1 overflow-hidden rounded-md border border-accent bg-accent/15 px-2 text-left text-sm font-medium text-foreground'
+      : 'flex h-full w-full items-center gap-1 overflow-hidden rounded-md px-2 text-left text-sm font-medium text-subtle hover:bg-panel-muted hover:text-foreground'}
+    style="padding-left: {0.5 + row.depth * 0.85}rem"
+    onclick={() => toggle(row.path)}
+    aria-expanded={row.open}
+    ondragover={(e) => onFolderDragOver?.(e, row.path)}
+    ondragleave={() => onFolderDragLeave?.(row.path)}
+    ondrop={(e) => onFolderDrop?.(e, row.path)}
+  >
+    <ChevronRight
+      size={11}
+      strokeWidth={2.5}
+      class="shrink-0 transition-transform {row.open ? 'rotate-90' : ''}"
+      aria-hidden="true"
+    />
+    {#if row.open}
+      <FolderOpen size={13} strokeWidth={2} class="shrink-0" aria-hidden="true" />
+    {:else}
+      <Folder size={13} strokeWidth={2} class="shrink-0" aria-hidden="true" />
     {/if}
-  </div>
+    <span class="min-w-0 flex-1 truncate">{row.name}</span>
+    <span class="text-xs text-faint">{row.count}</span>
+  </button>
 {/snippet}
 
-<div class="flex flex-col gap-0.5 px-1">
-  {#each tree.children as child (child.path)}
-    {@render folderNode(child, 0)}
-  {/each}
-  {#each tree.notes as note (note.relativePath)}
-    {@render noteRow(note, 0)}
-  {/each}
+<div class="flex h-full min-h-0 flex-col px-1">
+  <VirtualList
+    items={flatRows}
+    itemHeight={ROW_HEIGHT}
+    overscan={OVERSCAN}
+    class="min-h-0 flex-1"
+    ariaLabel="Notes"
+  >
+    {#snippet children(row: FlatRow)}
+      {#if row.kind === 'folder'}
+        {@render folderRowContent(row)}
+      {:else}
+        {@render noteRowContent(row.note, row.depth)}
+      {/if}
+    {/snippet}
+  </VirtualList>
 </div>
