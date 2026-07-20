@@ -70,6 +70,11 @@ func (s *Service) ExportNotes(paths []string, destZip string) error {
 		added[relPath] = struct{}{}
 		// Assets référencés dans le contenu Markdown.
 		for _, asset := range referencedAssets(string(raw)) {
+			// Le contenu Markdown est non fiable : un chemin forgé en
+			// `assets/../../etc/...` passerait le préfixe sans ce filet.
+			if _, err := normalizeAssetPath(asset); err != nil {
+				continue
+			}
 			assetAbs := filepath.Join(s.root, filepath.FromSlash(asset))
 			if _, err := os.Stat(assetAbs); err != nil {
 				continue

@@ -208,6 +208,70 @@ func TestExportNotesWithAssets(t *testing.T) {
 	}
 }
 
+func TestExportRejectsForgedAssetPath(t *testing.T) {
+	svc, dir := setupVault(t)
+	parent := filepath.Dir(dir)
+	bait := filepath.Join(parent, "notevault-evil-export.txt")
+	sentinel := []byte("BAIT-DO-NOT-EXFILTRATE")
+	if err := os.WriteFile(bait, sentinel, 0o644); err != nil {
+		t.Fatalf("write bait: %v", err)
+	}
+	defer os.Remove(bait)
+
+	cases := []struct {
+		name    string
+		forged  string // chemin d'asset tel qu'il apparaîtrait dans le Markdown
+	}{
+		{
+			name:   "traversal parent",
+			forged: "assets/../../notevault-evil-export.txt",
+		},
+		{
+			name:   "traversal profond",
+			forged: "assets/2026/07/../../../../../notevault-evil-export.txt",
+		},
+		{
+			name:   "chemin absolu",
+			forged: "assets/" + filepath.ToSlash(bait),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			note, err := svc.CreateNote("Exportable", "")
+			if err != nil {
+				t.Fatalf("CreateNote: %v", err)
+			}
+			note.Content = "![evil](" + tc.forged + ")\n"
+			if _, err := svc.SaveNote(note); err != nil {
+				t.Fatalf("SaveNote: %v", err)
+			}
+
+			dest := filepath.Join(dir, tc.name+".zip")
+			if err := svc.ExportNotes([]string{note.RelativePath}, dest); err != nil {
+				t.Fatalf("ExportNotes: %v", err)
+			}
+			zr, err := zip.OpenReader(dest)
+			if err != nil {
+				t.Fatalf("open zip: %v", err)
+			}
+			defer zr.Close()
+
+			for _, f := range zr.File {
+				if f.Name != note.RelativePath {
+					t.Fatalf("entrée inattendue dans le zip : %s", f.Name)
+				}
+				rc, _ := f.Open()
+				data, _ := readAll(rc)
+				rc.Close()
+				if bytes.Contains(data, sentinel) {
+					t.Fatalf("contenu exfiltré dans %s : %q", f.Name, data)
+				}
+			}
+		})
+	}
+}
+
 func TestExportNotesByTitle(t *testing.T) {
 	svc, dir := setupVault(t)
 	note, _ := svc.CreateNote("Titre exact", "")
