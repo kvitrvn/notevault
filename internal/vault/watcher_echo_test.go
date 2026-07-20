@@ -33,7 +33,7 @@ func (c *countingIndex) Delete(rel string) error {
 func TestReindexFromPathSkipsInternalEcho(t *testing.T) {
 	svc, dir := setupVault(t)
 
-	note, err := svc.CreateNote("Echo", "")
+	note, err := svc.CreateNote("", "Echo", "")
 	if err != nil {
 		t.Fatalf("CreateNote: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestSaveNoteSuppressesWatcherEcho(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = svc.Close() })
 
-	note, err := svc.CreateNote("Echo integ", "")
+	note, err := svc.CreateNote("", "Echo integ", "")
 	if err != nil {
 		t.Fatalf("CreateNote: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestMoveNoteSuppressesWatcherEcho(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = svc.Close() })
 
-	note, err := svc.CreateNote("Move echo", "")
+	note, err := svc.CreateNote("", "Move echo", "")
 	if err != nil {
 		t.Fatalf("CreateNote: %v", err)
 	}

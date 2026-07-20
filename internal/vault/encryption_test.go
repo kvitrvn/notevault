@@ -74,7 +74,7 @@ func TestServiceEncryptionLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	note, err := svc.CreateNote("Confidentiel", "blank")
+	note, err := svc.CreateNote("", "Confidentiel", "blank")
 	if err != nil {
 		t.Fatalf("CreateNote: %v", err)
 	}

@@ -74,5 +74,8 @@ type StatsBucketsResult struct {
 // ErrNotFound est renvoyé par Get quand la note n'existe pas dans l'index.
 var ErrNotFound = errors.New("note introuvable dans l'index")
 
+// ErrFolderExists est renvoyé par CreateFolder quand le dossier cible existe déjà.
+var ErrFolderExists = errors.New("dossier déjà existant")
+
 // nowUTC exporté pour les tests.
 var nowUTC = func() time.Time { return time.Now().UTC() }

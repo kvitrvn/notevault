@@ -24,7 +24,7 @@ func setupVault(t *testing.T) (*Service, string) {
 func TestServiceCRUD(t *testing.T) {
 	svc, _ := setupVault(t)
 
-	created, err := svc.CreateNote("Bonjour", "")
+	created, err := svc.CreateNote("", "Bonjour", "")
 	if err != nil {
 		t.Fatalf("CreateNote: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestServiceSearch(t *testing.T) {
 
 	titles := []string{"Vacances été", "TODO listes", "Recette crumble"}
 	for _, title := range titles {
-		note, err := svc.CreateNote(title, "")
+		note, err := svc.CreateNote("", title, "")
 		if err != nil {
 			t.Fatalf("CreateNote: %v", err)
 		}
@@ -223,7 +223,7 @@ func TestServiceIndexNowRefreshesModifiedFiles(t *testing.T) {
 
 func TestServiceAtomicWrite(t *testing.T) {
 	svc, dir := setupVault(t)
-	note, err := svc.CreateNote("Atomic", "")
+	note, err := svc.CreateNote("", "Atomic", "")
 	if err != nil {
 		t.Fatalf("CreateNote: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestServiceAtomicWrite(t *testing.T) {
 
 func TestServiceRestoreConflict(t *testing.T) {
 	svc, _ := setupVault(t)
-	note, err := svc.CreateNote("Conflict", "")
+	note, err := svc.CreateNote("", "Conflict", "")
 	if err != nil {
 		t.Fatalf("CreateNote: %v", err)
 	}
@@ -255,13 +255,13 @@ func TestServiceRestoreConflict(t *testing.T) {
 		t.Fatalf("corbeille: %d", len(trash))
 	}
 	// On recrée une note qui va écraser le chemin original (date arrondie à la seconde).
-	note2, err := svc.CreateNote("Conflict", "")
+	note2, err := svc.CreateNote("", "Conflict", "")
 	if err != nil {
 		t.Fatalf("CreateNote 2: %v", err)
 	}
 	if note2.RelativePath != note.RelativePath {
 		// Si le timestamp change, on force le conflit en écrivant le même chemin.
-		extra, err := svc.CreateNote("Conflict", "")
+		extra, err := svc.CreateNote("", "Conflict", "")
 		if err != nil {
 			t.Fatalf("CreateNote 3: %v", err)
 		}
@@ -276,7 +276,7 @@ func TestServiceRestoreConflict(t *testing.T) {
 
 func TestServiceRestoreRejectsForgedMeta(t *testing.T) {
 	svc, dir := setupVault(t)
-	note, err := svc.CreateNote("Voyage", "")
+	note, err := svc.CreateNote("", "Voyage", "")
 	if err != nil {
 		t.Fatalf("CreateNote: %v", err)
 	}
@@ -366,7 +366,7 @@ func TestServiceConfig(t *testing.T) {
 
 func TestServicePurgeTrash(t *testing.T) {
 	svc, dir := setupVault(t)
-	note, _ := svc.CreateNote("Old", "")
+	note, _ := svc.CreateNote("", "Old", "")
 	if err := svc.DeleteNote(note.RelativePath); err != nil {
 		t.Fatalf("DeleteNote: %v", err)
 	}
@@ -398,7 +398,7 @@ func TestServiceCreateNoteTemplates(t *testing.T) {
 		{"unknown", ""},
 	}
 	for _, c := range cases {
-		note, err := svc.CreateNote("Test "+c.key, c.key)
+		note, err := svc.CreateNote("", "Test "+c.key, c.key)
 		if err != nil {
 			t.Fatalf("CreateNote %s: %v", c.key, err)
 		}

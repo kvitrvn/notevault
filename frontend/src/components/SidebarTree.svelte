@@ -3,9 +3,11 @@
   import FolderOpen from '@lucide/svelte/icons/folder-open';
   import FileText from '@lucide/svelte/icons/file-text';
   import Pin from '@lucide/svelte/icons/pin';
+  import Plus from '@lucide/svelte/icons/plus';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import GripVertical from '@lucide/svelte/icons/grip-vertical';
   import VirtualList from './VirtualList.svelte';
+  import { clickOutside } from '../lib/actions';
 
   type NoteSummary = {
     relativePath: string;
@@ -25,6 +27,8 @@
     onFolderDragLeave?: (folder: string) => void;
     onFolderDrop?: (event: DragEvent, folder: string) => void;
     onContextMenu?: (event: MouseEvent, relativePath: string) => void;
+    onFolderNewNote?: (folder: string) => void;
+    onFolderNewFolder?: (folder: string) => void;
     dragOverFolder?: string | null;
   };
 
@@ -40,6 +44,8 @@
     onFolderDragLeave,
     onFolderDrop,
     onContextMenu,
+    onFolderNewNote,
+    onFolderNewFolder,
     dragOverFolder
   }: Props = $props();
 
@@ -74,6 +80,7 @@
   const isDev = Boolean((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV);
   let buildSeq = 0;
   let openFolders = $state<Record<string, boolean>>({});
+  let folderMenuPath = $state<string | null>(null);
   const selectedAncestors = $derived(folderAncestors(selectedPath));
   const pinnedPaths = $derived(new Set(pinned.map((p) => p.relativePath)));
 
@@ -227,32 +234,103 @@
 {/snippet}
 
 {#snippet folderRowContent(row: FolderRow)}
-  <button
-    type="button"
+  <div
     class={row.dragOver
-      ? 'flex h-full w-full items-center gap-1 overflow-hidden rounded-md border border-accent bg-accent/15 px-2 text-left text-sm font-medium text-foreground'
-      : 'flex h-full w-full items-center gap-1 overflow-hidden rounded-md px-2 text-left text-sm font-medium text-subtle hover:bg-panel-muted hover:text-foreground'}
+      ? 'group relative flex h-full w-full items-center gap-1 rounded-md border border-accent bg-accent/15 px-2 text-sm font-medium text-foreground'
+      : 'group relative flex h-full w-full items-center gap-1 rounded-md px-2 text-sm font-medium text-subtle hover:bg-panel-muted hover:text-foreground'}
+    use:clickOutside={{ handler: () => (folderMenuPath = null), enabled: folderMenuPath === row.path }}
     style="padding-left: {0.5 + row.depth * 0.85}rem"
-    onclick={() => toggle(row.path)}
-    aria-expanded={row.open}
     ondragover={(e) => onFolderDragOver?.(e, row.path)}
     ondragleave={() => onFolderDragLeave?.(row.path)}
     ondrop={(e) => onFolderDrop?.(e, row.path)}
+    role="button"
+    tabindex="0"
+    aria-expanded={row.open}
+    onclick={() => toggle(row.path)}
+    onkeydown={(e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggle(row.path);
+      }
+    }}
   >
-    <ChevronRight
-      size={11}
-      strokeWidth={2.5}
-      class="shrink-0 transition-transform {row.open ? 'rotate-90' : ''}"
-      aria-hidden="true"
-    />
+    <button
+      type="button"
+      class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-subtle hover:bg-panel-muted hover:text-foreground"
+      aria-label={row.open ? 'Replier' : 'Déplier'}
+      onclick={(e) => {
+        e.stopPropagation();
+        toggle(row.path);
+      }}
+    >
+      <ChevronRight
+        size={11}
+        strokeWidth={2.5}
+        class="shrink-0 transition-transform {row.open ? 'rotate-90' : ''}"
+        aria-hidden="true"
+      />
+    </button>
     {#if row.open}
       <FolderOpen size={13} strokeWidth={2} class="shrink-0" aria-hidden="true" />
     {:else}
       <Folder size={13} strokeWidth={2} class="shrink-0" aria-hidden="true" />
     {/if}
-    <span class="min-w-0 flex-1 truncate">{row.name}</span>
-    <span class="text-xs text-faint">{row.count}</span>
-  </button>
+    <span class="min-w-0 flex-1 truncate text-left">{row.name}</span>
+    <span class="shrink-0 text-xs text-faint">{row.count}</span>
+    {#if onFolderNewNote || onFolderNewFolder}
+      <button
+        type="button"
+        class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-subtle opacity-0 hover:bg-panel-muted hover:text-foreground group-hover:opacity-100 focus:opacity-100"
+        title="Ajouter dans {row.name}"
+        aria-label="Ajouter dans {row.name}"
+        aria-haspopup="menu"
+        aria-expanded={folderMenuPath === row.path}
+        onclick={(e) => {
+          e.stopPropagation();
+          folderMenuPath = folderMenuPath === row.path ? null : row.path;
+        }}
+      >
+        <Plus size={11} strokeWidth={2.5} aria-hidden="true" />
+      </button>
+    {/if}
+    {#if folderMenuPath === row.path && (onFolderNewNote || onFolderNewFolder)}
+      <div
+        class="absolute right-1 top-full z-50 mt-1 w-44 overflow-hidden rounded-md border border-border bg-panel shadow-lg"
+        role="menu"
+        aria-label="Créer dans {row.name}"
+        tabindex={-1}
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => {
+          if (e.key === 'Escape') folderMenuPath = null;
+        }}
+      >
+        <button
+          type="button"
+          role="menuitem"
+          class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-panel-muted"
+          onclick={() => {
+            folderMenuPath = null;
+            onFolderNewNote?.(row.path);
+          }}
+        >
+          <FileText size={13} strokeWidth={2} aria-hidden="true" />
+          Nouvelle note
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          class="flex w-full items-center gap-2 border-t border-border px-3 py-2 text-left text-sm hover:bg-panel-muted"
+          onclick={() => {
+            folderMenuPath = null;
+            onFolderNewFolder?.(row.path);
+          }}
+        >
+          <Folder size={13} strokeWidth={2} aria-hidden="true" />
+          Nouveau sous-dossier
+        </button>
+      </div>
+    {/if}
+  </div>
 {/snippet}
 
 <div class="flex h-full min-h-0 flex-col px-1">

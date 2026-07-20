@@ -136,8 +136,8 @@ func TestRemoveChip(t *testing.T) {
 
 func TestServicePin(t *testing.T) {
 	svc, _ := setupVault(t)
-	n1, _ := svc.CreateNote("Pinned", "")
-	n2, _ := svc.CreateNote("Other", "")
+	n1, _ := svc.CreateNote("", "Pinned", "")
+	n2, _ := svc.CreateNote("", "Other", "")
 
 	if err := svc.Pin(n1.RelativePath, true); err != nil {
 		t.Fatalf("Pin: %v", err)
@@ -164,12 +164,12 @@ func TestServicePin(t *testing.T) {
 
 func TestServiceListNotesFiltered(t *testing.T) {
 	svc, _ := setupVault(t)
-	a, _ := svc.CreateNote("Alpha", "")
+	a, _ := svc.CreateNote("", "Alpha", "")
 	a.Tags = []string{"projet", "important"}
 	if _, err := svc.SaveNote(a); err != nil {
 		t.Fatalf("SaveNote a: %v", err)
 	}
-	b, _ := svc.CreateNote("Beta", "")
+	b, _ := svc.CreateNote("", "Beta", "")
 	b.Tags = []string{"archive"}
 	if _, err := svc.SaveNote(b); err != nil {
 		t.Fatalf("SaveNote b: %v", err)
@@ -263,7 +263,7 @@ func TestServiceOpenDailyNoteSansAuto(t *testing.T) {
 func TestServiceListFolders(t *testing.T) {
 	svc, _ := setupVault(t)
 	for _, title := range []string{"A", "B", "C"} {
-		if _, err := svc.CreateNote(title, ""); err != nil {
+		if _, err := svc.CreateNote("", title, ""); err != nil {
 			t.Fatalf("CreateNote: %v", err)
 		}
 	}

@@ -52,14 +52,14 @@ func TestServiceSaveAssetMaxSize(t *testing.T) {
 func TestServiceGetBacklinks(t *testing.T) {
 	svc, _ := setupVault(t)
 	// Crée une note cible.
-	target, _ := svc.CreateNote("Projets Q3", "")
+	target, _ := svc.CreateNote("", "Projets Q3", "")
 	// Crée deux notes qui la mentionnent.
-	a, _ := svc.CreateNote("Suivi", "")
+	a, _ := svc.CreateNote("", "Suivi", "")
 	a.Content = "Voir [[Projets Q3]] pour la liste."
 	if _, err := svc.SaveNote(a); err != nil {
 		t.Fatalf("SaveNote a: %v", err)
 	}
-	b, _ := svc.CreateNote("Retro", "")
+	b, _ := svc.CreateNote("", "Retro", "")
 	b.Content = "Pas de lien ici."
 	if _, err := svc.SaveNote(b); err != nil {
 		t.Fatalf("SaveNote b: %v", err)
@@ -88,7 +88,7 @@ func TestServiceGetBacklinks(t *testing.T) {
 
 func TestServiceHistoryBasic(t *testing.T) {
 	svc, dir := setupVault(t)
-	note, _ := svc.CreateNote("Versionnée", "")
+	note, _ := svc.CreateNote("", "Versionnée", "")
 	for i := 0; i < 3; i++ {
 		note.Content = "v" + string(rune('1'+i))
 		if _, err := svc.SaveNote(note); err != nil {
@@ -145,7 +145,7 @@ func TestServiceHistoryRotation(t *testing.T) {
 	if err := svc.UpdateConfig(cfg); err != nil {
 		t.Fatalf("UpdateConfig: %v", err)
 	}
-	note, _ := svc.CreateNote("Tourne", "")
+	note, _ := svc.CreateNote("", "Tourne", "")
 	for i := 0; i < 5; i++ {
 		note.Content = "v" + string(rune('1'+i))
 		_, _ = svc.SaveNote(note)
@@ -159,7 +159,7 @@ func TestServiceHistoryRotation(t *testing.T) {
 
 func TestServiceDiffHistory(t *testing.T) {
 	svc, _ := setupVault(t)
-	note, _ := svc.CreateNote("Diff", "")
+	note, _ := svc.CreateNote("", "Diff", "")
 	note.Content = "ligne A\nligne B\nligne C\n"
 	v1, _ := svc.SaveNote(note)
 	// Modifie et sauve deux fois pour obtenir deux snapshots.
@@ -186,7 +186,7 @@ func TestServiceDiffHistory(t *testing.T) {
 
 func TestServiceReadHistoryVersion(t *testing.T) {
 	svc, _ := setupVault(t)
-	note, _ := svc.CreateNote("Read", "")
+	note, _ := svc.CreateNote("", "Read", "")
 	note.Content = "version 1"
 	_, _ = svc.SaveNote(note)
 	note.Content = "version 2"

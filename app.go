@@ -501,7 +501,7 @@ func (a *App) ListTemplates() []vault.Template {
 	return s.service.ListTemplates()
 }
 func (a *App) CreateNoteFromTemplate(title, templateID string) (domain.Note, error) {
-	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.CreateNote(title, templateID) })
+	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.CreateNote("", title, templateID) })
 }
 func (a *App) MoveNote(oldPath, newPath string) (domain.Note, error) {
 	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.MoveNote(oldPath, newPath) })
@@ -570,8 +570,15 @@ func (a *App) AssetURL(path string) (string, error) {
 func (a *App) OpenNote(path string) (domain.Note, error) {
 	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.OpenNote(path) })
 }
-func (a *App) CreateNote(title, key string) (domain.Note, error) {
-	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.CreateNote(title, key) })
+func (a *App) CreateNote(parentRelPath, title, key string) (domain.Note, error) {
+	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.CreateNote(parentRelPath, title, key) })
+}
+
+// CreateFolder crée un sous-dossier vide dans le coffre. parentRelPath est
+// un chemin relatif sous notes/ (ou vide pour la racine). name est nettoyé
+// côté backend (slug) et doit être non vide.
+func (a *App) CreateFolder(parentRelPath, name string) (domain.Note, error) {
+	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.CreateFolder(parentRelPath, name) })
 }
 func (a *App) SaveNote(note domain.Note) (domain.Note, error) {
 	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.SaveNote(note) })

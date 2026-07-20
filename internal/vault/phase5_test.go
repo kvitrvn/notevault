@@ -36,7 +36,7 @@ func TestThemeLoaderCustom(t *testing.T) {
 	raw := map[string]interface{}{
 		"name": "Sépia",
 		"vars": map[string]string{
-			"--color-accent":   "#c8a96a",
+			"--color-accent":     "#c8a96a",
 			"--color-foreground": "#3a2e1f",
 		},
 	}
@@ -225,7 +225,7 @@ func TestServiceListThemesIncludesBuiltins(t *testing.T) {
 
 func TestExportNotesBasic(t *testing.T) {
 	svc, dir := setupVault(t)
-	note, err := svc.CreateNote("Exportable", "meeting")
+	note, err := svc.CreateNote("", "Exportable", "meeting")
 	if err != nil {
 		t.Fatalf("CreateNote: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestExportNotesBasic(t *testing.T) {
 
 func TestExportNotesWithAssets(t *testing.T) {
 	svc, dir := setupVault(t)
-	note, err := svc.CreateNote("Avec image", "")
+	note, err := svc.CreateNote("", "Avec image", "")
 	if err != nil {
 		t.Fatalf("CreateNote: %v", err)
 	}
@@ -318,8 +318,8 @@ func TestExportRejectsForgedAssetPath(t *testing.T) {
 	defer os.Remove(bait)
 
 	cases := []struct {
-		name    string
-		forged  string // chemin d'asset tel qu'il apparaîtrait dans le Markdown
+		name   string
+		forged string // chemin d'asset tel qu'il apparaîtrait dans le Markdown
 	}{
 		{
 			name:   "traversal parent",
@@ -337,7 +337,7 @@ func TestExportRejectsForgedAssetPath(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			note, err := svc.CreateNote("Exportable", "")
+			note, err := svc.CreateNote("", "Exportable", "")
 			if err != nil {
 				t.Fatalf("CreateNote: %v", err)
 			}
@@ -373,7 +373,7 @@ func TestExportRejectsForgedAssetPath(t *testing.T) {
 
 func TestExportNotesByTitle(t *testing.T) {
 	svc, dir := setupVault(t)
-	note, _ := svc.CreateNote("Titre exact", "")
+	note, _ := svc.CreateNote("", "Titre exact", "")
 	dest := filepath.Join(dir, "title.zip")
 	if err := svc.ExportNotes([]string{"Titre exact"}, dest); err != nil {
 		t.Fatalf("ExportNotes: %v", err)
@@ -459,7 +459,7 @@ func TestStatsWithNotes(t *testing.T) {
 		{"gamma", "lorem seul", []string{"y"}},
 	}
 	for _, n := range notes {
-		created, err := svc.CreateNote(n.title, "")
+		created, err := svc.CreateNote("", n.title, "")
 		if err != nil {
 			t.Fatalf("CreateNote: %v", err)
 		}
@@ -504,7 +504,7 @@ func TestStatsWithNotes(t *testing.T) {
 func TestStatsBucketsAlignedOnWindow(t *testing.T) {
 	svc, _ := setupVault(t)
 	// Crée une note aujourd'hui.
-	note, _ := svc.CreateNote("Today", "")
+	note, _ := svc.CreateNote("", "Today", "")
 	if _, err := svc.SaveNote(note); err != nil {
 		t.Fatalf("SaveNote: %v", err)
 	}
@@ -697,7 +697,7 @@ func TestServiceOnboardingFlag(t *testing.T) {
 func TestServiceSnapshotOffersRecoveryBeforeOnboarding(t *testing.T) {
 	svc, _ := setupVault(t)
 	// Crée une vraie note sur disque pour que fileModified réussisse.
-	note, _ := svc.CreateNote("Test", "")
+	note, _ := svc.CreateNote("", "Test", "")
 	if err := svc.SetDirtyBuffer(note.RelativePath, "contenu en attente", time.Time{}); err != nil {
 		t.Fatalf("SetDirtyBuffer: %v", err)
 	}

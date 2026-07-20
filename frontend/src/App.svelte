@@ -16,6 +16,8 @@
   import CopyPlus from '@lucide/svelte/icons/copy-plus';
   import ExternalLink from '@lucide/svelte/icons/external-link';
   import FolderInput from '@lucide/svelte/icons/folder-input';
+import Folder from '@lucide/svelte/icons/folder';
+import FileText from '@lucide/svelte/icons/file-text';
   import GripVertical from '@lucide/svelte/icons/grip-vertical';
   import History from '@lucide/svelte/icons/history';
   import Cloud from '@lucide/svelte/icons/cloud';
@@ -53,6 +55,7 @@
   import { isLocalAssetPath, precomputeAssetURLs as resolveAssetURLs } from './lib/assets';
   import { createDebouncedTask } from './lib/debounce';
   import { shouldShowVaultUnlock } from './lib/vault-manager';
+  import { clickOutside } from './lib/actions';
   import { domain, vault } from '../wailsjs/go/models';
 
   import {
@@ -60,6 +63,7 @@
     ClearDirtyBuffer,
     CreateVault,
     CreateNote,
+    CreateFolder,
     DeleteNote,
     DuplicateNote,
     EnsureDailyNote,
@@ -172,6 +176,16 @@
 
   // Template picker (Cmd+N)
   let templatePickerOpen = $state(false);
+  // Dossier parent utilisé par le prochain CreateNote déclenché via le
+  // picker (vide = notes/inbox par défaut côté backend).
+  let pendingNoteParent = $state('');
+  // Popover du bouton "+" global : note rapide / nouveau dossier.
+  let createMenuOpen = $state(false);
+  // Popover du bouton "+" d'une ligne de dossier de l'arbre.
+  let folderMenuPath = $state<string | null>(null);
+  // Dialog inline pour nommer un nouveau dossier.
+  let folderPrompt = $state<{ parent: string; open: boolean }>({ parent: '', open: false });
+  let folderDraft = $state('');
 
   // Move dialog
   let moveDialogOpen = $state(false);
@@ -507,7 +521,7 @@
     if (!(await flushSave())) return;
     error = '';
     try {
-      const note = await CreateNote(title, templateId);
+      const note = await CreateNote(pendingNoteParent, title, templateId);
       const content = await precomputeAssetURLs(note.content);
       selected = cloneNote(note, content);
       lastSavedSnapshot = snapshot(selected!);
@@ -519,6 +533,47 @@
     } catch (err) {
       error = String(err);
     }
+  }
+
+  // Ouvre le picker de templates avec un dossier parent pré-sélectionné.
+  // Si parentRelPath est vide, le backend range la note dans notes/inbox/.
+  function openNewNoteAt(parentRelPath: string): void {
+    pendingNoteParent = parentRelPath;
+    createMenuOpen = false;
+    folderMenuPath = null;
+    openTemplatePicker();
+  }
+
+  function openNewFolderPrompt(parentRelPath: string): void {
+    folderPrompt = { parent: parentRelPath, open: true };
+    folderDraft = '';
+    createMenuOpen = false;
+    folderMenuPath = null;
+    queueMicrotask(() => {
+      const input = document.getElementById('folder-name-input') as HTMLInputElement | null;
+      input?.focus();
+    });
+  }
+
+  async function confirmNewFolder(): Promise<void> {
+    const name = folderDraft.trim();
+    if (!name) return;
+    const parent = folderPrompt.parent;
+    folderPrompt = { parent: '', open: false };
+    folderDraft = '';
+    try {
+      await CreateFolder(parent, name);
+      invalidateFolders();
+      await refresh();
+      showToast('info', `Dossier « ${name} » créé.`);
+    } catch (err) {
+      showToast('error', `Échec : ${err}`);
+    }
+  }
+
+  function cancelNewFolder(): void {
+    folderPrompt = { parent: '', open: false };
+    folderDraft = '';
   }
 
   async function openTodayNote(): Promise<void> {
@@ -1130,8 +1185,20 @@
         contextMenu = null;
         return;
       }
+      if (folderPrompt.open) {
+        cancelNewFolder();
+        return;
+      }
       if (quickSwitcherOpen) {
         quickSwitcherOpen = false;
+        return;
+      }
+      if (createMenuOpen) {
+        createMenuOpen = false;
+        return;
+      }
+      if (vaultMenuOpen) {
+        vaultMenuOpen = false;
         return;
       }
     }
@@ -1266,7 +1333,7 @@
   async function onWikiCreate(target: string): Promise<void> {
     if (!(await flushSave())) return;
     try {
-      const note = await CreateNote(target, 'blank');
+      const note = await CreateNote('', target, 'blank');
       showToast('info', `Note « ${target} » créée.`);
       invalidateFolders();
       await refresh();
@@ -1761,19 +1828,38 @@
       >
         <Search size={15} strokeWidth={2} aria-hidden="true" />
       </button>
-      <button
-        class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-panel-muted text-subtle hover:bg-panel hover:text-foreground"
-        type="button"
-        title="Nouvelle note (Ctrl+N)"
-        aria-label="Nouvelle note"
-        onclick={() => openTemplatePicker()}
-      >
-        <Plus size={15} strokeWidth={2} aria-hidden="true" />
-      </button>
+      <div class="relative" use:clickOutside={{ handler: () => (createMenuOpen = false), enabled: createMenuOpen }}>
+        <button
+          class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-panel-muted text-subtle hover:bg-panel hover:text-foreground"
+          type="button"
+          title="Nouvelle note (Ctrl+N)"
+          aria-label="Nouvelle note ou dossier"
+          aria-haspopup="menu"
+          aria-expanded={createMenuOpen}
+          onclick={() => (createMenuOpen = !createMenuOpen)}
+        >
+          <Plus size={15} strokeWidth={2} aria-hidden="true" />
+        </button>
+        {#if createMenuOpen}
+          <div class="absolute left-1/2 top-full z-40 mt-1 w-48 -translate-x-1/2 overflow-hidden rounded-md border border-border bg-panel shadow-lg lg:left-full lg:top-0 lg:ml-2 lg:translate-x-0" role="menu" aria-label="Créer">
+            <button type="button" role="menuitem" class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-panel-muted" onclick={() => openNewNoteAt('')}>
+              <FileText size={14} strokeWidth={2} aria-hidden="true" />
+              Nouvelle note
+            </button>
+            <button type="button" role="menuitem" class="flex w-full items-center gap-2 border-t border-border px-3 py-2 text-left text-sm hover:bg-panel-muted" onclick={() => openNewFolderPrompt('')}>
+              <Folder size={14} strokeWidth={2} aria-hidden="true" />
+              Nouveau dossier
+            </button>
+          </div>
+        {/if}
+      </div>
     </div>
     {:else}
     <div class="relative flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
-      <div class="min-w-0 flex-1">
+<div
+        class="relative min-w-0 flex-1"
+        use:clickOutside={{ handler: () => (vaultMenuOpen = false), enabled: vaultMenuOpen }}
+      >
         <button
           type="button"
           class="flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left hover:bg-panel-muted"
@@ -1893,15 +1979,31 @@
           >
             <CalendarDays size={13} strokeWidth={2} aria-hidden="true" />
           </button>
-          <button
-            class="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-panel text-subtle hover:bg-panel-muted hover:text-foreground"
-            type="button"
-            title="Nouvelle note (Ctrl+N)"
-            aria-label="Nouvelle note"
-            onclick={() => openTemplatePicker()}
-          >
-            <Plus size={13} strokeWidth={2} aria-hidden="true" />
-          </button>
+          <div class="relative" use:clickOutside={{ handler: () => (createMenuOpen = false), enabled: createMenuOpen }}>
+            <button
+              class="inline-flex h-7 w-7 items-center justify-center rounded-md border border-border bg-panel text-subtle hover:bg-panel-muted hover:text-foreground"
+              type="button"
+              title="Nouvelle note ou dossier (Ctrl+N)"
+              aria-label="Nouvelle note ou dossier"
+              aria-haspopup="menu"
+              aria-expanded={createMenuOpen}
+              onclick={() => (createMenuOpen = !createMenuOpen)}
+            >
+              <Plus size={13} strokeWidth={2} aria-hidden="true" />
+            </button>
+            {#if createMenuOpen}
+              <div class="absolute right-0 top-9 z-40 w-48 overflow-hidden rounded-md border border-border bg-panel shadow-lg" role="menu" aria-label="Créer">
+                <button type="button" role="menuitem" class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-panel-muted" onclick={() => openNewNoteAt('')}>
+                  <FileText size={13} strokeWidth={2} aria-hidden="true" />
+                  Nouvelle note
+                </button>
+                <button type="button" role="menuitem" class="flex w-full items-center gap-2 border-t border-border px-3 py-2 text-left text-sm hover:bg-panel-muted" onclick={() => openNewFolderPrompt('')}>
+                  <Folder size={13} strokeWidth={2} aria-hidden="true" />
+                  Nouveau dossier
+                </button>
+              </div>
+            {/if}
+          </div>
         </div>
       </div>
 
@@ -1970,6 +2072,8 @@
               onFolderDragLeave={onFolderDragLeave}
               onFolderDrop={onFolderDrop}
               onContextMenu={openContextMenu}
+              onFolderNewNote={(folder) => openNewNoteAt('notes/' + folder)}
+              onFolderNewFolder={(folder) => openNewFolderPrompt('notes/' + folder)}
               dragOverFolder={dragOverFolder}
               onTogglePin={(p) => {
                 if (selected?.relativePath === p) {
@@ -2366,6 +2470,68 @@
   onPick={createNoteFromTemplate}
   onClose={() => (templatePickerOpen = false)}
 />
+
+{#if folderPrompt.open}
+  <div
+    class="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-4"
+    role="dialog"
+    aria-modal="true"
+    aria-label="Nouveau dossier"
+  >
+    <button
+      type="button"
+      class="absolute inset-0 cursor-default"
+      aria-label="Annuler la création"
+      onclick={cancelNewFolder}
+    ></button>
+    <div
+      class="relative w-full max-w-sm rounded-lg border border-border bg-panel p-4 shadow-lg"
+      role="document"
+    >
+      <h2 class="text-sm font-semibold text-foreground">Nouveau dossier</h2>
+      <p class="mt-1 text-xs text-subtle">
+        {#if folderPrompt.parent}
+          Dans <code class="rounded bg-panel-muted px-1 py-0.5 text-xs">{folderPrompt.parent}</code>
+        {:else}
+          À la racine de notes/
+        {/if}
+      </p>
+      <input
+        id="folder-name-input"
+        type="text"
+        bind:value={folderDraft}
+        onkeydown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            void confirmNewFolder();
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            cancelNewFolder();
+          }
+        }}
+        placeholder="Nom du dossier"
+        class="mt-3 h-9 w-full rounded-md border border-border bg-background px-2 text-sm text-foreground focus:border-accent focus:outline-none"
+      />
+      <div class="mt-3 flex justify-end gap-2">
+        <button
+          type="button"
+          class="h-8 rounded-md border border-border px-3 text-xs text-subtle hover:bg-panel-muted hover:text-foreground"
+          onclick={cancelNewFolder}
+        >
+          Annuler
+        </button>
+        <button
+          type="button"
+          class="h-8 rounded-md border border-accent bg-accent px-3 text-xs font-medium text-accent-foreground hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={folderDraft.trim().length === 0}
+          onclick={() => void confirmNewFolder()}
+        >
+          Créer
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <MoveDialog
   open={moveDialogOpen}

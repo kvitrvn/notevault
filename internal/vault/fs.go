@@ -265,6 +265,64 @@ func ensureDirs(root string) error {
 	return nil
 }
 
+// scanNotesFolders retourne la liste des chemins relatifs (sans le préfixe
+// notes/) de tous les sous-dossiers présents sous notes/, jusqu'à la
+// profondeur maxDepth. Utilisé pour fusionner les dossiers dérivés des
+// notes indexées avec les dossiers vides créés hors app. Les entrées
+// cachées (préfixe ".") sont ignorées pour rester compatible avec
+// isIgnored du watcher.
+func scanNotesFolders(root string, maxDepth int) ([]string, error) {
+	notesRoot := filepath.Join(root, "notes")
+	info, err := os.Stat(notesRoot)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, nil
+	}
+	var out []string
+	var walk func(dir string, depth int) error
+	walk = func(dir string, depth int) error {
+		if depth >= maxDepth {
+			return nil
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
+			if !entry.IsDir() {
+				continue
+			}
+			full := filepath.Join(dir, name)
+			rel, err := filepath.Rel(notesRoot, full)
+			if err != nil {
+				continue
+			}
+			out = append(out, filepath.ToSlash(rel))
+			if err := walk(full, depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := walk(notesRoot, 0); err != nil {
+		return nil, err
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 // openInOS ouvre une cible (fichier ou dossier) dans le gestionnaire
 // de fichiers natif. Sur Linux : xdg-open. Sur macOS : open. Sur Windows : explorer.
 func openInOS(target string) error {

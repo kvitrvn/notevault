@@ -48,7 +48,12 @@
     aria-modal="true"
     aria-labelledby="recovery-title"
   >
-    <div class="absolute inset-0 bg-black/60" aria-hidden="true"></div>
+    <button
+      type="button"
+      class="absolute inset-0 bg-black/60"
+      aria-label="Fermer la récupération"
+      onclick={onClose}
+    ></button>
     <div
       class="relative w-full max-w-md overflow-hidden rounded-xl border border-border bg-panel shadow-2xl"
     >

@@ -10,7 +10,7 @@ import (
 
 func TestServiceMoveNote(t *testing.T) {
 	svc, dir := setupVault(t)
-	note, err := svc.CreateNote("Original", "")
+	note, err := svc.CreateNote("", "Original", "")
 	if err != nil {
 		t.Fatalf("CreateNote: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestServiceMoveNote(t *testing.T) {
 
 func TestServiceMoveNoteInvalid(t *testing.T) {
 	svc, _ := setupVault(t)
-	note, _ := svc.CreateNote("Hello", "")
+	note, _ := svc.CreateNote("", "Hello", "")
 	cases := []struct {
 		name, dst string
 		wantErr   string
@@ -87,8 +87,8 @@ func TestServiceMoveNoteMissingSource(t *testing.T) {
 
 func TestServiceMoveNoteCollision(t *testing.T) {
 	svc, _ := setupVault(t)
-	a, _ := svc.CreateNote("A", "")
-	b, _ := svc.CreateNote("B", "")
+	a, _ := svc.CreateNote("", "A", "")
+	b, _ := svc.CreateNote("", "B", "")
 	if _, err := svc.MoveNote(a.RelativePath, b.RelativePath); err == nil {
 		t.Fatal("aurait dû échouer (collision)")
 	}
@@ -96,7 +96,7 @@ func TestServiceMoveNoteCollision(t *testing.T) {
 
 func TestServiceDuplicateNote(t *testing.T) {
 	svc, _ := setupVault(t)
-	original, _ := svc.CreateNote("Original", "")
+	original, _ := svc.CreateNote("", "Original", "")
 	original.Tags = []string{"projet", "important"}
 	original, _ = svc.SaveNote(original)
 
@@ -125,7 +125,7 @@ func TestServiceDuplicateNote(t *testing.T) {
 
 func TestServiceRenameTitle(t *testing.T) {
 	svc, _ := setupVault(t)
-	note, _ := svc.CreateNote("Original", "")
+	note, _ := svc.CreateNote("", "Original", "")
 	renamed, err := svc.RenameTitle(note.RelativePath, "Nouveau titre")
 	if err != nil {
 		t.Fatalf("RenameTitle: %v", err)
@@ -204,7 +204,7 @@ func TestServiceCreateNoteFromUserTemplate(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	svc.templates = NewTemplateLoader(dir)
-	note, err := svc.CreateNote("Mon bug", "bug")
+	note, err := svc.CreateNote("", "Mon bug", "bug")
 	if err != nil {
 		t.Fatalf("CreateNote: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestServiceCreateNoteFromUserTemplate(t *testing.T) {
 
 func TestServiceOpenInExplorer(t *testing.T) {
 	svc, _ := setupVault(t)
-	note, _ := svc.CreateNote("A", "")
+	note, _ := svc.CreateNote("", "A", "")
 	// On ne peut pas vraiment tester l'ouverture du gestionnaire (pas de
 	// display), mais on vérifie que l'appel ne panique pas et ne corrompt
 	// pas le fichier.

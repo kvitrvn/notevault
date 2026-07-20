@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -357,12 +358,37 @@ func (s *Service) ListPinned() ([]domain.NoteSummary, error) {
 	return out, nil
 }
 
-// ListFolders retourne les dossiers connus du coffre pour la vue arbre.
+// ListFolders retourne les dossiers visibles dans la vue arborescente :
+// union des dossiers dérivés des notes indexées et des dossiers vides
+// présents physiquement sous notes/ (créés via l'app ou un explorateur).
+// Les dossiers sont dédupliqués et triés par chemin.
 func (s *Service) ListFolders() ([]FolderInfo, error) {
 	if err := s.requireUnlocked(); err != nil {
 		return nil, err
 	}
-	return s.index.ListFolders()
+	indexed, err := s.index.ListFolders()
+	if err != nil {
+		return nil, fmt.Errorf("lister les dossiers indexés : %w", err)
+	}
+	byPath := make(map[string]int, len(indexed))
+	for _, f := range indexed {
+		byPath[f.Path] = f.Count
+	}
+	onDisk, err := scanNotesFolders(s.root, 8)
+	if err != nil {
+		return nil, fmt.Errorf("lister les dossiers présents : %w", err)
+	}
+	for _, p := range onDisk {
+		if _, ok := byPath[p]; !ok {
+			byPath[p] = 0
+		}
+	}
+	out := make([]FolderInfo, 0, len(byPath))
+	for path, count := range byPath {
+		out = append(out, FolderInfo{Path: path, Name: filepath.Base(path), Count: count})
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].Path < out[b].Path })
+	return out, nil
 }
 
 // Pin épingle ou désépingle une note.
@@ -408,15 +434,24 @@ func (s *Service) OpenNote(relativePath string) (domain.Note, error) {
 	return s.readAbsolute(path)
 }
 
-func (s *Service) CreateNote(title string, templateKey string) (domain.Note, error) {
+// CreateNote crée une nouvelle note dans le dossier indiqué. parentRelPath
+// est un chemin relatif (par exemple "inbox", "projets" ou "projets/web"),
+// ou une chaîne vide pour utiliser le dossier par défaut (notes/inbox/).
+// Le nom de fichier reste au format YYYYMMDD-HHMMSS-slug.md pour rester
+// cohérent avec le reste de l'app.
+func (s *Service) CreateNote(parentRelPath, title, templateKey string) (domain.Note, error) {
 	title = strings.TrimSpace(title)
 	if title == "" {
 		title = "Nouvelle note"
 	}
+	parent, err := s.resolveNoteParent(parentRelPath, "notes/inbox")
+	if err != nil {
+		return domain.Note{}, err
+	}
 
 	now := nowUTC()
 	filename := fmt.Sprintf("%s-%s.md", now.Format("20060102-150405"), slug(title))
-	relativePath := filepath.ToSlash(filepath.Join("notes", "inbox", filename))
+	relativePath := filepath.ToSlash(filepath.Join(parent, filename))
 	content := s.resolveTemplateBody(templateKey)
 
 	note := domain.Note{
@@ -428,6 +463,71 @@ func (s *Service) CreateNote(title string, templateKey string) (domain.Note, err
 		Tags:         []string{},
 	}
 	return s.SaveNote(note)
+}
+
+// CreateFolder crée un nouveau dossier vide sous notes/. parentRelPath est
+// un chemin relatif (par exemple "projets" ou "projets/web"), ou une chaîne
+// vide pour la racine notes/. name est slugifié pour garantir un nom de
+// fichier/dossier sûr et stable. Retourne ErrFolderExists si le dossier
+// est déjà présent.
+func (s *Service) CreateFolder(parentRelPath, name string) (domain.Note, error) {
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	if err := s.requireUnlocked(); err != nil {
+		return domain.Note{}, err
+	}
+	parent, err := s.resolveNoteParent(parentRelPath, "notes")
+	if err != nil {
+		return domain.Note{}, err
+	}
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" || strings.ContainsAny(trimmed, "/\\") || strings.Contains(trimmed, "..") {
+		return domain.Note{}, errors.New("nom de dossier invalide")
+	}
+	folderSlug := slug(trimmed)
+	// slug renvoie "note" en fallback pour les chaînes vides après
+	// nettoyage. On le traite comme invalide quand le nom d'origine est
+	// non vide mais ne contient aucun caractère exploitable (ex: "!!!").
+	if folderSlug == "" || (folderSlug == "note" && !strings.EqualFold(trimmed, "note")) {
+		return domain.Note{}, errors.New("nom de dossier invalide")
+	}
+	relFolder := filepath.ToSlash(filepath.Join(parent, folderSlug))
+	absFolder := filepath.Join(s.root, relFolder)
+	if info, err := os.Stat(absFolder); err == nil {
+		if info.IsDir() {
+			return domain.Note{}, ErrFolderExists
+		}
+		return domain.Note{}, errors.New("un fichier porte déjà ce nom")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return domain.Note{}, fmt.Errorf("vérifier la destination : %w", err)
+	}
+	if err := os.MkdirAll(absFolder, 0o755); err != nil {
+		return domain.Note{}, fmt.Errorf("créer le dossier : %w", err)
+	}
+	return domain.Note{}, nil
+}
+
+// resolveNoteParent normalise un chemin parent fourni par l'API. Une chaîne
+// vide est résolue vers defaultParent. Tout chemin fourni doit commencer
+// par "notes/" (ou être vide) : on refuse ce qui pointe hors de la zone
+// des notes (assets/, templates/, etc.) pour respecter la règle "tout
+// reste sous notes/". Le résultat est un chemin prêt à être combiné
+// avec un nom de fichier via filepath.Join.
+func (s *Service) resolveNoteParent(parentRelPath, defaultParent string) (string, error) {
+	if parentRelPath == "" {
+		return defaultParent, nil
+	}
+	cleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(parentRelPath)))
+	if cleaned == "." || cleaned == "/" {
+		return defaultParent, nil
+	}
+	if filepath.IsAbs(cleaned) || strings.HasPrefix(cleaned, "..") {
+		return "", errors.New("chemin de dossier invalide")
+	}
+	if !strings.HasPrefix(cleaned, "notes/") {
+		return "", errors.New("un dossier doit être rangé sous notes/")
+	}
+	return cleaned, nil
 }
 
 // resolveTemplateBody retourne le contenu d'un template : d'abord le

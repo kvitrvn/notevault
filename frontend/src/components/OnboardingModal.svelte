@@ -89,7 +89,13 @@
 
 {#if open}
   <div class="fixed inset-0 z-[60] grid place-items-center px-4" role="dialog" aria-modal="true" aria-labelledby="guide-title">
-    <div class="absolute inset-0 bg-black/65" aria-hidden="true"></div>
+    <button
+      type="button"
+      class="absolute inset-0 bg-black/65"
+      aria-label="Fermer le guide"
+      onclick={() => void finish()}
+      disabled={busy}
+    ></button>
     <div bind:this={dialogEl} class="relative flex max-h-[calc(100vh-2rem)] w-full max-w-lg flex-col overflow-hidden rounded-lg border border-border bg-panel shadow-lg">
       <header class="flex items-center gap-3 border-b border-border bg-background px-4 py-3">
         <h2 id="guide-title" class="text-base font-semibold text-foreground">Guide NoteVault</h2>

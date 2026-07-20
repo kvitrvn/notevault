@@ -186,7 +186,7 @@ func TestNewAppMigratesUsedLegacyVaultAndIgnoresEmptyTree(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tc.used {
-				if _, err := service.CreateNote("Importée", ""); err != nil {
+				if _, err := service.CreateNote("", "Importée", ""); err != nil {
 					t.Fatal(err)
 				}
 			}
