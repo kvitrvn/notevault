@@ -1,7 +1,10 @@
 package vault
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -53,6 +56,32 @@ func BenchmarkBuildIndex_10k(b *testing.B) {
 				b.Fatal(err)
 			}
 		}
+	}
+}
+
+func BenchmarkIndexNow_2k(b *testing.B) {
+	dir := b.TempDir()
+	notes := benchmarkNotes(2_000)
+	for _, note := range notes {
+		path := filepath.Join(dir, filepath.FromSlash(note.RelativePath))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			b.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(serialize(note)), 0o644); err != nil {
+			b.Fatalf("write note: %v", err)
+		}
+	}
+
+	b.ResetTimer()
+	for b.Loop() {
+		svc, err := New(Options{Root: dir, StartWatcher: false})
+		if err != nil {
+			b.Fatalf("New: %v", err)
+		}
+		if err := svc.IndexNow(context.Background(), nil); err != nil {
+			b.Fatalf("IndexNow: %v", err)
+		}
+		_ = svc.Close()
 	}
 }
 

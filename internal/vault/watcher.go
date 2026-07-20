@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -245,30 +246,99 @@ func indexFiles(ctx context.Context, root string, idx Index, files []string, rep
 	if reporter != nil {
 		reporter.OnProgress("index", 0, total)
 	}
-	for i, path := range files {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+	if total == 0 {
+		return nil
+	}
+
+	// Les lectures (I/O disque + decrypt éventuel) sont parallélisées via
+	// un pool borné : sur les gros coffres, cela évite que IndexNow soit
+	// dominé par des lectures séquentielles. Les Upsert/Delete restent
+	// sérialisés par le mutex interne de l'index pour ne pas dégrader les
+	// requêtes concurrentes (audit perf 2.3).
+	workers := indexWorkerCount(total)
+	type readResult struct {
+		path string
+		note domain.Note
+		err  error
+	}
+	jobs := make(chan string, workers)
+	results := make(chan readResult, workers)
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for path := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				note, err := reader(path)
+				select {
+				case <-ctx.Done():
+					return
+				case results <- readResult{path: path, note: note, err: err}:
+				}
+			}
+		}()
+	}
+
+	go func() {
+		defer close(jobs)
+		for _, path := range files {
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- path:
+			}
 		}
-		note, err := reader(path)
-		if err != nil {
-			rel, _ := filepath.Rel(root, path)
+	}()
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	processed := 0
+	for r := range results {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if r.err != nil {
+			rel, _ := filepath.Rel(root, r.path)
 			rel = filepath.ToSlash(rel)
 			if deleteErr := idx.Delete(rel); deleteErr != nil && !errors.Is(deleteErr, ErrNotFound) {
 				return deleteErr
 			}
-			continue
+		} else {
+			if err := idx.Upsert(r.note); err != nil {
+				return fmt.Errorf("indexer %s : %w", r.path, err)
+			}
 		}
-		if err := idx.Upsert(note); err != nil {
-			return fmt.Errorf("indexer %s : %w", path, err)
-		}
-		if reporter != nil && (i%100 == 0 || i == total-1) {
-			reporter.OnProgress("index", i+1, total)
+		processed++
+		if reporter != nil && (processed%100 == 0 || processed == total) {
+			reporter.OnProgress("index", processed, total)
 		}
 	}
 	if reporter != nil {
 		reporter.OnProgress("index", total, total)
 	}
 	return nil
+}
+
+// indexWorkerCount dimensionne le pool de lecteurs. On borne à 8 pour
+// éviter de saturer le disque sur les machines multi-cœurs ; le minimum
+// à 2 évite la régression sur les contextes mono-thread (tests, sandbox).
+func indexWorkerCount(total int) int {
+	if total < 2 {
+		return 1
+	}
+	n := runtime.NumCPU()
+	if n < 2 {
+		n = 2
+	}
+	if n > 8 {
+		n = 8
+	}
+	return n
 }

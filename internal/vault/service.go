@@ -134,7 +134,9 @@ func New(opts Options) (*Service, error) {
 }
 
 // NewDefaultService crée le service avec les options par défaut.
-// Lance l'indexation initiale en arrière-plan puis le watcher.
+// L'indexation initiale n'est PAS lancée ici : elle reste à la charge de
+// l'appelant via IndexNow (synchrone, parallélisé en lecture). Le watcher
+// est démarré pour capter les modifications ultérieures.
 // Si AutoDailyNote est activé, crée la note du jour si absente et
 // retourne son chemin via BootstrapDailyNote().
 func NewDefaultService() (*Service, error) {

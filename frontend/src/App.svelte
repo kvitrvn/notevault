@@ -51,6 +51,7 @@
   import ChatPanel from './components/ChatPanel.svelte';
   import type { SaveState } from './components/SaveIndicator.svelte';
   import { isLocalAssetPath, precomputeAssetURLs as resolveAssetURLs } from './lib/assets';
+  import { createDebouncedTask } from './lib/debounce';
   import { shouldShowVaultUnlock } from './lib/vault-manager';
   import { domain, vault } from '../wailsjs/go/models';
 
@@ -116,6 +117,7 @@
   };
 
   const AUTO_SAVE_DEBOUNCE_MS = 1500;
+  const FILTER_REFRESH_DEBOUNCE_MS = 180;
 
   let notes: NoteSummary[] = $state([]);
   let chatNotes: NoteSummary[] = $state([]);
@@ -256,6 +258,9 @@
   const isDev = Boolean((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV);
   let refreshSeq = 0;
   let perfSeq = 0;
+  const pendingFilterRefresh = createDebouncedTask(FILTER_REFRESH_DEBOUNCE_MS, () => {
+    void refresh();
+  });
 
   function startPerf(label: string): string {
     if (!isDev) return '';
@@ -1053,12 +1058,16 @@
     return { chips, fq };
   }
 
-  function onFilterChange(value: string): void {
+  function onFilterChange(value: string, options: { immediate?: boolean } = {}): void {
     activeFilter = value;
     const parsed = parseFilter(value);
     activeChips = parsed.chips;
     parsedFilter = parsed.fq;
-    void refresh();
+    if (options.immediate) {
+      pendingFilterRefresh.flush();
+    } else {
+      pendingFilterRefresh.schedule();
+    }
   }
 
   function onRemoveChip(kind: string, text: string): void {
@@ -1075,7 +1084,7 @@
   }
 
   function onClearFilter(): void {
-    onFilterChange('');
+    onFilterChange('', { immediate: true });
   }
 
   // --- Keyboard navigation -------------------------------------------------
@@ -1228,7 +1237,7 @@
 
   function pickTag(tag: string): void {
     tagsViewOpen = false;
-    onFilterChange(`tag:${tag}`);
+    onFilterChange(`tag:${tag}`, { immediate: true });
   }
 
   // --- Wiki-links ----------------------------------------------------------
@@ -1384,6 +1393,7 @@
 
   function resetVaultState(): void {
     refreshSeq += 1;
+    pendingFilterRefresh.cancel();
     clearSaveTimers();
     notes = [];
     chatNotes = [];
@@ -1638,7 +1648,7 @@
 
   function onStatsPickTag(tag: string): void {
     statsOpen = false;
-    onFilterChange(`tag:${tag}`);
+    onFilterChange(`tag:${tag}`, { immediate: true });
   }
 
   async function openChat(): Promise<void> {
