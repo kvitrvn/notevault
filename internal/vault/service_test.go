@@ -274,6 +274,72 @@ func TestServiceRestoreConflict(t *testing.T) {
 	}
 }
 
+func TestServiceRestoreRejectsForgedMeta(t *testing.T) {
+	svc, dir := setupVault(t)
+	note, err := svc.CreateNote("Voyage", "")
+	if err != nil {
+		t.Fatalf("CreateNote: %v", err)
+	}
+	if err := svc.DeleteNote(note.RelativePath); err != nil {
+		t.Fatalf("DeleteNote: %v", err)
+	}
+	trash, err := svc.ListTrash()
+	if err != nil || len(trash) != 1 {
+		t.Fatalf("ListTrash: %v / %d", err, len(trash))
+	}
+	metaPath := trash[0].TrashPath + ".meta"
+
+	cases := []struct {
+		name   string
+		forged string
+	}{
+		{
+			name:   "traversal",
+			forged: "../../../tmp/notevault-evil.md",
+		},
+		{
+			name:   "absolute",
+			forged: "/tmp/notevault-evil.md",
+		},
+		{
+			name:   "wrong extension",
+			forged: "notes/fugitif.txt",
+		},
+		{
+			name:   "outside notes",
+			forged: "assets/notes/fugitif.md",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := filepath.Dir(dir)
+			bait := filepath.Join(parent, "notevault-evil-"+tc.name+".md")
+			defer os.Remove(bait)
+
+			meta := "original: " + tc.forged + "\ntrashed_at: " + time.Now().UTC().Format(time.RFC3339) + "\n"
+			if err := os.WriteFile(metaPath, []byte(meta), 0o644); err != nil {
+				t.Fatalf("rewrite meta: %v", err)
+			}
+
+			_, err := svc.RestoreFromTrash(trash[0].ID)
+			if err == nil {
+				t.Fatalf("RestoreFromTrash aurait dû rejeter %q", tc.forged)
+			}
+
+			if _, err := os.Stat(bait); err == nil {
+				t.Fatalf("un fichier a fuité hors du coffre : %s", bait)
+			}
+			if _, err := os.Stat(metaPath); err != nil {
+				t.Fatalf("sidecar .meta aurait dû rester en place : %v", err)
+			}
+			if _, err := os.Stat(trash[0].TrashPath); err != nil {
+				t.Fatalf("le contenu de la corbeille aurait dû rester en place : %v", err)
+			}
+		})
+	}
+}
+
 func TestServiceConfig(t *testing.T) {
 	svc, dir := setupVault(t)
 	cfg, err := svc.GetConfig()

@@ -104,6 +104,22 @@ func softDelete(root, path string) (TrashEntry, error) {
 	}, nil
 }
 
+// validateNoteRelPath vérifie qu'un chemin est un chemin de note relatif
+// au coffre (sous notes/, extension .md, pas de traversée).
+func validateNoteRelPath(p string) error {
+	p = filepath.Clean(filepath.FromSlash(p))
+	if p == "." || filepath.IsAbs(p) || strings.HasPrefix(p, "..") {
+		return errors.New("chemin de note invalide")
+	}
+	if filepath.Ext(p) != ".md" {
+		return errors.New("une note doit avoir l'extension .md")
+	}
+	if !strings.HasPrefix(filepath.ToSlash(p), "notes/") {
+		return errors.New("une note doit être rangée sous notes/")
+	}
+	return nil
+}
+
 // restoreFromTrash remet en place un fichier précédemment déplacé par softDelete.
 // Renvoie le chemin relatif d'origine si connu.
 func restoreFromTrash(root string, entry TrashEntry) (string, error) {
@@ -117,6 +133,9 @@ func restoreFromTrash(root string, entry TrashEntry) (string, error) {
 				break
 			}
 		}
+	}
+	if err := validateNoteRelPath(original); err != nil {
+		return "", fmt.Errorf("chemin d’origine de corbeille invalide : %w", err)
 	}
 	dest := filepath.Join(root, filepath.FromSlash(original))
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {

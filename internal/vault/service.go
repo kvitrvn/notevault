@@ -866,17 +866,7 @@ func (s *Service) fileModified(relPath string) (time.Time, error) {
 }
 
 func (s *Service) validateNoteRelPath(p string) error {
-	p = filepath.Clean(filepath.FromSlash(p))
-	if p == "." || filepath.IsAbs(p) || strings.HasPrefix(p, "..") {
-		return errors.New("chemin de note invalide")
-	}
-	if filepath.Ext(p) != ".md" {
-		return errors.New("une note doit avoir l'extension .md")
-	}
-	if !strings.HasPrefix(filepath.ToSlash(p), "notes/") {
-		return errors.New("une note doit être rangée sous notes/")
-	}
-	return nil
+	return validateNoteRelPath(p)
 }
 
 func (s *Service) absoluteNotePath(relativePath string) (string, error) {
