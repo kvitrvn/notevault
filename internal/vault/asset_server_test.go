@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,7 +18,14 @@ func newAssetServerTB(t *testing.T) (*AssetServer, string) {
 	if err := os.MkdirAll(filepath.Join(root, "assets"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return NewAssetServer(root), root
+	srv := NewAssetServer(root)
+	// Start : génère le token (via Start, sans envoyer de requête HTTP).
+	// L'écoute sur 127.0.0.1:port-aléatoire est nettoyée par Stop.
+	if _, err := srv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Stop() })
+	return srv, root
 }
 
 func writeAsset(t *testing.T, root, rel string, data []byte) {
@@ -33,6 +41,24 @@ func writeAsset(t *testing.T, root, rel string, data []byte) {
 
 func assetRequest(t *testing.T, srv *AssetServer, method, target string) *httptest.ResponseRecorder {
 	t.Helper()
+	return assetRequestWithToken(t, srv, method, target, srv.Token())
+}
+
+// assetRequestWithToken ajoute le token en query string avant d'appeler
+// handleFiles. Passer une chaîne vide pour le token revient à tester une
+// requête sans authentification.
+func assetRequestWithToken(t *testing.T, srv *AssetServer, method, target, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	if token != "" {
+		u, err := url.Parse(target)
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		q := u.Query()
+		q.Set("t", token)
+		u.RawQuery = q.Encode()
+		target = u.String()
+	}
 	req := httptest.NewRequest(method, target, nil)
 	response := httptest.NewRecorder()
 	srv.handleFiles(response, req)
@@ -184,5 +210,83 @@ func TestAssetServerIdempotentStop(t *testing.T) {
 	}
 	if err := srv.Stop(); err != nil {
 		t.Fatalf("Stop #2: %v", err)
+	}
+}
+
+func TestAssetServerRequiresToken(t *testing.T) {
+	srv, root := newAssetServerTB(t)
+	writeAsset(t, root, "assets/a.png", []byte("data"))
+
+	cases := []struct {
+		name  string
+		token string
+		want  int
+	}{
+		{name: "no token", token: "", want: http.StatusForbidden},
+		{name: "wrong token", token: "deadbeef", want: http.StatusForbidden},
+		{name: "similar but wrong length", token: srv.Token() + "x", want: http.StatusForbidden},
+		{name: "valid token", token: srv.Token(), want: http.StatusOK},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			response := assetRequestWithToken(t, srv, http.MethodGet, "/files/assets/a.png", c.token)
+			if response.Code != c.want {
+				t.Fatalf("status = %d, want %d", c.want, response.Code)
+			}
+		})
+	}
+}
+
+func TestAssetServerTokenRegeneratedOnRestart(t *testing.T) {
+	srv, _ := newAssetServerTB(t)
+	first := srv.Token()
+	if first == "" {
+		t.Fatal("token vide après Start")
+	}
+	if err := srv.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if _, err := srv.Start(); err != nil {
+		t.Fatalf("Start #2: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop() })
+	second := srv.Token()
+	if second == "" {
+		t.Fatal("token vide après second Start")
+	}
+	if first == second {
+		t.Fatal("le token aurait dû être régénéré")
+	}
+}
+
+func TestAssetServerSVGHasCSP(t *testing.T) {
+	srv, root := newAssetServerTB(t)
+	writeAsset(t, root, "assets/icon.svg", []byte("<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>"))
+
+	response := assetRequest(t, srv, http.MethodGet, "/files/assets/icon.svg")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	csp := response.Header().Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("Content-Security-Policy manquant pour SVG")
+	}
+	if !strings.Contains(csp, "default-src 'none'") {
+		t.Fatalf("CSP inattendue : %q", csp)
+	}
+}
+
+func TestAssetServerSVGSubExtNotMistakenForSVG(t *testing.T) {
+	srv, root := newAssetServerTB(t)
+	writeAsset(t, root, "assets/picture.png.svg", []byte("fake"))
+
+	// .svg doit matcher — extension canonique, indépendante du nom.
+	response := assetRequest(t, srv, http.MethodGet, "/files/assets/picture.png.svg")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", response.Code)
+	}
+	csp := response.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "default-src 'none'") {
+		t.Fatalf("CSP manquante pour .svg canonique : %q", csp)
 	}
 }

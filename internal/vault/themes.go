@@ -2,9 +2,11 @@ package vault
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -101,12 +103,70 @@ func parseThemeFile(path string) (Theme, error) {
 	if t.Vars == nil {
 		t.Vars = map[string]string{}
 	}
-	for k := range t.Vars {
+	for k, v := range t.Vars {
 		if !strings.HasPrefix(k, "--") {
 			delete(t.Vars, k)
+			continue
+		}
+		if err := validateThemeValue(v); err != nil {
+			delete(t.Vars, k)
+			continue
 		}
 	}
 	return t, nil
+}
+
+// Limite arbitraire sur la longueur d'une valeur de variable de thème.
+// Une couleur CSS tient dans quelques dizaines de caractères ; au-delà on
+// refuse pour éviter un thème qui gonfle la mémoire côté frontend.
+const maxThemeValueLen = 256
+
+var (
+	// Hex : 3, 4, 6 ou 8 chiffres hexadécimaux.
+	colorHexRegex = regexp.MustCompile(`^#[0-9a-fA-F]{3,8}$`)
+	// Fonction couleur CSS : rgb/rgba/hsl/hsla/hwb/lab/lch/oklab/oklch/color.
+	// Le contenu autorise lettres (mots-clés), chiffres, espaces, virgules,
+	// slashes, points, pourcentages et signes — couvre rgb(0,0,0) et la
+	// syntaxe moderne séparée par espaces.
+	colorFuncRegex = regexp.MustCompile(`^(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\(([0-9a-zA-Z ,./%+\-]*)\)$`)
+	// Mots-clés couleur CSS sans effet de bord.
+	colorKeywords = map[string]struct{}{
+		"transparent":  {},
+		"currentcolor": {},
+		"inherit":      {},
+		"initial":      {},
+		"unset":        {},
+		"revert":       {},
+	}
+)
+
+// validateThemeValue vérifie qu'une valeur de variable CSS est une couleur
+// sûre pour une variable `--color-*`. Bloque les vecteurs d'exfiltration et
+// de beacon (url(), expression(), CSS-injection via `;` ou `//`) en combinant
+// une liste de blocage explicite et une allowlist de formes couleur valides.
+func validateThemeValue(value string) error {
+	if value == "" {
+		return errors.New("valeur de thème vide")
+	}
+	if len(value) > maxThemeValueLen {
+		return fmt.Errorf("valeur de thème trop longue : %d caractères", len(value))
+	}
+	lowered := strings.ToLower(strings.TrimSpace(value))
+	for _, bad := range []string{"url(", "expression(", "//", "<", ">", "\\", ";", "`", "\x00"} {
+		if strings.Contains(lowered, bad) {
+			return fmt.Errorf("valeur de thème interdite (%s)", bad)
+		}
+	}
+	if _, ok := colorKeywords[lowered]; ok {
+		return nil
+	}
+	if colorHexRegex.MatchString(lowered) {
+		return nil
+	}
+	if colorFuncRegex.MatchString(lowered) {
+		return nil
+	}
+	return errors.New("valeur non reconnue comme couleur CSS")
 }
 
 // builtinThemes reflète les jeux de couleurs définis en dur dans styles.css.

@@ -554,7 +554,16 @@ func (a *App) AssetURL(path string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("construire l’URL de l’asset : %w", err)
 		}
-		u := url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", s.assetPort), Path: "/files/" + filepath.ToSlash(rel)}
+		q := url.Values{}
+		if s.assetSrv != nil {
+			q.Set("t", s.assetSrv.Token())
+		}
+		u := url.URL{
+			Scheme:   "http",
+			Host:     fmt.Sprintf("127.0.0.1:%d", s.assetPort),
+			Path:     "/files/" + filepath.ToSlash(rel),
+			RawQuery: q.Encode(),
+		}
 		return u.String(), nil
 	})
 }

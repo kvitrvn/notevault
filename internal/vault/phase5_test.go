@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -107,6 +108,104 @@ func TestThemeLoaderRejectsNonCSSVars(t *testing.T) {
 	if th.Vars["--color-ok"] != "#0f0" {
 		t.Fatal("var valide perdue")
 	}
+}
+
+func TestThemeLoaderRejectsDangerousValues(t *testing.T) {
+	t.Run("unitaire", func(t *testing.T) {
+		cases := []struct {
+			value   string
+			accepts bool
+		}{
+			// Heures heureuses.
+			{"#fff", true},
+			{"#FFFFFF", true},
+			{"#ffffffff", true},
+			{"#FFAA00", true},
+			{"rgb(0, 0, 0)", true},
+			{"rgba(255, 0, 0, 0.5)", true},
+			{"hsl(120, 100%, 50%)", true},
+			{"hsla(120, 100%, 50%, 0.25)", true},
+			{"hwb(0 0% 0%)", true},
+			{"lab(50% 40 59.5)", true},
+			{"oklch(0.7 0.15 200)", true},
+			{"transparent", true},
+			{"currentColor", true},
+			{"inherit", true},
+			{"initial", true},
+			{"unset", true},
+			{"revert", true},
+			{"  #FFF  ", true},
+
+			// Vecteurs exfiltration / injection.
+			{"url(https://attacker.test/beacon)", false},
+			{"URL(https://attacker.test/beacon)", false},
+			{"expression(alert(1))", false},
+			{"//comment", false},
+			{"red;background:url(//attacker)", false},
+			{"red; color: url(//attacker/x.png)", false},
+			{"#fff<script>alert(1)</script>", false},
+			{"#fff\\g", false},
+			{"#fff`evil`", false},
+			{"#fff\x00", false},
+			{"javascript:alert(1)", false},
+			{"vbscript:msgbox(1)", false},
+
+			// Mauvais formats mais inoffensifs — rejetés par allowlist.
+			{"not-a-color", false},
+			{"42", false},
+			{"#zzz", false},
+			{"rgb(", false},
+			{"rgb(0,0,0", false},
+			{"drop-shadow(0 0 0 red)", false},
+			{"", false},
+		}
+		for _, c := range cases {
+			err := validateThemeValue(c.value)
+			got := err == nil
+			if got != c.accepts {
+				t.Errorf("validateThemeValue(%q) err=%v want accept=%v", c.value, err, c.accepts)
+			}
+		}
+	})
+
+	t.Run("via loader", func(t *testing.T) {
+		dir := t.TempDir()
+		themesDir := filepath.Join(dir, ".notevault", "themes")
+		if err := os.MkdirAll(themesDir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		raw := `{"id":"evil","name":"X","vars":{` +
+			`"--color-evil-url":"url(https://attacker.test/beacon)",` +
+			`"--color-evil-xss":"#fff<script>alert(1)</script>",` +
+			`"--color-evil-expr":"expression(alert(1))",` +
+			`"--color-evil-injection":"red;background:url(//attacker)",` +
+			`"--color-ok-hex":"#0f0",` +
+			`"--color-ok-rgb":"rgb(10, 20, 30)",` +
+			`"--color-ok-keyword":"transparent"` +
+			`}}`
+		if err := os.WriteFile(filepath.Join(themesDir, "evil.json"), []byte(raw), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		loader := NewThemeLoader(dir)
+		th, err := loader.Get("evil")
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		for k := range th.Vars {
+			if strings.HasPrefix(k, "--color-evil-") {
+				t.Fatalf("var dangereuse acceptée : %s = %q", k, th.Vars[k])
+			}
+		}
+		if th.Vars["--color-ok-hex"] != "#0f0" {
+			t.Fatalf("hex valide perdu : %q", th.Vars["--color-ok-hex"])
+		}
+		if th.Vars["--color-ok-rgb"] != "rgb(10, 20, 30)" {
+			t.Fatalf("rgb valide perdu : %q", th.Vars["--color-ok-rgb"])
+		}
+		if th.Vars["--color-ok-keyword"] != "transparent" {
+			t.Fatalf("mot-clé valide perdu : %q", th.Vars["--color-ok-keyword"])
+		}
+	})
 }
 
 func TestServiceListThemesIncludesBuiltins(t *testing.T) {

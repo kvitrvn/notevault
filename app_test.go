@@ -83,9 +83,14 @@ func setupAppForTest(t *testing.T) *App {
 	if err != nil {
 		t.Fatalf("vault.New: %v", err)
 	}
+	srv := vault.NewAssetServer(service.Root())
+	if _, err := srv.Start(); err != nil {
+		t.Fatalf("asset server start: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop() })
 	store := appconfig.NewStore(filepath.Join(t.TempDir(), "app.json"))
 	app := &App{
-		session: &vaultSession{service: service, assetPort: 43125},
+		session: &vaultSession{service: service, assetSrv: srv, assetPort: 43125},
 		config:  appconfig.Default(),
 		store:   store,
 		now:     time.Now,
@@ -109,7 +114,7 @@ func TestAppAssetURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "http://127.0.0.1:43125/files/assets/mes%20photos/image.png"
+	want := "http://127.0.0.1:43125/files/assets/mes%20photos/image.png?t=" + app.session.assetSrv.Token()
 	if got != want {
 		t.Fatalf("AssetURL() = %q, want %q", got, want)
 	}

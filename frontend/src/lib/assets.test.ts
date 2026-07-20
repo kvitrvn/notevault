@@ -50,6 +50,14 @@ describe('Markdown asset URLs', () => {
       scrubAbsoluteAssetURLs('![photo](http://127.0.0.1:1234/files/assets/mes%20photos/a.png)')
     ).toBe('![photo](assets/mes photos/a.png)');
   });
+
+  it('drops the asset server session token before saving', () => {
+    expect(
+      scrubAbsoluteAssetURLs(
+        '![photo](http://127.0.0.1:1234/files/assets/mes%20photos/a.png?t=deadbeef0123456789)'
+      )
+    ).toBe('![photo](assets/mes photos/a.png)');
+  });
 });
 
 describe('withTimeout', () => {

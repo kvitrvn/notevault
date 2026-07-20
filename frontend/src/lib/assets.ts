@@ -44,10 +44,12 @@ export async function precomputeAssetURLs(
 }
 
 // Les URL loopback ne doivent jamais être persistées dans les fichiers .md.
+// On retire aussi la query string (`?t=...` ajouté par le serveur d'assets
+// pour son token de session) pour ne garder que le chemin relatif propre.
 export function scrubAbsoluteAssetURLs(markdown: string): string {
   return markdown.replace(
-    /(!\[[^\]]*\]\()http:\/\/127\.0\.0\.1:\d+\/files\/(assets\/[^)]+)(\))/g,
-    (_match, prefix: string, relativePath: string, suffix: string) =>
+    /(!\[[^\]]*\]\()http:\/\/127\.0\.0\.1:\d+\/files\/(assets\/[^?)]+)(\?[^)]*)?(\))/g,
+    (_match, prefix: string, relativePath: string, _query: string | undefined, suffix: string) =>
       `${prefix}${decodeURI(relativePath)}${suffix}`
   );
 }
