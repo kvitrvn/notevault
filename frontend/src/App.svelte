@@ -55,12 +55,14 @@
   import type { SaveState } from './components/SaveIndicator.svelte';
   import { isLocalAssetPath, precomputeAssetURLs as resolveAssetURLs } from './lib/assets';
   import { createDebouncedTask } from './lib/debounce';
+  import { normalizeNotesFolderPath } from './lib/note-paths';
   import { shouldShowVaultUnlock } from './lib/vault-manager';
   import { clickOutside } from './lib/actions';
   import { domain, vault } from '../wailsjs/go/models';
 
   import {
     ApplicationStatus,
+    CheckForUpdates,
     ClearDirtyBuffer,
     CreateVault,
     CreateNote,
@@ -106,6 +108,7 @@
     ChangePassphrase,
     DisableEncryption
   } from '../wailsjs/go/main/App';
+  import { BrowserOpenURL } from '../wailsjs/runtime/runtime';
 
   type Note = domain.Note;
   type NoteSummary = domain.NoteSummary;
@@ -127,6 +130,7 @@
 
   const AUTO_SAVE_DEBOUNCE_MS = 1500;
   const FILTER_REFRESH_DEBOUNCE_MS = 180;
+  const LATEST_RELEASE_URL = 'https://github.com/kvitrvn/notevault/releases/latest';
 
   let notes: NoteSummary[] = $state([]);
   let chatNotes: NoteSummary[] = $state([]);
@@ -144,7 +148,12 @@
   let error = $state('');
   let saveState: SaveState = $state('clean');
   let lastSavedAt: Date | null = $state(null);
-  let toast: { kind: 'info' | 'error'; message: string; id: number } | null = $state(null);
+  let toast: {
+    kind: 'info' | 'error';
+    message: string;
+    id: number;
+    action?: { label: string; run: () => void };
+  } | null = $state(null);
   let toastSeq = 0;
   let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -205,6 +214,7 @@
   let vaultPickerOpen = $state(false);
   let vaultMenuOpen = $state(false);
   let applicationStatus = $state<domain.ApplicationStatus | null>(null);
+  let updateStatus = $state<domain.UpdateStatus | null>(null);
   let vaultSwitching = $state(false);
   let vaultSwitchError = $state('');
 
@@ -341,13 +351,21 @@
         });
   }
 
-  function showToast(kind: 'info' | 'error', message: string): void {
+  function showToast(
+    kind: 'info' | 'error',
+    message: string,
+    action?: { label: string; run: () => void }
+  ): void {
     toastSeq += 1;
     const id = toastSeq;
-    toast = { kind, message, id };
+    toast = { kind, message, id, action };
     setTimeout(() => {
       if (toast?.id === id) toast = null;
-    }, 4000);
+    }, action ? 8000 : 4000);
+  }
+
+  function openLatestRelease(): void {
+    BrowserOpenURL(LATEST_RELEASE_URL);
   }
 
   function setView(v: 'flat' | 'tree'): void {
@@ -945,8 +963,7 @@
     dragSource = null;
     dragKind = null;
     if (!src || !src.startsWith('notes/')) return;
-    const folderRel = folder.startsWith('notes/') ? folder : 'notes/' + folder;
-    const targetFolder = folderRel.replace(/\/+$/, '');
+    const targetFolder = normalizeNotesFolderPath(folder);
     try {
       if (kind === 'folder') {
         const base = src.split('/').pop() ?? src;
@@ -1045,11 +1062,7 @@
     if (!folderMoveOpen) return;
     const src = folderMoveOpen.path;
     folderMoveOpen = null;
-    if (!destinationFolder.startsWith('notes/')) {
-      destinationFolder = 'notes/' + destinationFolder.replace(/^notes\//, '');
-    }
-    destinationFolder = destinationFolder.replace(/\/+$/, '');
-    if (!destinationFolder.startsWith('notes/')) destinationFolder = 'notes';
+    destinationFolder = normalizeNotesFolderPath(destinationFolder);
     const base = src.split('/').pop() ?? src;
     const target = destinationFolder === 'notes' ? 'notes/' + base : destinationFolder + '/' + base;
     if (target === src) return;
@@ -1760,6 +1773,21 @@
   }
 
   void bootstrapVault();
+  void checkForApplicationUpdates();
+
+  async function checkForApplicationUpdates(): Promise<void> {
+    try {
+      updateStatus = await CheckForUpdates();
+      if (updateStatus.updateAvailable) {
+        showToast('info', `${updateStatus.latestVersion} est disponible.`, {
+          label: 'Voir la release',
+          run: openLatestRelease
+        });
+      }
+    } catch {
+      // La vérification ne doit jamais perturber un démarrage hors ligne.
+    }
+  }
 
   async function bootstrapVault(): Promise<void> {
     try {
@@ -2287,8 +2315,8 @@
               onFolderDrop={onFolderDrop}
               onContextMenu={openContextMenu}
               onFolderContextMenu={openFolderContextMenu}
-              onFolderNewNote={(folder) => openNewNoteAt('notes/' + folder)}
-              onFolderNewFolder={(folder) => openNewFolderPrompt('notes/' + folder)}
+              onFolderNewNote={openNewNoteAt}
+              onFolderNewFolder={openNewFolderPrompt}
               dragOverFolder={dragOverFolder}
               onTogglePin={(p) => {
                 if (selected?.relativePath === p) {
@@ -2353,7 +2381,18 @@
 
     <div class="flex h-9 shrink-0 items-center justify-between border-t border-border px-3 text-xs text-subtle">
       <span>j/k · ↑/↓ &nbsp;Entrée ouvre</span>
-      <span>{sidebarFocused ? 'sidebar active' : 'éditeur actif'}</span>
+      {#if updateStatus?.updateAvailable}
+        <button
+          type="button"
+          class="shrink-0 text-accent hover:underline"
+          title="Ouvrir la dernière release NoteVault"
+          onclick={openLatestRelease}
+        >
+          {updateStatus.currentVersion} · {updateStatus.latestVersion} disponible
+        </button>
+      {:else}
+        <span class="shrink-0">{applicationStatus?.version ?? updateStatus?.currentVersion ?? 'dev'}</span>
+      {/if}
     </div>
     {/if}
   </aside>
@@ -3020,10 +3059,22 @@
 {#if toast}
   <div class="pointer-events-none fixed bottom-6 right-6 z-40 flex max-w-sm flex-col gap-2">
     <div
-      class="pointer-events-auto rounded-md border px-3 py-2 text-sm shadow-lg {toast.kind === 'error' ? 'border-danger/50 bg-panel text-danger' : 'border-border bg-panel text-foreground'}"
+      class="pointer-events-auto flex items-center gap-3 rounded-md border px-3 py-2 text-sm shadow-lg {toast.kind === 'error' ? 'border-danger/50 bg-panel text-danger' : 'border-border bg-panel text-foreground'}"
       role="status"
     >
-      {toast.message}
+      <span>{toast.message}</span>
+      {#if toast.action}
+        <button
+          type="button"
+          class="shrink-0 font-medium text-accent hover:underline"
+          onclick={() => {
+            toast?.action?.run();
+            toast = null;
+          }}
+        >
+          {toast.action.label}
+        </button>
+      {/if}
     </div>
   </div>
 {/if}

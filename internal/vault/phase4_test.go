@@ -53,14 +53,19 @@ func TestServiceGetBacklinks(t *testing.T) {
 	svc, _ := setupVault(t)
 	// Crée une note cible.
 	target, _ := svc.CreateNote("", "Projets Q3", "")
-	// Crée deux notes qui la mentionnent.
+	target.Content = "Auto-référence : [[Projets Q3]]."
+	if _, err := svc.SaveNote(target); err != nil {
+		t.Fatalf("SaveNote target: %v", err)
+	}
+	// Crée une note qui la lie explicitement.
 	a, _ := svc.CreateNote("", "Suivi", "")
 	a.Content = "Voir [[Projets Q3]] pour la liste."
 	if _, err := svc.SaveNote(a); err != nil {
 		t.Fatalf("SaveNote a: %v", err)
 	}
+	// Une simple mention du titre ne constitue pas un backlink.
 	b, _ := svc.CreateNote("", "Retro", "")
-	b.Content = "Pas de lien ici."
+	b.Content = "Le document Projets Q3 est prêt."
 	if _, err := svc.SaveNote(b); err != nil {
 		t.Fatalf("SaveNote b: %v", err)
 	}
@@ -78,6 +83,11 @@ func TestServiceGetBacklinks(t *testing.T) {
 	}
 	if links[0].RelativePath != a.RelativePath {
 		t.Fatalf("backlink pointe vers %s (attendu %s)", links[0].RelativePath, a.RelativePath)
+	}
+	for _, link := range links {
+		if link.RelativePath == b.RelativePath {
+			t.Fatal("une mention en texte libre ne doit pas créer de backlink")
+		}
 	}
 	// Sans exclusion, la cible apparaît aussi (vérification du paramètre).
 	allLinks, _ := svc.GetBacklinks("Projets Q3", "", 10)

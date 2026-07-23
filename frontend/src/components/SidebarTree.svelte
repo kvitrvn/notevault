@@ -86,15 +86,7 @@
     depth: number;
   };
 
-  type RootRow = {
-    kind: 'root';
-    path: string;
-    name: string;
-    dragOver: boolean;
-    noteCount: number;
-  };
-
-  type FlatRow = RootRow | FolderRow | NoteRow;
+  type FlatRow = FolderRow | NoteRow;
 
   const ROW_HEIGHT = 30;
   const OVERSCAN = 6;
@@ -179,14 +171,6 @@
 
   const flatRows = $derived.by(() => {
     const rows: FlatRow[] = [];
-    const totalNotes = notes.length;
-    rows.push({
-      kind: 'root',
-      path: 'notes',
-      name: 'Notes',
-      dragOver: dragOverFolder === 'notes',
-      noteCount: totalNotes
-    });
     const visit = (node: TreeNode, depth: number): void => {
       for (const child of node.children) {
         const open = isOpen(child.path);
@@ -308,9 +292,20 @@
     draggable="true"
     ondragstart={(e) => onFolderDragStart?.(e, row.path)}
     ondragend={() => onFolderDragEnd?.()}
-    ondragover={(e) => onFolderDragOver?.(e, row.path)}
-    ondragleave={() => onFolderDragLeave?.(row.path)}
-    ondrop={(e) => onFolderDrop?.(e, row.path)}
+    ondragover={(e) => {
+      e.stopPropagation();
+      onFolderDragOver?.(e, row.path);
+    }}
+    ondragleave={(e) => {
+      e.stopPropagation();
+      const nextTarget = e.relatedTarget;
+      if (nextTarget instanceof Node && e.currentTarget.contains(nextTarget)) return;
+      onFolderDragLeave?.(row.path);
+    }}
+    ondrop={(e) => {
+      e.stopPropagation();
+      onFolderDrop?.(e, row.path);
+    }}
     role="button"
     tabindex="0"
     aria-expanded={row.open}
@@ -402,25 +397,20 @@
   </div>
 {/snippet}
 
-{#snippet rootRowContent(row: RootRow)}
-  <div
-    class={row.dragOver
-      ? 'flex h-full w-full items-center gap-1.5 rounded-md border border-accent bg-accent/15 px-2 text-sm font-semibold text-foreground'
-      : 'flex h-full w-full items-center gap-1.5 rounded-md border border-transparent px-2 text-sm font-semibold text-foreground hover:border-border hover:bg-panel-muted'}
-    ondragover={(e) => onFolderDragOver?.(e, 'notes')}
-    ondragleave={() => onFolderDragLeave?.('notes')}
-    ondrop={(e) => onFolderDrop?.(e, 'notes')}
-    role="button"
-    tabindex="0"
-    aria-label="Dossier racine"
-  >
-    <Folder size={13} strokeWidth={2} class="shrink-0" aria-hidden="true" />
-    <span class="min-w-0 flex-1 truncate text-left">{row.name}</span>
-    <span class="shrink-0 text-xs text-faint">{row.noteCount}</span>
-  </div>
-{/snippet}
-
-<div class="flex h-full min-h-0 flex-col px-1">
+<div
+  class={dragOverFolder === 'notes'
+    ? 'flex h-full min-h-0 flex-col rounded-md px-1 ring-1 ring-inset ring-accent'
+    : 'flex h-full min-h-0 flex-col rounded-md px-1 ring-1 ring-inset ring-transparent'}
+  role="region"
+  aria-label="Arborescence des notes"
+  ondragover={(e) => onFolderDragOver?.(e, 'notes')}
+  ondragleave={(e) => {
+    const nextTarget = e.relatedTarget;
+    if (nextTarget instanceof Node && e.currentTarget.contains(nextTarget)) return;
+    onFolderDragLeave?.('notes');
+  }}
+  ondrop={(e) => onFolderDrop?.(e, 'notes')}
+>
   <VirtualList
     items={flatRows}
     itemHeight={ROW_HEIGHT}
@@ -429,9 +419,7 @@
     ariaLabel="Notes"
   >
     {#snippet children(row: FlatRow)}
-      {#if row.kind === 'root'}
-        {@render rootRowContent(row)}
-      {:else if row.kind === 'folder'}
+      {#if row.kind === 'folder'}
         {@render folderRowContent(row)}
       {:else}
         {@render noteRowContent(row.note, row.depth)}

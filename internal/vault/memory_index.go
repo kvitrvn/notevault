@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -30,6 +31,8 @@ type rankedSummary struct {
 	summary domain.NoteSummary
 	score   int
 }
+
+var wikiLinkPattern = regexp.MustCompile(`\[\[([^\]\n]+?)\]\]`)
 
 // memoryIndex is the complete process-local secondary index. Vault files are
 // the source of truth; only pin order is persisted.
@@ -467,24 +470,21 @@ func (i *memoryIndex) ListPinned() ([]domain.NoteSummary, error) {
 func (i *memoryIndex) GetBacklinks(title string, opts SearchOpts) ([]domain.NoteSummary, error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	title = foldUnicode(strings.TrimSpace(title))
+	title = strings.TrimSpace(title)
 	if title == "" {
 		return []domain.NoteSummary{}, nil
 	}
+	foldedTitle := foldUnicode(title)
 	out := make([]rankedSummary, 0)
-	for path := range i.queryCandidatesLocked(`"` + title + `"`) {
+	for path := range i.queryCandidatesLocked(`"` + foldedTitle + `"`) {
 		if path == opts.ExcludePath {
 			continue
 		}
-		folded, ok := i.foldedBodies[path]
-		if !ok {
+		note, exists := i.notes[path]
+		if !exists {
 			continue
 		}
-		if count := strings.Count(folded, title); count > 0 {
-			note, exists := i.notes[path]
-			if !exists {
-				continue
-			}
+		if count := countWikiLinksTo(note.Content, title); count > 0 {
 			out = append(out, rankedSummary{summary: summaryOf(note), score: count})
 		}
 	}
@@ -492,6 +492,16 @@ func (i *memoryIndex) GetBacklinks(title string, opts SearchOpts) ([]domain.Note
 		return out[a].score > out[b].score || out[a].score == out[b].score && out[a].summary.UpdatedAt.After(out[b].summary.UpdatedAt)
 	})
 	return summaries(out, clampLimit(opts.Limit)), nil
+}
+
+func countWikiLinksTo(content, title string) int {
+	count := 0
+	for _, match := range wikiLinkPattern.FindAllStringSubmatch(content, -1) {
+		if match[1] == title {
+			count++
+		}
+	}
+	return count
 }
 
 func (i *memoryIndex) StatsBuckets(windowDays int) (StatsBucketsResult, error) {

@@ -1,6 +1,7 @@
 <script lang="ts">
   import FolderInput from '@lucide/svelte/icons/folder-input';
   import X from '@lucide/svelte/icons/x';
+  import { normalizeNotesFolderPath } from '../lib/note-paths';
 
   type FolderInfo = { path: string; name: string; count: number };
 
@@ -32,14 +33,9 @@
   }
 
   function commit(): void {
-    const v = destination.trim().replace(/^\/+/, '');
+    const v = destination.trim();
     if (!v) return;
-    if (!v.startsWith('notes/')) {
-      destination = 'notes/' + v.replace(/^notes\//, '');
-    }
-    if (!destination.endsWith('/')) {
-      destination += '/';
-    }
+    destination = normalizeNotesFolderPath(v) + '/';
     onMove(destination);
   }
 

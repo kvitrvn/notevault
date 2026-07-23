@@ -26,6 +26,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
       publish: ${{ steps.version.outputs.publish }}
     steps:
       - id: version
@@ -53,6 +54,7 @@ jobs:
             publish=false
           fi
           echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "tag=v$version" >>"$GITHUB_OUTPUT"
           echo "publish=$publish" >>"$GITHUB_OUTPUT"
 
   build:
@@ -96,14 +98,19 @@ jobs:
         run: make verify
 
       - name: Build production binary
-        run: make build WAILS_TAGS=webkit2_41 WAILS_BUILD_FLAGS=-trimpath
+        env:
+          TAG: ${{ needs.metadata.outputs.tag }}
+        run: make build WAILS_TAGS=webkit2_41 WAILS_BUILD_FLAGS=-trimpath APP_VERSION="$TAG"
 
       - name: Inspect binary
+        env:
+          TAG: ${{ needs.metadata.outputs.tag }}
         run: |
           file build/bin/notevault
           file build/bin/notevault | grep -Eq 'ELF 64-bit.*x86-64'
           ldd build/bin/notevault | tee /tmp/notevault-ldd.txt
           ! grep -q 'not found' /tmp/notevault-ldd.txt
+          test "$(build/bin/notevault --version)" = "$TAG"
           install -Dm755 build/bin/notevault release-input/notevault
 
       - name: Upload release binary
@@ -262,6 +269,7 @@ jobs:
       - name: Install and inspect package
         env:
           VERSION: ${{ needs.metadata.outputs.version }}
+          TAG: ${{ needs.metadata.outputs.tag }}
         run: |
           package="dist/deb/notevault_${VERSION}_amd64.deb"
           apt-get install --yes "$PWD/$package"
@@ -271,6 +279,7 @@ jobs:
           desktop-file-validate /usr/share/applications/notevault.desktop
           test "$(stat -c %a /usr/bin/notevault)" = 755
           test "$(stat -c %a /usr/share/applications/notevault.desktop)" = 644
+          test "$(/usr/bin/notevault --version)" = "$TAG"
           ldd /usr/bin/notevault | tee /tmp/notevault-ldd.txt
           ! grep -q 'not found' /tmp/notevault-ldd.txt
 
@@ -319,6 +328,7 @@ jobs:
       - name: Install and inspect package
         env:
           VERSION: ${{ needs.metadata.outputs.version }}
+          TAG: ${{ needs.metadata.outputs.tag }}
         run: |
           package="dist/arch/notevault-${VERSION}-1-x86_64.pkg.tar.zst"
           pacman -Qip "$package"
@@ -330,6 +340,7 @@ jobs:
           desktop-file-validate /usr/share/applications/notevault.desktop
           test "$(stat -c %a /usr/bin/notevault)" = 755
           test "$(stat -c %a /usr/share/applications/notevault.desktop)" = 644
+          test "$(/usr/bin/notevault --version)" = "$TAG"
           ldd /usr/bin/notevault | tee /tmp/notevault-ldd.txt
           ! grep -q 'not found' /tmp/notevault-ldd.txt
 

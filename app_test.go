@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"github.com/kvitrvn/notevault/internal/appconfig"
 	"github.com/kvitrvn/notevault/internal/chat"
 	"github.com/kvitrvn/notevault/internal/domain"
+	"github.com/kvitrvn/notevault/internal/updatecheck"
 	"github.com/kvitrvn/notevault/internal/vault"
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
 )
@@ -164,8 +166,91 @@ func TestNewAppFirstLaunchDoesNotCreateLegacyVault(t *testing.T) {
 	if err != nil || status.Mode != domain.ApplicationNoVault {
 		t.Fatalf("status = %+v, %v", status, err)
 	}
+	if status.Version != buildVersion {
+		t.Fatalf("version = %q, want %q", status.Version, buildVersion)
+	}
 	if _, err := app.ListNotes(); !errors.Is(err, ErrNoVaultOpen) {
 		t.Fatalf("ListNotes error = %v", err)
+	}
+}
+
+func TestAppCheckForUpdatesUsesInjectedCheckerOnce(t *testing.T) {
+	root := t.TempDir()
+	var calls int
+	app, err := newApp(appOptions{
+		configPath: filepath.Join(root, "config", "app.json"),
+		legacyPath: filepath.Join(root, "legacy"),
+		now:        time.Now,
+		version:    "v0.3.2",
+		checkForUpdate: func(_ context.Context, current string) (updatecheck.Result, error) {
+			calls++
+			return updatecheck.Result{
+				CurrentVersion:  current,
+				LatestVersion:   "v0.3.3",
+				UpdateAvailable: true,
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { app.Shutdown(t.Context()) })
+
+	first := app.CheckForUpdates()
+	second := app.CheckForUpdates()
+	want := domain.UpdateStatus{
+		CurrentVersion:  "v0.3.2",
+		LatestVersion:   "v0.3.3",
+		UpdateAvailable: true,
+	}
+	if first != want || second != want {
+		t.Fatalf("results = %+v, %+v; want %+v", first, second, want)
+	}
+	if calls != 1 {
+		t.Fatalf("checker calls = %d, want 1", calls)
+	}
+}
+
+func TestAppDevVersionSkipsInjectedChecker(t *testing.T) {
+	root := t.TempDir()
+	app, err := newApp(appOptions{
+		configPath: filepath.Join(root, "config", "app.json"),
+		legacyPath: filepath.Join(root, "legacy"),
+		now:        time.Now,
+		version:    "dev",
+		checkForUpdate: func(context.Context, string) (updatecheck.Result, error) {
+			t.Fatal("checker called for dev build")
+			return updatecheck.Result{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { app.Shutdown(t.Context()) })
+
+	if got := app.CheckForUpdates(); got != (domain.UpdateStatus{CurrentVersion: "dev"}) {
+		t.Fatalf("status = %+v", got)
+	}
+}
+
+func TestAppUpdateFailureIsSilent(t *testing.T) {
+	root := t.TempDir()
+	app, err := newApp(appOptions{
+		configPath: filepath.Join(root, "config", "app.json"),
+		legacyPath: filepath.Join(root, "legacy"),
+		now:        time.Now,
+		version:    "v0.3.2",
+		checkForUpdate: func(context.Context, string) (updatecheck.Result, error) {
+			return updatecheck.Result{}, errors.New("offline")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { app.Shutdown(t.Context()) })
+
+	if got := app.CheckForUpdates(); got != (domain.UpdateStatus{CurrentVersion: "v0.3.2"}) {
+		t.Fatalf("status = %+v", got)
 	}
 }
 

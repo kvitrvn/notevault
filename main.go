@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 
@@ -10,7 +11,13 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
 )
 
+var buildVersion = "dev"
+
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		fmt.Println(buildVersion)
+		return
+	}
 	if err := configureDisplayBackend(); err != nil {
 		log.Fatal(err)
 	}

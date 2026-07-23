@@ -24,6 +24,13 @@ type ApplicationStatus struct {
 	ActiveVault         *VaultInfo      `json:"activeVault,omitempty"`
 	RecentVaults        []VaultInfo     `json:"recentVaults"`
 	OnboardingDismissed bool            `json:"onboardingDismissed"`
+	Version             string          `json:"version"`
+}
+
+type UpdateStatus struct {
+	CurrentVersion  string `json:"currentVersion"`
+	LatestVersion   string `json:"latestVersion"`
+	UpdateAvailable bool   `json:"updateAvailable"`
 }
 
 type CreateVaultRequest struct {

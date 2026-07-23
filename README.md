@@ -39,6 +39,8 @@ features while keeping the vault as the source of truth.
 - Version history with diffs and restore, as well as a recoverable trash.
 - Templates, themes, daily notes, local statistics, and ZIP export.
 - Detection of changes made to vault files outside NoteVault.
+- Display of the installed version and notification when a newer stable release
+  is available.
 - Creation, opening, and instant switching between vaults, with up to eight
   recent vaults.
 - Optional passphrase-based encryption for notes, history, and recovery drafts.
@@ -123,6 +125,26 @@ backups.
 
 Remote images remain in Markdown but are blocked in the editor to avoid
 unexpected network requests. Local files can be imported into `assets/`.
+
+## Update checks and network privacy
+
+Once per application start, a packaged NoteVault build sends an unauthenticated
+HTTPS `GET` request to GitHub's fixed
+`kvitrvn/notevault/releases/latest` API endpoint. GitHub defines this endpoint
+as the most recent published release that is neither a draft nor a prerelease.
+NoteVault sends no vault path, note content, account, or user identifier. Local
+`dev` builds do not make this request.
+
+The request times out after five seconds and any network or response error is
+ignored, so startup and offline use are unaffected. GitHub associates
+unauthenticated API traffic with the originating IP address and currently
+limits it to 60 requests per hour. When an update exists, NoteVault only links
+to the fixed [GitHub Releases page](https://github.com/kvitrvn/notevault/releases/latest);
+installing the `.deb` or `.pkg.tar.zst` package remains manual.
+
+See GitHub's documentation for the
+[latest-release endpoint](https://docs.github.com/en/rest/releases/releases#get-the-latest-release)
+and [unauthenticated rate limit](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#primary-rate-limit-for-unauthenticated-users).
 
 ## Chat and network privacy
 

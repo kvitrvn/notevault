@@ -62,7 +62,7 @@
   {#if !title}
     <p class="text-xs text-faint">Aucun titre à analyser.</p>
   {:else if entries.length === 0 && !loading}
-    <p class="text-xs text-faint">Aucune note ne mentionne « {title} ».</p>
+    <p class="text-xs text-faint">Aucune note ne contient de lien vers « {title} ».</p>
   {:else}
     <ul class="flex flex-col gap-0.5">
       {#each entries as entry (entry.relativePath)}

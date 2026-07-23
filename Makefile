@@ -5,6 +5,8 @@ WAILS := tools/wails/bin/wails
 WAILS_TAGS ?= $(shell pkg-config --exists webkit2gtk-4.1 2>/dev/null && echo webkit2_41)
 WAILS_TAG_ARGS := $(if $(WAILS_TAGS),-tags $(WAILS_TAGS),)
 WAILS_BUILD_FLAGS ?= -trimpath
+APP_VERSION ?= $(shell ./scripts/build-version.sh)
+WAILS_LDFLAGS ?= -X main.buildVersion=$(APP_VERSION)
 
 .PHONY: dev regen build test frontend-test fmt check verify patch-models frontend-install
 
@@ -13,7 +15,7 @@ WAILS_BUILD_FLAGS ?= -trimpath
 # dans wails.json (scripts/with-patch-dev.sh) ré-applique le patch juste
 # avant de lancer Vite, donc les éditions TypeScript voient la bonne classe.
 dev: $(WAILS)
-	$(WAILS) dev $(WAILS_TAG_ARGS)
+	$(WAILS) dev $(WAILS_TAG_ARGS) -ldflags "$(WAILS_LDFLAGS)"
 
 # À utiliser après avoir modifié du code Go exposé : régénère les
 # bindings puis applique le patch.
@@ -22,7 +24,7 @@ regen: $(WAILS)
 	./scripts/patch-models.sh
 
 build: $(WAILS)
-	$(WAILS) build $(WAILS_TAG_ARGS) $(WAILS_BUILD_FLAGS)
+	$(WAILS) build $(WAILS_TAG_ARGS) $(WAILS_BUILD_FLAGS) -ldflags "$(WAILS_LDFLAGS)"
 
 test:
 	go test ./...

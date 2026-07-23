@@ -133,6 +133,8 @@ third parties by default.
 
 - Offer built-in themes and local user themes.
 - Provide local vault statistics.
+- Display the embedded application version and notify the user when a newer
+  stable release is available.
 - Show onboarding at most once per process unless reopened manually.
 - Give draft recovery priority over automatic onboarding.
 - Store the onboarding display preference outside the vault.
@@ -177,6 +179,18 @@ The local asset server must remain confined to `assets/`, bind only to loopback,
 and allow only supported file types. Logs must not contain secrets, note
 content, or unnecessary personal paths. Important persisted state should use
 atomic writes.
+
+Packaged builds make one automatic, unauthenticated HTTPS request per process
+start to GitHub's fixed `kvitrvn/notevault/releases/latest` API endpoint. The
+endpoint returns the latest stable release and excludes drafts and
+prereleases. The request has a five-second timeout and sends no vault path,
+note content, account, or user identifier; failures remain silent and never
+block startup. Local `dev` builds skip the request. GitHub associates
+unauthenticated requests with the originating IP address and currently limits
+them to 60 per hour. NoteVault never opens a URL supplied by the response: the
+update action uses the fixed
+`https://github.com/kvitrvn/notevault/releases/latest` page, and package
+installation remains manual.
 
 Chat adds an explicit outbound trust boundary. Retrieval and anonymization run
 locally. Provider payloads contain only the reviewed anonymized question,

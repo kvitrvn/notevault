@@ -17,6 +17,7 @@ import (
 	"github.com/kvitrvn/notevault/internal/chat"
 	"github.com/kvitrvn/notevault/internal/config"
 	"github.com/kvitrvn/notevault/internal/domain"
+	"github.com/kvitrvn/notevault/internal/updatecheck"
 	"github.com/kvitrvn/notevault/internal/vault"
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -67,10 +68,12 @@ func (s *vaultSession) chatService(secrets chat.SecretStore) (*chat.Service, err
 }
 
 type appOptions struct {
-	configPath string
-	legacyPath string
-	now        func() time.Time
-	secrets    chat.SecretStore
+	configPath     string
+	legacyPath     string
+	now            func() time.Time
+	secrets        chat.SecretStore
+	version        string
+	checkForUpdate func(context.Context, string) (updatecheck.Result, error)
 }
 
 // App est la façade Wails. La session est absente tant qu'aucun coffre
@@ -89,6 +92,11 @@ type App struct {
 	secrets  chat.SecretStore
 
 	now func() time.Time
+
+	version        string
+	updateOnce     sync.Once
+	updateStatus   domain.UpdateStatus
+	checkForUpdate func(context.Context, string) (updatecheck.Result, error)
 }
 
 func NewApp() (*App, error) {
@@ -114,6 +122,13 @@ func newApp(opts appOptions) (*App, error) {
 	if opts.secrets == nil {
 		opts.secrets = chat.NewKeyringStore()
 	}
+	if opts.version == "" {
+		opts.version = buildVersion
+	}
+	if opts.checkForUpdate == nil {
+		checker := updatecheck.New(nil, "")
+		opts.checkForUpdate = checker.Check
+	}
 	store := appconfig.NewStore(opts.configPath)
 	cfg, exists, err := store.Load()
 	if err != nil {
@@ -130,10 +145,12 @@ func newApp(opts appOptions) (*App, error) {
 	}
 
 	app := &App{
-		config:  cfg,
-		store:   store,
-		now:     opts.now,
-		secrets: opts.secrets,
+		config:         cfg,
+		store:          store,
+		now:            opts.now,
+		secrets:        opts.secrets,
+		version:        opts.version,
+		checkForUpdate: opts.checkForUpdate,
 	}
 	if cfg.ActiveVault != "" {
 		prepared, prepareErr := app.prepareSession(cfg.ActiveVault)
@@ -362,6 +379,7 @@ func (a *App) ApplicationStatus() (domain.ApplicationStatus, error) {
 		Mode:                mode,
 		RecentVaults:        make([]domain.VaultInfo, 0, len(cfg.RecentVaults)),
 		OnboardingDismissed: cfg.OnboardingDismissed,
+		Version:             a.applicationVersion(),
 	}
 	for _, recent := range cfg.RecentVaults {
 		info := vaultInfo(recent.Path, recent.LastOpenedAt, recent.Path == activePath)
@@ -376,6 +394,42 @@ func (a *App) ApplicationStatus() (domain.ApplicationStatus, error) {
 		status.ActiveVault = &info
 	}
 	return status, nil
+}
+
+func (a *App) CheckForUpdates() domain.UpdateStatus {
+	currentVersion := a.applicationVersion()
+	a.updateOnce.Do(func() {
+		a.updateStatus = domain.UpdateStatus{CurrentVersion: currentVersion}
+		if currentVersion == "dev" {
+			return
+		}
+		check := a.checkForUpdate
+		if check == nil {
+			checker := updatecheck.New(nil, "")
+			check = checker.Check
+		}
+		ctx := a.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		result, err := check(ctx, currentVersion)
+		if err != nil {
+			return
+		}
+		a.updateStatus = domain.UpdateStatus{
+			CurrentVersion:  result.CurrentVersion,
+			LatestVersion:   result.LatestVersion,
+			UpdateAvailable: result.UpdateAvailable,
+		}
+	})
+	return a.updateStatus
+}
+
+func (a *App) applicationVersion() string {
+	if a.version == "" {
+		return buildVersion
+	}
+	return a.version
 }
 
 func vaultInfo(path string, opened time.Time, active bool) domain.VaultInfo {

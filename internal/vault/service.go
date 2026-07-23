@@ -1172,10 +1172,10 @@ func (s *Service) RenameTitle(relativePath, newTitle string) (domain.Note, error
 	return s.SaveNote(note)
 }
 
-// GetBacklinks retourne les notes qui référencent le titre donné
-// (en cherchant la phrase exacte dans l'index FTS5). Utilisé pour le
-// panneau de backlinks de l'éditeur. excludePath est ignoré dans les
-// résultats (la note courante ne se backlink pas elle-même).
+// GetBacklinks retourne les notes qui référencent le titre donné avec un
+// wiki-lien [[Titre]]. Utilisé pour le panneau de backlinks de l'éditeur.
+// excludePath est ignoré dans les résultats (la note courante ne se backlink
+// pas elle-même).
 func (s *Service) GetBacklinks(title, excludePath string, limit int) ([]domain.NoteSummary, error) {
 	if err := s.requireUnlocked(); err != nil {
 		return nil, err
