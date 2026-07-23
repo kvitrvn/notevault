@@ -735,6 +735,12 @@ func TestApplicationBackgroundIsOpaque(t *testing.T) {
 	}
 }
 
+func TestApplicationDefaultContextMenuIsEnabled(t *testing.T) {
+	if !applicationOptions(&App{}).EnableDefaultContextMenu {
+		t.Fatal("EnableDefaultContextMenu = false, le menu natif disparaît des builds de production")
+	}
+}
+
 func TestApplicationLinuxDesktopIdentity(t *testing.T) {
 	linuxOptions := applicationOptions(&App{}).Linux
 	if linuxOptions == nil {

@@ -50,6 +50,10 @@ func applicationOptions(app *App) *options.App {
 		DisableResize: false,
 		Fullscreen:    false,
 		AssetServer:   &assetserver.Options{Assets: assets},
+		// Wails active ce menu en développement mais le désactive par défaut
+		// en production. Il est nécessaire aux actions natives de l'éditeur
+		// (couper, copier, coller et sélection).
+		EnableDefaultContextMenu: true,
 		Linux: &linux.Options{
 			Icon:             applicationIcon,
 			ProgramName:      "notevault",
