@@ -24,6 +24,7 @@
     scrubAbsoluteAssetURLs,
     withTimeout
   } from '../lib/assets';
+  import { plaintextMarkdownFromClipboard } from '../lib/markdown-paste';
 
   type Props = {
     markdown?: string;
@@ -229,15 +230,30 @@
             class: 'note-editor-content',
             spellcheck: 'true'
           },
-          handlePaste: (view, event) => {
+          handlePaste: (_view, event) => {
             const items = Array.from(event.clipboardData?.items ?? []);
             const imageItem = items.find((it) => it.type.startsWith('image/'));
-            if (!imageItem) return false;
-            const file = imageItem.getAsFile();
-            if (!file) return false;
+            if (imageItem) {
+              const file = imageItem.getAsFile();
+              if (!file) return false;
+              event.preventDefault();
+              void handleAssetInsert(file);
+              return true;
+            }
+
+            // Le Markdown structuré en text/plain a priorité, même si la
+            // source fournit aussi un flavor HTML. Un vrai collage riche sans
+            // syntaxe Markdown reste géré par ProseMirror. Tableaux GFM,
+            // tâches, titres et blocs de code deviennent ainsi immédiatement
+            // des nœuds riches au lieu de texte littéral.
+            const markdownText = plaintextMarkdownFromClipboard(event.clipboardData);
+            if (markdownText === null || !editor) return false;
             event.preventDefault();
-            void handleAssetInsert(file);
-            return true;
+            return editor
+              .chain()
+              .focus()
+              .insertContent(markdownText, { contentType: 'markdown' })
+              .run();
           },
           handleDrop: (view, event) => {
             if (!event.dataTransfer) return false;

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/kvitrvn/notevault/internal/updatecheck"
 	"github.com/kvitrvn/notevault/internal/vault"
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 type fakeAppSecretStore struct {
@@ -145,6 +147,171 @@ func TestAppAssetMethodsRejectTraversal(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAppPDFExportOptionsReportsBrowserAvailability(t *testing.T) {
+	app := setupPDFAppForTest(t)
+	app.pdfBrowser = func() (detectedPDFBrowser, error) {
+		return detectedPDFBrowser{Name: "Chromium", Path: "/usr/bin/chromium"}, nil
+	}
+	options, err := app.PDFExportOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !options.Available || options.Browser != "Chromium" || len(options.Themes) != 1 || options.Themes[0].ID != "classic" {
+		t.Fatalf("options = %+v", options)
+	}
+
+	app.pdfBrowser = func() (detectedPDFBrowser, error) {
+		return detectedPDFBrowser{}, os.ErrNotExist
+	}
+	options, err = app.PDFExportOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.Available || !strings.Contains(options.UnavailableReason, "Installez Chromium") {
+		t.Fatalf("unavailable options = %+v", options)
+	}
+}
+
+func TestAppExportNotePDFUsesNativeDialogAndWritesAtomically(t *testing.T) {
+	app := setupPDFAppForTest(t)
+	note, err := app.session.service.CreateNote("", "A partager", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	note.Content = "# Contenu"
+	if _, err := app.session.service.SaveNote(note); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "partage")
+	dialogCalled := false
+	app.pdfSaveDialog = func(_ context.Context, options wailsruntime.SaveDialogOptions) (string, error) {
+		dialogCalled = true
+		if !strings.HasSuffix(options.DefaultFilename, "a-partager.pdf") || len(options.Filters) != 1 {
+			t.Fatalf("dialog options = %+v", options)
+		}
+		return destination, nil
+	}
+	renderCalled := false
+	app.pdfRender = func(_ context.Context, executable string, browser detectedPDFBrowser, document vault.PDFDocument) ([]byte, error) {
+		renderCalled = true
+		if executable != "/test/notevault" || browser.Name != "Chromium" || !bytes.Contains(document.HTML, []byte("Contenu")) {
+			t.Fatalf("render input: executable=%q browser=%+v html=%q", executable, browser, document.HTML)
+		}
+		return []byte("%PDF-1.7\nrendered"), nil
+	}
+
+	got, err := app.ExportNotePDF(note.RelativePath, "classic", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dialogCalled || !renderCalled || got != destination+".pdf" {
+		t.Fatalf("got=%q dialog=%v render=%v", got, dialogCalled, renderCalled)
+	}
+	data, err := os.ReadFile(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(data, []byte("%PDF-")) {
+		t.Fatalf("output = %q", data)
+	}
+}
+
+func TestAppExportNotePDFCancellationDoesNotRender(t *testing.T) {
+	app := setupPDFAppForTest(t)
+	note, err := app.session.service.CreateNote("", "Annulation", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.pdfSaveDialog = func(context.Context, wailsruntime.SaveDialogOptions) (string, error) {
+		return "", nil
+	}
+	app.pdfRender = func(context.Context, string, detectedPDFBrowser, vault.PDFDocument) ([]byte, error) {
+		t.Fatal("renderer called after dialog cancellation")
+		return nil, nil
+	}
+	destination, err := app.ExportNotePDF(note.RelativePath, "classic", false)
+	if err != nil || destination != "" {
+		t.Fatalf("destination=%q error=%v", destination, err)
+	}
+}
+
+func TestAppExportNotePDFDoesNotLeaveFileOnRendererFailureOrInvalidOutput(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		render func(context.Context, string, detectedPDFBrowser, vault.PDFDocument) ([]byte, error)
+	}{
+		{
+			name: "worker error",
+			render: func(context.Context, string, detectedPDFBrowser, vault.PDFDocument) ([]byte, error) {
+				return nil, errors.New("worker failed")
+			},
+		},
+		{
+			name: "non PDF output",
+			render: func(context.Context, string, detectedPDFBrowser, vault.PDFDocument) ([]byte, error) {
+				return []byte("not pdf"), nil
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app := setupPDFAppForTest(t)
+			note, err := app.session.service.CreateNote("", "Erreur", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			destination := filepath.Join(t.TempDir(), "failed.pdf")
+			app.pdfSaveDialog = func(context.Context, wailsruntime.SaveDialogOptions) (string, error) {
+				return destination, nil
+			}
+			app.pdfRender = test.render
+			if _, err := app.ExportNotePDF(note.RelativePath, "classic", false); err == nil {
+				t.Fatal("export succeeded")
+			}
+			if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("partial destination exists: %v", err)
+			}
+		})
+	}
+}
+
+func TestAppExportNotePDFRequiresEncryptedPlaintextConfirmationBeforeDialog(t *testing.T) {
+	app := setupPDFAppForTest(t)
+	note, err := app.session.service.CreateNote("", "Secret", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.session.service.EnableEncryption("phrase secrète robuste"); err != nil {
+		t.Fatal(err)
+	}
+	app.pdfSaveDialog = func(context.Context, wailsruntime.SaveDialogOptions) (string, error) {
+		t.Fatal("dialog opened without plaintext confirmation")
+		return "", nil
+	}
+	if _, err := app.ExportNotePDF(note.RelativePath, "classic", false); err == nil {
+		t.Fatal("encrypted export succeeded without confirmation")
+	}
+}
+
+func setupPDFAppForTest(t *testing.T) *App {
+	t.Helper()
+	service, err := vault.New(vault.Options{Root: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &App{
+		ctx:     t.Context(),
+		session: &vaultSession{service: service},
+		pdfBrowser: func() (detectedPDFBrowser, error) {
+			return detectedPDFBrowser{Name: "Chromium", Path: "/usr/bin/chromium"}, nil
+		},
+		pdfExecutable: func() (string, error) {
+			return "/test/notevault", nil
+		},
+	}
+	t.Cleanup(func() { app.Shutdown(t.Context()) })
+	return app
 }
 
 func TestNewAppFirstLaunchDoesNotCreateLegacyVault(t *testing.T) {

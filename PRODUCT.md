@@ -84,7 +84,8 @@ third parties by default.
 ### Writing and organization
 
 - Create, read, edit, rename, move, duplicate, and delete notes.
-- Use a rich Markdown editor with autosave status and manual save.
+- Use a rich Markdown editor with autosave status, manual save, and
+  Markdown-aware plain-text paste.
 - Organize with folders, tags, pinned notes, filters, and an optional daily
   note.
 - Create notes from user-defined templates.
@@ -127,7 +128,9 @@ third parties by default.
 - Move deleted notes to trash with restore and empty actions.
 - Keep version history, show diffs, and restore earlier versions.
 - Recover unsaved editing buffers after interruption.
-- Export the vault as a ZIP containing plaintext Markdown.
+- Export selected notes as a ZIP containing plaintext Markdown.
+- Export the active note as a local PDF through an isolated worker and an
+  already installed Chrome or Chromium browser.
 
 ### Personalization and insight
 
@@ -150,6 +153,7 @@ vault/
 ├── templates/
 ├── themes/
 └── .notevault/
+    └── pdf-themes/       # optional declarative PDF themes
 ```
 
 Notes and their related data live in this local directory. The in-memory index
@@ -179,6 +183,13 @@ The local asset server must remain confined to `assets/`, bind only to loopback,
 and allow only supported file types. Logs must not contain secrets, note
 content, or unnecessary personal paths. Important persisted state should use
 atomic writes.
+
+PDF export creates its HTML inside NoteVault, escapes raw HTML, embeds only
+validated raster assets from `assets/`, and applies a restrictive content
+security policy. It must not resolve remote or `file://` resources. Amatl is
+limited to HTML-to-PDF conversion inside a child worker; its templates,
+directives, Markdown processing, and URL resolvers are not exposed to notes or
+themes. A parent timeout terminates the worker and its Chromium process group.
 
 Packaged builds make one automatic, unauthenticated HTTPS request per process
 start to GitHub's fixed `kvitrvn/notevault/releases/latest` API endpoint. The
@@ -218,9 +229,9 @@ recovery data. It does not conceal:
 - assets.
 
 Plaintext necessarily exists in process and WebView memory while an encrypted
-vault is unlocked. ZIP exports contain plaintext Markdown. The first version
-has no recovery key, so a forgotten passphrase makes encrypted notes
-unrecoverable.
+vault is unlocked. ZIP and PDF exports contain plaintext and therefore require
+an explicit confirmation. The first version has no recovery key, so a
+forgotten passphrase makes encrypted notes unrecoverable.
 
 ## Non-goals
 

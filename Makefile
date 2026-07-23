@@ -8,7 +8,7 @@ WAILS_BUILD_FLAGS ?= -trimpath
 APP_VERSION ?= $(shell ./scripts/build-version.sh)
 WAILS_LDFLAGS ?= -X main.buildVersion=$(APP_VERSION)
 
-.PHONY: dev regen build test frontend-test fmt check verify patch-models frontend-install
+.PHONY: dev regen build test test-pdf-integration frontend-test fmt check verify patch-models frontend-install
 
 # Workflow dev : `wails dev` régénère les bindings à chaque démarrage,
 # ce qui écrase la classe Time corrigée. Le hook `frontend:dev:watcher`
@@ -28,6 +28,9 @@ build: $(WAILS)
 
 test:
 	go test ./...
+
+test-pdf-integration:
+	NOTEAULT_PDF_INTEGRATION=1 go test . -run '^TestPDFWorkerWithRealChromium$$'
 
 fmt:
 	gofmt -w .

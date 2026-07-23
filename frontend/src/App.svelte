@@ -1949,7 +1949,8 @@
   }
 
   function onExportSuccess(path: string): void {
-    showToast('info', `Archive créée : ${path}`);
+    const label = path.toLowerCase().endsWith('.pdf') ? 'PDF enregistré' : 'Archive créée';
+    showToast('info', `${label} : ${path}`);
   }
 
   function onStatsPickTag(tag: string): void {
@@ -3032,8 +3033,10 @@
 <ExportDialog
   open={exportOpen}
   notes={notes}
+  activeNote={selected}
   encrypted={vaultStatus?.encryptionEnabled ?? false}
   defaultFilename={`notevault-${new Date().toISOString().slice(0, 10)}.zip`}
+  onBeforePDFExport={flushSave}
   onClose={() => (exportOpen = false)}
   onSuccess={onExportSuccess}
 />

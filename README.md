@@ -32,12 +32,14 @@ features while keeping the vault as the source of truth.
 
 ## Features
 
-- Rich Markdown editing with tables, tasks, code blocks, and local images.
+- Rich Markdown editing with tables, tasks, code blocks, local images, and
+  Markdown-aware plain-text paste.
 - Full-text search, filters, tags, folders, and pinned notes.
 - Wiki links, navigation suggestions, and backlinks.
 - Autosave with visible status, plus manual save and draft recovery.
 - Version history with diffs and restore, as well as a recoverable trash.
-- Templates, themes, daily notes, local statistics, and ZIP export.
+- Templates, themes, daily notes, local statistics, ZIP export, and local PDF
+  export of the active note.
 - Detection of changes made to vault files outside NoteVault.
 - Display of the installed version and notification when a newer stable release
   is available.
@@ -77,6 +79,10 @@ Linux Secret Service. Another Secret Service-compatible credential store can
 be used instead. Without an available, unlocked Secret Service, remote chat
 providers are disabled and local Ollama remains available.
 
+Chrome or Chromium is optional and is used only to export the active note as a
+PDF. NoteVault detects an existing installation but never downloads, bundles,
+or installs a browser.
+
 Download `SHA256SUMS` alongside the package and verify its integrity before
 installation:
 
@@ -109,6 +115,7 @@ A vault has the following structure:
 └── .notevault/
     ├── config.json
     ├── pins.json
+    ├── pdf-themes/      # optional declarative PDF themes
     └── chat/models/     # downloaded go-anon models; no note index
 ```
 
@@ -125,6 +132,57 @@ backups.
 
 Remote images remain in Markdown but are blocked in the editor to avoid
 unexpected network requests. Local files can be imported into `assets/`.
+
+## PDF export and themes
+
+The export dialog can create one PDF from the active note. Pending editor
+changes are saved first. Rendering stays local in an isolated NoteVault worker
+and uses an already installed Chrome or Chromium browser with its sandbox
+enabled. The generated HTML has a restrictive content security policy, embeds
+only validated raster images from `assets/` as data URLs, and does not load
+remote images, styles, fonts, scripts, or other network resources. Raw HTML in
+Markdown is displayed as escaped text; Mermaid remains a code block in this
+first version.
+
+Custom PDF themes are separate from interface themes. Create JSON files smaller
+than 64 KiB in `.notevault/pdf-themes/`; the filename without `.json` is the
+theme identifier. A complete version 1 theme looks like this:
+
+```json
+{
+  "version": 1,
+  "page": {
+    "size": "A4",
+    "orientation": "portrait",
+    "margins": {"top": 20, "right": 18, "bottom": 20, "left": 18}
+  },
+  "typography": {
+    "family": "serif",
+    "monoFamily": "monospace",
+    "bodySizePt": 11,
+    "lineHeight": 1.5,
+    "headingScale": 1.25
+  },
+  "colors": {
+    "text": "#202124",
+    "secondary": "#5f6368",
+    "accent": "#315c8c",
+    "codeBackground": "#f3f4f6"
+  },
+  "options": {
+    "titlePage": false,
+    "metadata": true,
+    "pageNumbers": true
+  }
+}
+```
+
+Allowed page sizes are `A4` and `Letter`; margins are 5–40 mm. The body size is
+9–18 pt, line height 1.2–2, heading scale 1–2, and colors must be six-digit
+hexadecimal values. `family` accepts `serif` or `sans-serif`, while
+`monoFamily` accepts `monospace`. Unknown or invalid fields reject the whole
+theme. Raw CSS, HTML, JavaScript, templates, URLs, external fonts, and file
+paths are not supported.
 
 ## Update checks and network privacy
 
@@ -185,6 +243,7 @@ so no plaintext derived index can weaken vault encryption.
   for your operating system
 - A Secret Service implementation such as GNOME Keyring (optional, recommended
   for remote chat providers on Linux)
+- Chrome or Chromium (optional, required only for PDF export)
 
 On Arch Linux and Omarchy, install WebKitGTK 4.1 if needed:
 
@@ -218,6 +277,7 @@ Frontend dependencies are installed automatically by the development workflow.
 | --- | --- |
 | `make dev` | Run the application in development mode |
 | `make test` | Run Go tests |
+| `make test-pdf-integration` | Run the PDF integration test with a real Chromium |
 | `make frontend-test` | Run frontend unit tests with Vitest |
 | `make check` | Check Svelte and TypeScript code |
 | `make verify` | Run all tests and frontend checks |

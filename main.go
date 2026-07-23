@@ -14,6 +14,13 @@ import (
 var buildVersion = "dev"
 
 func main() {
+	if isInternalPDFWorker(os.Args) {
+		if err := runInternalPDFWorker(os.Args[2:], os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == "--version" {
 		fmt.Println(buildVersion)
 		return

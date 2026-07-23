@@ -82,6 +82,9 @@ func New(opts Options) (*Service, error) {
 	if err := ensureThemeDir(root); err != nil {
 		return nil, err
 	}
+	if err := ensurePDFThemeDir(root); err != nil {
+		return nil, err
+	}
 	idx := opts.Index
 	if idx == nil {
 		idx, err = newMemoryIndex(root)

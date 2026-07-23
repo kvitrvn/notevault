@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -74,6 +75,10 @@ type appOptions struct {
 	secrets        chat.SecretStore
 	version        string
 	checkForUpdate func(context.Context, string) (updatecheck.Result, error)
+	pdfSaveDialog  func(context.Context, wailsruntime.SaveDialogOptions) (string, error)
+	pdfBrowser     func() (detectedPDFBrowser, error)
+	pdfExecutable  func() (string, error)
+	pdfRender      func(context.Context, string, detectedPDFBrowser, vault.PDFDocument) ([]byte, error)
 }
 
 // App est la façade Wails. La session est absente tant qu'aucun coffre
@@ -97,6 +102,10 @@ type App struct {
 	updateOnce     sync.Once
 	updateStatus   domain.UpdateStatus
 	checkForUpdate func(context.Context, string) (updatecheck.Result, error)
+	pdfSaveDialog  func(context.Context, wailsruntime.SaveDialogOptions) (string, error)
+	pdfBrowser     func() (detectedPDFBrowser, error)
+	pdfExecutable  func() (string, error)
+	pdfRender      func(context.Context, string, detectedPDFBrowser, vault.PDFDocument) ([]byte, error)
 }
 
 func NewApp() (*App, error) {
@@ -129,6 +138,20 @@ func newApp(opts appOptions) (*App, error) {
 		checker := updatecheck.New(nil, "")
 		opts.checkForUpdate = checker.Check
 	}
+	if opts.pdfSaveDialog == nil {
+		opts.pdfSaveDialog = func(ctx context.Context, dialogOptions wailsruntime.SaveDialogOptions) (string, error) {
+			return wailsruntime.SaveFileDialog(ctx, dialogOptions)
+		}
+	}
+	if opts.pdfBrowser == nil {
+		opts.pdfBrowser = detectPDFBrowser
+	}
+	if opts.pdfExecutable == nil {
+		opts.pdfExecutable = os.Executable
+	}
+	if opts.pdfRender == nil {
+		opts.pdfRender = renderPDFInWorker
+	}
 	store := appconfig.NewStore(opts.configPath)
 	cfg, exists, err := store.Load()
 	if err != nil {
@@ -151,6 +174,10 @@ func newApp(opts appOptions) (*App, error) {
 		secrets:        opts.secrets,
 		version:        opts.version,
 		checkForUpdate: opts.checkForUpdate,
+		pdfSaveDialog:  opts.pdfSaveDialog,
+		pdfBrowser:     opts.pdfBrowser,
+		pdfExecutable:  opts.pdfExecutable,
+		pdfRender:      opts.pdfRender,
 	}
 	if cfg.ActiveVault != "" {
 		prepared, prepareErr := app.prepareSession(cfg.ActiveVault)
@@ -700,6 +727,89 @@ func (a *App) Theme(id string) (vault.Theme, error) {
 func (a *App) ExportNotes(paths []string, dest string) error {
 	return a.sessionError(func(s *vault.Service) error { return s.ExportNotes(paths, dest) })
 }
+
+// PDFExportOptions reports the local renderer availability and declarative
+// themes. Browser discovery is read-only and never installs software.
+func (a *App) PDFExportOptions() (vault.PDFExportOptionsInfo, error) {
+	return withSession(a, func(session *vaultSession) (vault.PDFExportOptionsInfo, error) {
+		themes, warnings := session.service.ListPDFThemes()
+		info := vault.PDFExportOptionsInfo{Themes: themes, Warnings: warnings}
+		if runtime.GOOS != "linux" {
+			info.UnavailableReason = "L’export PDF est disponible uniquement sous Linux dans cette version."
+			return info, nil
+		}
+		browser, err := a.pdfBrowser()
+		if err != nil {
+			info.UnavailableReason = "Installez Chromium ou Google Chrome, puis relancez NoteVault."
+			return info, nil
+		}
+		info.Available = true
+		info.Browser = browser.Name
+		return info, nil
+	})
+}
+
+// ExportNotePDF exports exactly one note. The destination comes exclusively
+// from the native save dialog; the frontend cannot provide an arbitrary path.
+func (a *App) ExportNotePDF(relativePath, themeID string, plaintextConfirmed bool) (string, error) {
+	return withSession(a, func(session *vaultSession) (string, error) {
+		if runtime.GOOS != "linux" {
+			return "", errors.New("l’export PDF est disponible uniquement sous Linux")
+		}
+		if session.service.VaultStatus().EncryptionEnabled && !plaintextConfirmed {
+			return "", errors.New("confirmez que le PDF contiendra la note en clair")
+		}
+		browser, err := a.pdfBrowser()
+		if err != nil {
+			return "", errors.New("installez Chromium ou Google Chrome pour exporter en PDF")
+		}
+		note, err := session.service.OpenNote(relativePath)
+		if err != nil {
+			return "", err
+		}
+		defaultName := strings.TrimSuffix(filepath.Base(note.RelativePath), filepath.Ext(note.RelativePath)) + ".pdf"
+		ctx := a.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		destination, err := a.pdfSaveDialog(ctx, wailsruntime.SaveDialogOptions{
+			Title:                "Exporter la note en PDF",
+			DefaultFilename:      defaultName,
+			CanCreateDirectories: true,
+			Filters: []wailsruntime.FileFilter{
+				{DisplayName: "Document PDF (*.pdf)", Pattern: "*.pdf"},
+			},
+		})
+		if err != nil {
+			return "", fmt.Errorf("ouvrir le dialogue d’export : %w", err)
+		}
+		if destination == "" {
+			return "", nil
+		}
+		if !strings.EqualFold(filepath.Ext(destination), ".pdf") {
+			destination += ".pdf"
+		}
+		document, err := session.service.BuildNotePDFDocument(relativePath, themeID, plaintextConfirmed)
+		if err != nil {
+			return "", err
+		}
+		executable, err := a.pdfExecutable()
+		if err != nil {
+			return "", fmt.Errorf("localiser NoteVault : %w", err)
+		}
+		renderContext, cancel := context.WithTimeout(ctx, pdfParentTimeout)
+		defer cancel()
+		pdf, err := a.pdfRender(renderContext, executable, browser, document)
+		if err != nil {
+			return "", err
+		}
+		if err := vault.WritePDFAtomic(destination, pdf); err != nil {
+			return "", fmt.Errorf("écrire le PDF : %w", err)
+		}
+		return destination, nil
+	})
+}
+
 func (a *App) Stats() (vault.Stats, error) {
 	return withSession(a, func(s *vaultSession) (vault.Stats, error) { return s.service.Stats() })
 }

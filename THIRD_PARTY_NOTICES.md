@@ -24,6 +24,17 @@ binaries.
 NoteVault uses Amoxtli's Markdown parser and Bleve adapter to create an
 ephemeral, in-memory retrieval index for the notes selected by the user.
 
+## Amatl
+
+- Project: <https://github.com/Bornholm/amatl>
+- Version: `v0.31.0`
+- License: MIT
+
+NoteVault uses only Amatl's PDF middleware inside an isolated worker process to
+convert a self-contained, application-generated HTML document with a locally
+installed Chrome or Chromium browser. Amatl's templates, directives, Markdown
+pipeline, and local or remote URL resolvers are not exposed to vault content.
+
 ## go-keyring
 
 - Project: <https://github.com/zalando/go-keyring>
