@@ -28,6 +28,7 @@
   import PanelLeftClose from '@lucide/svelte/icons/panel-left-close';
   import PanelLeftOpen from '@lucide/svelte/icons/panel-left-open';
   import MessageSquare from '@lucide/svelte/icons/message-square';
+  import RefreshCw from '@lucide/svelte/icons/refresh-cw';
   import X from '@lucide/svelte/icons/x';
 
   import NoteEditor from './components/NoteEditor.svelte';
@@ -215,6 +216,8 @@
   let vaultMenuOpen = $state(false);
   let applicationStatus = $state<domain.ApplicationStatus | null>(null);
   let updateStatus = $state<domain.UpdateStatus | null>(null);
+  let checkingForUpdates = $state(false);
+  let updateCheckFailed = $state(false);
   let vaultSwitching = $state(false);
   let vaultSwitchError = $state('');
 
@@ -1773,9 +1776,12 @@
   }
 
   void bootstrapVault();
-  void checkForApplicationUpdates();
+  void checkForApplicationUpdates(false);
 
-  async function checkForApplicationUpdates(): Promise<void> {
+  async function checkForApplicationUpdates(manual: boolean): Promise<void> {
+    if (checkingForUpdates) return;
+    checkingForUpdates = true;
+    updateCheckFailed = false;
     try {
       updateStatus = await CheckForUpdates();
       if (updateStatus.updateAvailable) {
@@ -1783,9 +1789,16 @@
           label: 'Voir la release',
           run: openLatestRelease
         });
+      } else if (manual) {
+        showToast('info', 'NoteVault est à jour.');
       }
     } catch {
-      // La vérification ne doit jamais perturber un démarrage hors ligne.
+      updateCheckFailed = true;
+      if (manual) {
+        showToast('error', 'Impossible de vérifier les mises à jour.');
+      }
+    } finally {
+      checkingForUpdates = false;
     }
   }
 
@@ -2392,7 +2405,26 @@
           {updateStatus.currentVersion} · {updateStatus.latestVersion} disponible
         </button>
       {:else}
-        <span class="shrink-0">{applicationStatus?.version ?? updateStatus?.currentVersion ?? 'dev'}</span>
+        <button
+          type="button"
+          class="inline-flex shrink-0 items-center gap-1 hover:text-foreground disabled:cursor-wait"
+          class:text-danger={updateCheckFailed}
+          title={updateCheckFailed
+            ? 'Vérification impossible. Cliquer pour réessayer.'
+            : 'Vérifier les mises à jour'}
+          disabled={checkingForUpdates}
+          onclick={() => void checkForApplicationUpdates(true)}
+        >
+          <RefreshCw
+            size={11}
+            class={checkingForUpdates ? 'animate-spin' : ''}
+            aria-hidden="true"
+          />
+          <span>{applicationStatus?.version ?? updateStatus?.currentVersion ?? 'dev'}</span>
+          {#if updateCheckFailed}
+            <span>· réessayer</span>
+          {/if}
+        </button>
       {/if}
     </div>
     {/if}

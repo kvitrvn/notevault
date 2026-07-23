@@ -193,11 +193,13 @@ as the most recent published release that is neither a draft nor a prerelease.
 NoteVault sends no vault path, note content, account, or user identifier. Local
 `dev` builds do not make this request.
 
-The request times out after five seconds and any network or response error is
-ignored, so startup and offline use are unaffected. GitHub associates
-unauthenticated API traffic with the originating IP address and currently
-limits it to 60 requests per hour. When an update exists, NoteVault only links
-to the fixed [GitHub Releases page](https://github.com/kvitrvn/notevault/releases/latest);
+The request times out after five seconds. A network or response error never
+blocks startup: it is shown only as a discreet retry state beside the installed
+version. Clicking the version explicitly runs the check again and may therefore
+send another request. GitHub associates unauthenticated API traffic with the
+originating IP address and currently limits it to 60 requests per hour. When an
+update exists, NoteVault only links to the fixed
+[GitHub Releases page](https://github.com/kvitrvn/notevault/releases/latest);
 installing the `.deb` or `.pkg.tar.zst` package remains manual.
 
 See GitHub's documentation for the

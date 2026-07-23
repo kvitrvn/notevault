@@ -195,11 +195,13 @@ Packaged builds make one automatic, unauthenticated HTTPS request per process
 start to GitHub's fixed `kvitrvn/notevault/releases/latest` API endpoint. The
 endpoint returns the latest stable release and excludes drafts and
 prereleases. The request has a five-second timeout and sends no vault path,
-note content, account, or user identifier; failures remain silent and never
-block startup. Local `dev` builds skip the request. GitHub associates
-unauthenticated requests with the originating IP address and currently limits
-them to 60 per hour. NoteVault never opens a URL supplied by the response: the
-update action uses the fixed
+note content, account, or user identifier. A failure never blocks startup and
+is shown only as a discreet retry state beside the installed version. Clicking
+the version explicitly retries the check and may therefore make another
+request. Local `dev` builds skip the request. GitHub associates unauthenticated
+requests with the originating IP address and currently limits them to 60 per
+hour. NoteVault never opens a URL supplied by the response: the update action
+uses the fixed
 `https://github.com/kvitrvn/notevault/releases/latest` page, and package
 installation remains manual.
 

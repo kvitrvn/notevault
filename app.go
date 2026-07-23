@@ -99,8 +99,6 @@ type App struct {
 	now func() time.Time
 
 	version        string
-	updateOnce     sync.Once
-	updateStatus   domain.UpdateStatus
 	checkForUpdate func(context.Context, string) (updatecheck.Result, error)
 	pdfSaveDialog  func(context.Context, wailsruntime.SaveDialogOptions) (string, error)
 	pdfBrowser     func() (detectedPDFBrowser, error)
@@ -423,33 +421,30 @@ func (a *App) ApplicationStatus() (domain.ApplicationStatus, error) {
 	return status, nil
 }
 
-func (a *App) CheckForUpdates() domain.UpdateStatus {
+func (a *App) CheckForUpdates() (domain.UpdateStatus, error) {
 	currentVersion := a.applicationVersion()
-	a.updateOnce.Do(func() {
-		a.updateStatus = domain.UpdateStatus{CurrentVersion: currentVersion}
-		if currentVersion == "dev" {
-			return
-		}
-		check := a.checkForUpdate
-		if check == nil {
-			checker := updatecheck.New(nil, "")
-			check = checker.Check
-		}
-		ctx := a.ctx
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		result, err := check(ctx, currentVersion)
-		if err != nil {
-			return
-		}
-		a.updateStatus = domain.UpdateStatus{
-			CurrentVersion:  result.CurrentVersion,
-			LatestVersion:   result.LatestVersion,
-			UpdateAvailable: result.UpdateAvailable,
-		}
-	})
-	return a.updateStatus
+	status := domain.UpdateStatus{CurrentVersion: currentVersion}
+	if currentVersion == "dev" {
+		return status, nil
+	}
+	check := a.checkForUpdate
+	if check == nil {
+		checker := updatecheck.New(nil, "")
+		check = checker.Check
+	}
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	result, err := check(ctx, currentVersion)
+	if err != nil {
+		return status, errors.New("impossible de vérifier les mises à jour")
+	}
+	return domain.UpdateStatus{
+		CurrentVersion:  result.CurrentVersion,
+		LatestVersion:   result.LatestVersion,
+		UpdateAvailable: result.UpdateAvailable,
+	}, nil
 }
 
 func (a *App) applicationVersion() string {

@@ -341,7 +341,7 @@ func TestNewAppFirstLaunchDoesNotCreateLegacyVault(t *testing.T) {
 	}
 }
 
-func TestAppCheckForUpdatesUsesInjectedCheckerOnce(t *testing.T) {
+func TestAppCheckForUpdatesAllowsAnExplicitRetry(t *testing.T) {
 	root := t.TempDir()
 	var calls int
 	app, err := newApp(appOptions{
@@ -351,6 +351,9 @@ func TestAppCheckForUpdatesUsesInjectedCheckerOnce(t *testing.T) {
 		version:    "v0.3.2",
 		checkForUpdate: func(_ context.Context, current string) (updatecheck.Result, error) {
 			calls++
+			if calls == 1 {
+				return updatecheck.Result{}, errors.New("temporary DNS failure")
+			}
 			return updatecheck.Result{
 				CurrentVersion:  current,
 				LatestVersion:   "v0.3.3",
@@ -363,18 +366,27 @@ func TestAppCheckForUpdatesUsesInjectedCheckerOnce(t *testing.T) {
 	}
 	t.Cleanup(func() { app.Shutdown(t.Context()) })
 
-	first := app.CheckForUpdates()
-	second := app.CheckForUpdates()
+	first, err := app.CheckForUpdates()
+	if err == nil {
+		t.Fatal("first check unexpectedly succeeded")
+	}
+	if first != (domain.UpdateStatus{CurrentVersion: "v0.3.2"}) {
+		t.Fatalf("first result = %+v", first)
+	}
+	second, err := app.CheckForUpdates()
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := domain.UpdateStatus{
 		CurrentVersion:  "v0.3.2",
 		LatestVersion:   "v0.3.3",
 		UpdateAvailable: true,
 	}
-	if first != want || second != want {
-		t.Fatalf("results = %+v, %+v; want %+v", first, second, want)
+	if second != want {
+		t.Fatalf("second result = %+v; want %+v", second, want)
 	}
-	if calls != 1 {
-		t.Fatalf("checker calls = %d, want 1", calls)
+	if calls != 2 {
+		t.Fatalf("checker calls = %d, want 2", calls)
 	}
 }
 
@@ -395,12 +407,16 @@ func TestAppDevVersionSkipsInjectedChecker(t *testing.T) {
 	}
 	t.Cleanup(func() { app.Shutdown(t.Context()) })
 
-	if got := app.CheckForUpdates(); got != (domain.UpdateStatus{CurrentVersion: "dev"}) {
+	got, err := app.CheckForUpdates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != (domain.UpdateStatus{CurrentVersion: "dev"}) {
 		t.Fatalf("status = %+v", got)
 	}
 }
 
-func TestAppUpdateFailureIsSilent(t *testing.T) {
+func TestAppUpdateFailureReturnsGenericErrorAndCurrentVersion(t *testing.T) {
 	root := t.TempDir()
 	app, err := newApp(appOptions{
 		configPath: filepath.Join(root, "config", "app.json"),
@@ -416,7 +432,11 @@ func TestAppUpdateFailureIsSilent(t *testing.T) {
 	}
 	t.Cleanup(func() { app.Shutdown(t.Context()) })
 
-	if got := app.CheckForUpdates(); got != (domain.UpdateStatus{CurrentVersion: "v0.3.2"}) {
+	got, err := app.CheckForUpdates()
+	if err == nil || err.Error() != "impossible de vérifier les mises à jour" {
+		t.Fatalf("error = %v", err)
+	}
+	if got != (domain.UpdateStatus{CurrentVersion: "v0.3.2"}) {
 		t.Fatalf("status = %+v", got)
 	}
 }
