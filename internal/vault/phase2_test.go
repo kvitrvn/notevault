@@ -166,12 +166,12 @@ func TestServiceListNotesFiltered(t *testing.T) {
 	svc, _ := setupVault(t)
 	a, _ := svc.CreateNote("", "Alpha", "")
 	a.Tags = []string{"projet", "important"}
-	if _, err := svc.SaveNote(a); err != nil {
+	if _, err := svc.SaveNoteForce(a); err != nil {
 		t.Fatalf("SaveNote a: %v", err)
 	}
 	b, _ := svc.CreateNote("", "Beta", "")
 	b.Tags = []string{"archive"}
-	if _, err := svc.SaveNote(b); err != nil {
+	if _, err := svc.SaveNoteForce(b); err != nil {
 		t.Fatalf("SaveNote b: %v", err)
 	}
 	if err := svc.IndexNow(context.Background(), nil); err != nil {

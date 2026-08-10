@@ -51,6 +51,7 @@
   import StatsView from './components/StatsView.svelte';
   import ExportDialog from './components/ExportDialog.svelte';
   import RecoveryDialog from './components/RecoveryDialog.svelte';
+  import ConflictDialog from './components/ConflictDialog.svelte';
   import WindowTitleBar from './components/WindowTitleBar.svelte';
   import ChatPanel from './components/ChatPanel.svelte';
   import type { SaveState } from './components/SaveIndicator.svelte';
@@ -79,6 +80,7 @@
     ListFolders,
     ListNotes,
     ListNotesFiltered,
+    ListNoteSummariesByPaths,
     ListPinned,
     ListTags,
     ListTemplates,
@@ -88,12 +90,14 @@
     OpenDailyNote,
     OpenInExplorer,
     OpenNote,
+    OpenNoteFile,
     PinNote,
     RenameFolder,
     RenameTitle,
     RestoreFromHistory,
     SaveAsset,
     SaveNote,
+    SaveNoteForce,
     SearchNotes,
     SetDirtyBuffer,
     SnapshotForStartup,
@@ -103,6 +107,7 @@
     ImportAssetFromFilePath,
     ForgetRecentVault,
     OpenVault,
+    RescanVault,
     VaultStatus,
     UnlockVault,
     EnableEncryption,
@@ -110,6 +115,8 @@
     DisableEncryption
   } from '../wailsjs/go/main/App';
   import { BrowserOpenURL } from '../wailsjs/runtime/runtime';
+
+  import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime';
 
   type Note = domain.Note;
   type NoteSummary = domain.NoteSummary;
@@ -141,6 +148,8 @@
   let templates: Template[] = $state([]);
   let selected: Note | null = $state<Note | null>(null);
   let lastSavedSnapshot = '';
+  let selectedRevision = '';
+  let conflictNote: { path: string } | null = $state(null);
   let vaultPath = $state('');
   let loading = $state(true);
   let saving = $state(false);
@@ -252,13 +261,124 @@
     }
   });
 
-  // Charge la liste des dossiers dès qu'on affiche la vue arborescente
+// Charge la liste des dossiers dès qu'on affiche la vue arborescente
   // (sinon les dossiers vides restent invisibles tant qu'on n'ouvre pas
   // une modale qui les charge paresseusement).
   $effect(() => {
     if (view === 'tree' && !foldersLoading) {
       void loadFolders(true);
     }
+  });
+
+  // --- Vault change events (0.4.2) ----------------------------------------
+  // Wails diffuse ici les batches du backend après chaque flush du watcher
+  // ou après un rescan. FullRescan => reconstruction complète ; sinon on
+  // patche les listes incrémentalement.
+  type VaultChangeBatch = {
+    revision: number;
+    changes: { kind: 'upsert' | 'delete'; path: string }[];
+    fullRescan: boolean;
+  };
+  let vaultEventsSubscribed = false;
+
+  function applyVaultChanges(batch: VaultChangeBatch): void {
+    if (!batch) return;
+    if (batch.fullRescan) {
+      void refresh();
+      return;
+    }
+    if (!batch.changes || batch.changes.length === 0) return;
+    const upserts = batch.changes.filter((c) => c.kind === 'upsert').map((c) => c.path);
+    const deletes = batch.changes.filter((c) => c.kind === 'delete').map((c) => c.path);
+    if (deletes.length > 0) {
+      const delSet = new Set(deletes);
+      notes = notes.filter((n) => !delSet.has(n.relativePath));
+      pinned = pinned.filter((n) => !delSet.has(n.relativePath));
+      if (selected && delSet.has(selected.relativePath)) {
+        selected = null;
+        lastSavedSnapshot = '';
+        saveState = 'clean';
+        lastSavedAt = null;
+        isCurrentPinned = false;
+        showToast('info', 'La note ouverte a été retirée du coffre.');
+      }
+    }
+    if (upserts.length > 0) {
+      // Détection de conflit : la note ouverte est dirty et un upsert
+      // arrive pour son chemin → modif externe concurrente à trancher.
+      const openPath = selected?.relativePath;
+      if (openPath && upserts.includes(openPath) && hasUnsavedChanges) {
+        conflictNote = { path: openPath };
+        showToast(
+          'error',
+          `Modification externe détectée sur ${openPath}. Conflit à résoudre.`
+        );
+      } else if (openPath && upserts.includes(openPath) && !hasUnsavedChanges) {
+        // Note ouverte mais clean → on recharge silencieusement.
+        void (async () => {
+          try {
+            const file = (await OpenNoteFile(openPath)) as { note: Note; revision: string };
+            const content = await precomputeAssetURLs(file.note.content);
+            selected = cloneNote(file.note, content);
+            selectedRevision = String(file.revision ?? '');
+            lastSavedSnapshot = snapshot(selected!);
+            saveState = 'clean';
+          } catch (err) {
+            console.warn('[vault:changed] open note reload failed', err);
+          }
+        })();
+      }
+      void (async () => {
+        try {
+          const fetched = (await ListNoteSummariesByPaths(upserts)) as NoteSummary[];
+          const fetchedMap = new Map(fetched.map((n) => [n.relativePath, n]));
+          const existing = new Set(notes.map((n) => n.relativePath));
+          const additions: NoteSummary[] = [];
+          for (const f of fetched) {
+            if (!existing.has(f.relativePath)) {
+              additions.push(f);
+            }
+          }
+          const merged = [
+            ...notes.map((n) => fetchedMap.get(n.relativePath) ?? n),
+            ...additions
+          ];
+          merged.sort((a, b) => {
+            const ua = String(a.updatedAt ?? '');
+            const ub = String(b.updatedAt ?? '');
+            if (ua !== ub) return ub.localeCompare(ua);
+            return a.relativePath.localeCompare(b.relativePath);
+          });
+          notes = merged;
+          invalidateFolders();
+          await refreshPinnedAndTags();
+        } catch (err) {
+          console.warn('[vault:changed] patch failed, full refresh', err);
+          await refresh();
+        }
+      })();
+    } else if (deletes.length > 0) {
+      invalidateFolders();
+      void refreshPinnedAndTags();
+    }
+  }
+
+  $effect(() => {
+    const active = vaultPath !== '';
+    if (!active) {
+      if (vaultEventsSubscribed) {
+        EventsOff('vault:changed');
+        vaultEventsSubscribed = false;
+      }
+      return;
+    }
+    if (vaultEventsSubscribed) return;
+    EventsOn('vault:changed', (batch: VaultChangeBatch) => applyVaultChanges(batch));
+    vaultEventsSubscribed = true;
+    return () => {
+      EventsOff('vault:changed');
+      vaultEventsSubscribed = false;
+    };
   });
 
   // Vault sync awareness
@@ -534,17 +654,20 @@
     if (!(await flushSave())) return;
     error = '';
     try {
-      const note = await safeCall('OpenNote', OpenNote(relativePath), null);
-      if (!note) {
+      const file = await safeCall('OpenNoteFile', OpenNoteFile(relativePath), null);
+      if (!file) {
         error = `Impossible d'ouvrir ${relativePath}`;
         return;
       }
       // Pré-transforme les chemins relatifs d'images en URLs absolues pour
       // que l'éditeur Tiptap puisse les charger dans la webview.
+      const note = file.note as Note;
       const content = await precomputeAssetURLs(note.content);
       selected = cloneNote(note, content);
+      selectedRevision = String(file.revision ?? '');
       lastSavedSnapshot = snapshot(selected!);
       saveState = 'clean';
+      conflictNote = null;
       isCurrentPinned = await safeCall('IsNotePinned', IsNotePinned(relativePath), false);
     } catch (err) {
       error = String(err);
@@ -749,13 +872,15 @@
     const noteToSave = domain.Note.createFrom({ ...selected });
     const saveSnapshot = snapshot(noteToSave);
     const savePath = noteToSave.relativePath;
+    const expectedRevision = selectedRevision;
     try {
-      const saved = await SaveNote(noteToSave);
+      const saved = await SaveNote(noteToSave, expectedRevision);
       const currentSnapshot = selected?.relativePath === savePath ? snapshot(selected) : '';
       const changedDuringSave = currentSnapshot !== '' && currentSnapshot !== saveSnapshot;
 
       if (!changedDuringSave) {
         selected = saved;
+        selectedRevision = expectedRevision;
       }
       lastSavedSnapshot = snapshot(saved);
       saveState = changedDuringSave ? 'dirty' : 'clean';
@@ -774,6 +899,11 @@
     } catch (err) {
       saveState = 'error';
       const message = String(err);
+      if (message.includes('conflit') || message.toLowerCase().includes('conflict')) {
+        conflictNote = { path: savePath };
+        showToast('error', `Conflit détecté sur ${savePath}. Choisissez une option.`);
+        return false;
+      }
       error = message;
       showToast('error', `Échec de l'enregistrement : ${message}`);
       return false;
@@ -1476,6 +1606,11 @@
       openTemplatePicker();
       return;
     }
+    if (meta && event.altKey && event.key.toLowerCase() === 'r') {
+      event.preventDefault();
+      void rescanVault();
+      return;
+    }
     if (meta && event.key === '/') {
       event.preventDefault();
       shortcutsOpen = !shortcutsOpen;
@@ -1651,6 +1786,17 @@
     vaultMenuOpen = false;
     vaultSwitchError = '';
     vaultPickerOpen = true;
+  }
+
+  async function rescanVault(): Promise<void> {
+    vaultMenuOpen = false;
+    if (!vaultPath) return;
+    try {
+      await RescanVault();
+      showToast('info', 'Cofrre ré-indexé.');
+    } catch (err) {
+      showToast('error', `Échec du rescan : ${err}`);
+    }
   }
 
   async function prepareVaultSwitch(): Promise<boolean> {
@@ -2139,6 +2285,7 @@
               </button>
             {/each}
             <button type="button" role="menuitem" class="block w-full px-3 py-2 text-left text-sm hover:bg-panel-muted" onclick={openVaultPicker}>Créer ou ouvrir un coffre…</button>
+            <button type="button" role="menuitem" class="block w-full px-3 py-2 text-left text-sm hover:bg-panel-muted" onclick={rescanVault}>Rescanner le coffre</button>
           </div>
         {/if}
       </div>
@@ -3079,6 +3226,41 @@
   onRecover={onRecoverAccept}
   onDiscard={onRecoverDiscard}
   onClose={() => (recoveryOpen = false)}
+/>
+
+<ConflictDialog
+  open={conflictNote !== null}
+  path={conflictNote?.path ?? ''}
+  onTakeDisk={async () => {
+    const path = conflictNote?.path;
+    conflictNote = null;
+    if (path) await openNote(path);
+  }}
+  onForceSave={async () => {
+    if (!selected) {
+      conflictNote = null;
+      return;
+    }
+    conflictNote = null;
+    try {
+      const noteToSave = domain.Note.createFrom({ ...selected });
+      const saved = await SaveNoteForce(noteToSave);
+      selected = saved;
+      selectedRevision = '';
+      lastSavedSnapshot = snapshot(saved);
+      saveState = 'clean';
+      lastSavedAt = new Date();
+      try {
+        await ClearDirtyBuffer();
+      } catch {
+        /* non bloquant */
+      }
+      await refreshPinnedAndTags();
+    } catch (err) {
+      showToast('error', `Échec : ${err}`);
+    }
+  }}
+  onClose={() => (conflictNote = null)}
 />
 
 {#if contextMenu}

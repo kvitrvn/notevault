@@ -230,7 +230,7 @@ func TestExportNotesBasic(t *testing.T) {
 		t.Fatalf("CreateNote: %v", err)
 	}
 	note.Content = "Mise à jour du contenu"
-	if _, err := svc.SaveNote(note); err != nil {
+	if _, err := svc.SaveNoteForce(note); err != nil {
 		t.Fatalf("SaveNote: %v", err)
 	}
 
@@ -278,7 +278,7 @@ func TestExportNotesWithAssets(t *testing.T) {
 		t.Fatalf("SaveAsset: %v", err)
 	}
 	note.Content = "![logo](" + relAsset + ")\n"
-	if _, err := svc.SaveNote(note); err != nil {
+	if _, err := svc.SaveNoteForce(note); err != nil {
 		t.Fatalf("SaveNote: %v", err)
 	}
 	dest := filepath.Join(dir, "with-assets.zip")
@@ -342,7 +342,7 @@ func TestExportRejectsForgedAssetPath(t *testing.T) {
 				t.Fatalf("CreateNote: %v", err)
 			}
 			note.Content = "![evil](" + tc.forged + ")\n"
-			if _, err := svc.SaveNote(note); err != nil {
+			if _, err := svc.SaveNoteForce(note); err != nil {
 				t.Fatalf("SaveNote: %v", err)
 			}
 
@@ -465,7 +465,7 @@ func TestStatsWithNotes(t *testing.T) {
 		}
 		created.Content = n.body
 		created.Tags = n.tags
-		if _, err := svc.SaveNote(created); err != nil {
+		if _, err := svc.SaveNoteForce(created); err != nil {
 			t.Fatalf("SaveNote: %v", err)
 		}
 	}
@@ -505,7 +505,7 @@ func TestStatsBucketsAlignedOnWindow(t *testing.T) {
 	svc, _ := setupVault(t)
 	// Crée une note aujourd'hui.
 	note, _ := svc.CreateNote("", "Today", "")
-	if _, err := svc.SaveNote(note); err != nil {
+	if _, err := svc.SaveNoteForce(note); err != nil {
 		t.Fatalf("SaveNote: %v", err)
 	}
 	if err := svc.IndexNow(context.Background(), nil); err != nil {

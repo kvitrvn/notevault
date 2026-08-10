@@ -79,7 +79,7 @@ func TestServiceEncryptionLifecycle(t *testing.T) {
 		t.Fatalf("CreateNote: %v", err)
 	}
 	note.Content = "texte secret"
-	if _, err := svc.SaveNote(note); err != nil {
+	if _, err := svc.SaveNoteForce(note); err != nil {
 		t.Fatalf("SaveNote: %v", err)
 	}
 	if err := svc.MarkOnboardingCompleted(nil); err != nil {

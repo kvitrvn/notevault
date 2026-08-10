@@ -283,7 +283,25 @@ func (a *App) prepareSession(path string) (*vaultSession, error) {
 		_ = service.Close()
 		return nil, fmt.Errorf("démarrer le serveur d’assets : %w", err)
 	}
-	return &vaultSession{service: service, assetSrv: assetSrv, assetPort: port}, nil
+	session := &vaultSession{service: service, assetSrv: assetSrv, assetPort: port}
+	a.subscribeToVaultChanges(session)
+	return session, nil
+}
+
+// subscribeToVaultChanges branche le bus de changements du service
+// vers runtime.EventsEmit. Appelé une seule fois par session. Le nom
+// de l'événement est stable ("vault:changed") et le payload suit la
+// structure vault.VaultChangeBatch exposée dans models.ts après regen.
+//
+// Une subscription par session évite que les batches du coffre précédent
+// continuent d'arriver après un changement de coffre.
+func (a *App) subscribeToVaultChanges(session *vaultSession) {
+	session.service.OnChange(func(batch vault.VaultChangeBatch) {
+		if a.ctx == nil {
+			return
+		}
+		wailsruntime.EventsEmit(a.ctx, "vault:changed", batch)
+	})
 }
 
 func (a *App) commitSession(prepared *vaultSession) error {
@@ -544,6 +562,18 @@ func (a *App) ListNotesFiltered(filter vault.FilterQuery, limit int) ([]domain.N
 func (a *App) ListPinned() ([]domain.NoteSummary, error) {
 	return withSession(a, func(s *vaultSession) ([]domain.NoteSummary, error) { return s.service.ListPinned() })
 }
+func (a *App) ListNoteSummariesByPaths(paths []string) ([]domain.NoteSummary, error) {
+	return withSession(a, func(s *vaultSession) ([]domain.NoteSummary, error) {
+		return s.service.ListNoteSummariesByPaths(paths)
+	})
+}
+
+// RescanVault déclenche une ré-indexation complète du coffre actif.
+// Exposé comme commande de récupération ("Rescanner le coffre")
+// dans l'interface.
+func (a *App) RescanVault() error {
+	return a.sessionError(func(s *vault.Service) error { return s.RescanVault() })
+}
 func (a *App) ListFolders() ([]vault.FolderInfo, error) {
 	return withSession(a, func(s *vaultSession) ([]vault.FolderInfo, error) { return s.service.ListFolders() })
 }
@@ -687,8 +717,18 @@ func (a *App) DeleteFolder(rel string, force bool) error {
 func (a *App) FolderContents(rel string) (vault.FolderContentsInfo, error) {
 	return withSession(a, func(s *vaultSession) (vault.FolderContentsInfo, error) { return s.service.FolderContents(rel) })
 }
-func (a *App) SaveNote(note domain.Note) (domain.Note, error) {
-	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.SaveNote(note) })
+func (a *App) SaveNote(note domain.Note, expectedRevision string) (domain.Note, error) {
+	return withSession(a, func(s *vaultSession) (domain.Note, error) {
+		return s.service.SaveNote(note, expectedRevision)
+	})
+}
+func (a *App) SaveNoteForce(note domain.Note) (domain.Note, error) {
+	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.SaveNoteForce(note) })
+}
+func (a *App) OpenNoteFile(path string) (vault.NoteFile, error) {
+	return withSession(a, func(s *vaultSession) (vault.NoteFile, error) {
+		return s.service.OpenNoteFile(path)
+	})
 }
 func (a *App) DeleteNote(path string) error {
 	return a.sessionError(func(s *vault.Service) error { return s.DeleteNote(path) })

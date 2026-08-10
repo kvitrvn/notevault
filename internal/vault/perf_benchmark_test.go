@@ -20,8 +20,8 @@ func BenchmarkListNotes_10k(b *testing.B) {
 		if err != nil {
 			b.Fatalf("ListNotes: %v", err)
 		}
-		if len(notes) == 0 {
-			b.Fatal("ListNotes returned no notes")
+		if got, want := len(notes), 10_000; got != want {
+			b.Fatalf("ListNotes: %d notes, attendu %d (cap retiré ?)", got, want)
 		}
 	}
 }

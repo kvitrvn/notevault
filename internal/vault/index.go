@@ -54,6 +54,10 @@ type FolderContentsInfo struct {
 type Index interface {
 	Upsert(note domain.Note) error
 	Delete(relativePath string) error
+	// DeletePrefix retire toutes les notes sous prefix (et prefix lui-même
+	// si c'est une note). Retourne les chemins effectivement supprimés,
+	// pour permettre au watcher de publier des Change précis.
+	DeletePrefix(prefix string) ([]string, error)
 	Get(relativePath string) (domain.Note, error)
 	List(filter ListFilter) ([]domain.NoteSummary, error)
 	Search(query string, opts SearchOpts) ([]domain.NoteSummary, error)

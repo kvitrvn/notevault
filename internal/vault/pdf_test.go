@@ -223,7 +223,7 @@ func createPDFTestNote(t *testing.T, service *Service, title, content string) do
 		t.Fatal(err)
 	}
 	note.Content = content
-	note, err = service.SaveNote(note)
+	note, err = service.SaveNoteForce(note)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -37,6 +37,7 @@
         { keys: 'Ctrl+N', label: 'Nouvelle note (avec choix du template)' },
         { keys: 'Ctrl+S', label: 'Enregistrer la note' },
         { keys: 'Ctrl+Shift+R', label: 'Renommer le titre (inline)' },
+        { keys: 'Ctrl+Alt+R', label: 'Rescanner le coffre' },
         { keys: 'Ctrl+Shift+P', label: 'Épingler / désépingler' },
         { keys: 'Ctrl+Shift+M', label: 'Déplacer la note' },
         { keys: 'Entrée', label: 'Renommer (dans le champ titre)' },

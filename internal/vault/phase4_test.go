@@ -54,19 +54,19 @@ func TestServiceGetBacklinks(t *testing.T) {
 	// Crée une note cible.
 	target, _ := svc.CreateNote("", "Projets Q3", "")
 	target.Content = "Auto-référence : [[Projets Q3]]."
-	if _, err := svc.SaveNote(target); err != nil {
+	if _, err := svc.SaveNoteForce(target); err != nil {
 		t.Fatalf("SaveNote target: %v", err)
 	}
 	// Crée une note qui la lie explicitement.
 	a, _ := svc.CreateNote("", "Suivi", "")
 	a.Content = "Voir [[Projets Q3]] pour la liste."
-	if _, err := svc.SaveNote(a); err != nil {
+	if _, err := svc.SaveNoteForce(a); err != nil {
 		t.Fatalf("SaveNote a: %v", err)
 	}
 	// Une simple mention du titre ne constitue pas un backlink.
 	b, _ := svc.CreateNote("", "Retro", "")
 	b.Content = "Le document Projets Q3 est prêt."
-	if _, err := svc.SaveNote(b); err != nil {
+	if _, err := svc.SaveNoteForce(b); err != nil {
 		t.Fatalf("SaveNote b: %v", err)
 	}
 	// Indexation.
@@ -101,7 +101,7 @@ func TestServiceHistoryBasic(t *testing.T) {
 	note, _ := svc.CreateNote("", "Versionnée", "")
 	for i := 0; i < 3; i++ {
 		note.Content = "v" + string(rune('1'+i))
-		if _, err := svc.SaveNote(note); err != nil {
+		if _, err := svc.SaveNoteForce(note); err != nil {
 			t.Fatalf("SaveNote %d: %v", i, err)
 		}
 	}
@@ -158,7 +158,7 @@ func TestServiceHistoryRotation(t *testing.T) {
 	note, _ := svc.CreateNote("", "Tourne", "")
 	for i := 0; i < 5; i++ {
 		note.Content = "v" + string(rune('1'+i))
-		_, _ = svc.SaveNote(note)
+		_, _ = svc.SaveNoteForce(note)
 		time.Sleep(2 * time.Millisecond) // timestamp différent
 	}
 	hist, _ := svc.ListHistory(note.RelativePath)
@@ -171,12 +171,12 @@ func TestServiceDiffHistory(t *testing.T) {
 	svc, _ := setupVault(t)
 	note, _ := svc.CreateNote("", "Diff", "")
 	note.Content = "ligne A\nligne B\nligne C\n"
-	v1, _ := svc.SaveNote(note)
+	v1, _ := svc.SaveNoteForce(note)
 	// Modifie et sauve deux fois pour obtenir deux snapshots.
 	note.Content = "ligne A\nligne B modifiée\nligne C\n"
-	_, _ = svc.SaveNote(note)
+	_, _ = svc.SaveNoteForce(note)
 	note.Content = "ligne A\nligne B modifiée\nligne C\nligne D\n"
-	_, _ = svc.SaveNote(note)
+	_, _ = svc.SaveNoteForce(note)
 	hist, _ := svc.ListHistory(v1.RelativePath)
 	if len(hist) < 2 {
 		t.Fatalf("history: %d", len(hist))
@@ -198,9 +198,9 @@ func TestServiceReadHistoryVersion(t *testing.T) {
 	svc, _ := setupVault(t)
 	note, _ := svc.CreateNote("", "Read", "")
 	note.Content = "version 1"
-	_, _ = svc.SaveNote(note)
+	_, _ = svc.SaveNoteForce(note)
 	note.Content = "version 2"
-	_, _ = svc.SaveNote(note)
+	_, _ = svc.SaveNoteForce(note)
 	hist, _ := svc.ListHistory(note.RelativePath)
 	// hist[0] est le snapshot le plus récent (avant "version 2") qui
 	// contient donc "version 1".

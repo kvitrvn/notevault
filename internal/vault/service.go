@@ -31,6 +31,7 @@ type Service struct {
 	themes    *ThemeLoader
 	indexCtx  context.Context
 	indexStop context.CancelFunc
+	changes   *changeBus
 
 	securityMu         sync.RWMutex
 	mutationMu         sync.RWMutex
@@ -108,6 +109,7 @@ func New(opts Options) (*Service, error) {
 		themes:        NewThemeLoader(root),
 		vaultState:    VaultDisabled,
 		watcherWanted: opts.StartWatcher,
+		changes:       newChangeBus(),
 	}
 	metadata, err := loadEncryptionMetadata(root)
 	if err != nil {
@@ -189,7 +191,7 @@ func (s *Service) ensureDailyNoteImpl() (string, error) {
 		UpdatedAt:    now,
 		Tags:         []string{"daily"},
 	}
-	if _, err := s.SaveNote(note); err != nil {
+	if _, err := s.SaveNoteForce(note); err != nil {
 		return "", err
 	}
 	return rel, nil
@@ -248,41 +250,210 @@ func (s *Service) readForIndex(path string) (domain.Note, error) {
 }
 
 func (s *Service) reindexFromPath(absPath string) {
-	// Détermine le chemin relatif à la racine du coffre.
-	rel, err := filepath.Rel(s.root, absPath)
+	// Conservé pour les surcharges/tests ; délègue à la nouvelle API batch.
+	_, _, _ = s.ApplyFsEvents([]fsObservation{{path: absPath, kind: fsEventUpsert}})
+}
+
+// fsRescanSentinel est un chemin réservé utilisé pour signaler un
+// rescan complet au pathProcessor. Il ne peut pas apparaître comme
+// chemin disque valide (commence par underscore et n'est pas dans
+// la zone indexée) et permet au watcher de router un débordement
+// fsnotify vers la même API que les événements classiques.
+const fsRescanSentinel = "__vault_rescan__"
+
+// ApplyFsEvents traite un batch d'observations du watcher et publie
+// un changeBus batch correspondant. Il peut être appelé hors d'un
+// watcher (tests, Rescan manuel) ; il est idempotent.
+func (s *Service) ApplyFsEvents(observations []fsObservation) ([]VaultChange, bool, error) {
+	changes := make([]VaultChange, 0)
+	fullRescan := false
+
+	for _, obs := range observations {
+		if obs.path == fsRescanSentinel {
+			batchChanges, err := s.fullReconcile()
+			if err != nil {
+				return nil, true, err
+			}
+			changes = append(changes, batchChanges...)
+			fullRescan = true
+			continue
+		}
+
+		rel, err := filepath.Rel(s.root, obs.path)
+		if err != nil {
+			continue
+		}
+		rel = filepath.ToSlash(rel)
+
+		// Hors de notes/ : on retire si c'était une note connue.
+		if !strings.HasPrefix(rel, "notes/") {
+			if obs.kind == fsEventRemove {
+				if err := s.index.Delete(rel); err == nil {
+					changes = append(changes, VaultChange{Kind: ChangeDelete, Path: rel})
+				}
+			}
+			continue
+		}
+
+		// Dossier : upsert déclenche un scan récursif des .md existants
+		// (sinon ils n'apparaissent jamais dans l'index si le dossier a
+		// été ajouté en une seule opération COPY), remove déclenche
+		// DeletePrefix pour purger toute la sous-arborescence.
+		if obs.isDir {
+			switch obs.kind {
+			case fsEventUpsert:
+				changes = append(changes, s.scanFolderForNotes(absNotesRoot(s.root, rel))...)
+			case fsEventRemove:
+				deleted, err := s.index.DeletePrefix(rel)
+				if err != nil {
+					return nil, false, err
+				}
+				for _, p := range deleted {
+					changes = append(changes, VaultChange{Kind: ChangeDelete, Path: p})
+				}
+			}
+			continue
+		}
+
+		if strings.ToLower(filepath.Ext(rel)) != ".md" {
+			continue
+		}
+
+		switch obs.kind {
+		case fsEventRemove:
+			if err := s.index.Delete(rel); err == nil || errors.Is(err, ErrNotFound) {
+				changes = append(changes, VaultChange{Kind: ChangeDelete, Path: rel})
+			}
+		case fsEventUpsert:
+			// Ignorer l'écho d'une écriture interne récente : SaveNote,
+			// MoveNote, RestoreFromTrash, etc. ont déjà réindexé en mémoire
+			// juste après l'écriture atomique. Sans ce court-circuit, chaque
+			// sauvegarde déclencherait une seconde lecture complète +
+			// re-tokenisation par le watcher (cf. audit perf 2.1).
+			if _, ok := s.consumeInternalWrite(obs.path); ok {
+				continue
+			}
+			if _, err := os.Stat(obs.path); err != nil {
+				if delErr := s.index.Delete(rel); delErr == nil {
+					changes = append(changes, VaultChange{Kind: ChangeDelete, Path: rel})
+				}
+				continue
+			}
+			note, err := s.readAbsolute(obs.path)
+			if err != nil {
+				if delErr := s.index.Delete(rel); delErr == nil {
+					changes = append(changes, VaultChange{Kind: ChangeDelete, Path: rel})
+				}
+				s.addEncryptionWarning(rel + " : note illisible")
+				continue
+			}
+			if upsertErr := s.index.Upsert(note); upsertErr == nil {
+				changes = append(changes, VaultChange{Kind: ChangeUpsert, Path: rel})
+			}
+		}
+	}
+
+	if len(changes) > 0 || fullRescan {
+		s.changes.Publish(VaultChangeBatch{Changes: changes, FullRescan: fullRescan})
+	}
+	return changes, fullRescan, nil
+}
+
+func absNotesRoot(root, rel string) string {
+	if rel == "notes" {
+		return filepath.Join(root, "notes")
+	}
+	clean := strings.TrimPrefix(rel, "notes/")
+	return filepath.Join(root, "notes", filepath.FromSlash(clean))
+}
+
+func (s *Service) scanFolderForNotes(absFolder string) []VaultChange {
+	changes := make([]VaultChange, 0, 8)
+	_ = filepath.WalkDir(absFolder, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, fs.ErrNotExist) {
+				return nil
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if strings.ToLower(filepath.Ext(path)) != ".md" {
+			return nil
+		}
+		rel, err := filepath.Rel(s.root, path)
+		if err != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		// L'index a peut-être déjà la note (événement Create reçu avant
+		// l'événement du dossier parent) ; Upsert est idempotent.
+		note, err := s.readAbsolute(path)
+		if err != nil {
+			return nil
+		}
+		if upsertErr := s.index.Upsert(note); upsertErr == nil {
+			changes = append(changes, VaultChange{Kind: ChangeUpsert, Path: rel})
+		}
+		return nil
+	})
+	return changes
+}
+
+// fullReconcile ré-indexe l'ensemble du dossier notes/ depuis le disque
+// et retourne les changements effectivement appliqués. Utilisé par le
+// rescan initial, le débordement fsnotify et la commande "Rescanner".
+func (s *Service) fullReconcile() ([]VaultChange, error) {
+	idx, ok := s.index.(reconcileIndex)
+	if !ok {
+		return nil, fmt.Errorf("l'index courant ne supporte pas la réconciliation")
+	}
+	beforePaths, err := idx.ListPaths()
 	if err != nil {
-		return
+		return nil, err
 	}
-	rel = filepath.ToSlash(rel)
-	if !strings.HasPrefix(rel, "notes/") {
-		// Hors de la zone indexée : on supprime si c'était une note connue.
-		_ = s.index.Delete(rel)
-		return
+	before := make(map[string]struct{}, len(beforePaths))
+	for _, p := range beforePaths {
+		before[p] = struct{}{}
 	}
-	if strings.ToLower(filepath.Ext(absPath)) != ".md" {
-		return
+	if err := reconcileExistingWithReader(s.BootstrapContext(), s.root, idx, nil, s.readForIndex); err != nil {
+		return nil, err
 	}
-	if _, err := os.Stat(absPath); err != nil {
-		// Fichier supprimé.
-		_ = s.index.Delete(rel)
-		s.consumeInternalWrite(absPath)
-		return
-	}
-	// Ignorer l'écho d'une écriture interne récente : SaveNote,
-	// MoveNote et RestoreFromTrash ont déjà réindexé en mémoire juste
-	// après l'écriture atomique. Sans ce court-circuit, chaque sauvegarde
-	// déclencherait une seconde lecture complète + re-tokenisation par le
-	// watcher (cf. audit perf 2.1).
-	if _, ok := s.consumeInternalWrite(absPath); ok {
-		return
-	}
-	note, err := s.readAbsolute(absPath)
+	afterPaths, err := idx.ListPaths()
 	if err != nil {
-		_ = s.index.Delete(rel)
-		s.addEncryptionWarning(rel + " : note illisible")
-		return
+		return nil, err
 	}
-	_ = s.index.Upsert(note)
+	changes := make([]VaultChange, 0, len(afterPaths))
+	for _, p := range afterPaths {
+		if _, existed := before[p]; !existed {
+			changes = append(changes, VaultChange{Kind: ChangeUpsert, Path: p})
+		}
+	}
+	return changes, nil
+}
+
+// OnChange enregistre un abonné aux changements effectivement appliqués
+// à l'index par le watcher, le rescan ou les opérations CRUD.
+func (s *Service) OnChange(handler ChangeHandler) {
+	s.changes.Subscribe(handler)
+}
+
+// RescanVault ré-indexe le coffre complet et publie un batch avec
+// FullRescan=true. Les changements effectivement appliqués sont détaillés
+// dans le payload au cas où le frontend voudrait les inspecter. À
+// utiliser en support (debug d'un overflow fsnotify, d'un import
+// partiel) ou après une opération disque externe massive.
+func (s *Service) RescanVault() error {
+	if err := s.requireUnlocked(); err != nil {
+		return err
+	}
+	changes, err := s.fullReconcile()
+	if err != nil {
+		return err
+	}
+	s.changes.Publish(VaultChangeBatch{Changes: changes, FullRescan: true})
+	return nil
 }
 
 // markInternalWrite enregistre absPath comme venant d'être écrit par
@@ -325,28 +496,24 @@ func (s *Service) consumeInternalWrite(absPath string) (time.Time, bool) {
 }
 
 func (s *Service) ListNotes() ([]domain.NoteSummary, error) {
-	return s.ListNotesFiltered(FilterQuery{}, 5000)
+	return s.ListNotesFiltered(FilterQuery{}, 0)
 }
 
 // ListNotesFiltered applique une requête structurée et retourne les
 // résumés de notes correspondants. Si la requête est vide, équivaut
-// à ListNotes().
+// à ListNotes(). limit <= 0 signifie "aucune limite" ; utile pour
+// supporter l'objectif 10 000 notes annoncé par le produit.
 func (s *Service) ListNotesFiltered(q FilterQuery, limit int) ([]domain.NoteSummary, error) {
 	if err := s.requireUnlocked(); err != nil {
 		return nil, err
-	}
-	if limit <= 0 {
-		limit = 5000
 	}
 	summaries, err := s.index.List(q.ToListFilter(limit))
 	if err != nil {
 		return nil, fmt.Errorf("lister les notes : %w", err)
 	}
 	if q.IsEmpty() {
-		// Tri stable déjà assuré par l'index.
 		return summaries, nil
 	}
-	// Tri déjà assuré par l'index.
 	return summaries, nil
 }
 
@@ -358,6 +525,33 @@ func (s *Service) ListPinned() ([]domain.NoteSummary, error) {
 	out, err := s.index.ListPinned()
 	if err != nil {
 		return nil, fmt.Errorf("lister les épinglées : %w", err)
+	}
+	return out, nil
+}
+
+// ListNoteSummariesByPaths retourne les résumés d'un sous-ensemble
+// précis de notes. Les chemins absents de l'index sont silencieusement
+// ignorés (utile pour appliquer un patch VaultChangeBatch où certaines
+// notes ont été supprimées entre-temps).
+func (s *Service) ListNoteSummariesByPaths(paths []string) ([]domain.NoteSummary, error) {
+	if err := s.requireUnlocked(); err != nil {
+		return nil, err
+	}
+	out := make([]domain.NoteSummary, 0, len(paths))
+	for _, path := range paths {
+		note, err := s.index.Get(path)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			return nil, fmt.Errorf("résumé %s : %w", path, err)
+		}
+		out = append(out, domain.NoteSummary{
+			RelativePath: note.RelativePath,
+			Title:        note.Title,
+			UpdatedAt:    note.UpdatedAt,
+			Tags:         append([]string(nil), note.Tags...),
+		})
 	}
 	return out, nil
 }
@@ -438,6 +632,34 @@ func (s *Service) OpenNote(relativePath string) (domain.Note, error) {
 	return s.readAbsolute(path)
 }
 
+// OpenNoteFile ouvre une note conjointement avec une révision disque
+// (sha256 du contenu brut). Utilisé pour détecter les conflits d'édition
+// quand le fichier est modifié hors de NoteVault entre deux sauvegardes.
+func (s *Service) OpenNoteFile(relativePath string) (NoteFile, error) {
+	path, err := s.absoluteNotePath(relativePath)
+	if err != nil {
+		return NoteFile{}, err
+	}
+	relativePath, err = filepath.Rel(s.root, path)
+	if err != nil {
+		return NoteFile{}, err
+	}
+	relativePath = filepath.ToSlash(relativePath)
+	raw, err := s.readPayload(relativePath)
+	if err != nil {
+		return NoteFile{}, fmt.Errorf("lire la note : %w", err)
+	}
+	note := parse(string(raw))
+	note.RelativePath = relativePath
+	if note.Title == "" {
+		note.Title = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	}
+	if info, err := os.Stat(path); err == nil && note.UpdatedAt.IsZero() {
+		note.UpdatedAt = info.ModTime().UTC()
+	}
+	return NoteFile{Note: note, Revision: revisionOf(raw)}, nil
+}
+
 // CreateNote crée une nouvelle note dans le dossier indiqué. parentRelPath
 // est un chemin relatif (par exemple "inbox", "projets" ou "projets/web"),
 // ou une chaîne vide pour utiliser le dossier par défaut (notes/inbox/).
@@ -466,7 +688,7 @@ func (s *Service) CreateNote(parentRelPath, title, templateKey string) (domain.N
 		UpdatedAt:    now,
 		Tags:         []string{},
 	}
-	return s.SaveNote(note)
+	return s.SaveNoteForce(note)
 }
 
 // CreateFolder crée un nouveau dossier vide sous notes/. parentRelPath est
@@ -884,7 +1106,7 @@ func (s *Service) resolveTemplateBody(key string) string {
 	return template(key)
 }
 
-func (s *Service) SaveNote(note domain.Note) (domain.Note, error) {
+func (s *Service) SaveNote(note domain.Note, expectedRevision string) (domain.Note, error) {
 	s.mutationMu.RLock()
 	defer s.mutationMu.RUnlock()
 	if err := s.requireUnlocked(); err != nil {
@@ -895,6 +1117,37 @@ func (s *Service) SaveNote(note domain.Note) (domain.Note, error) {
 	if err != nil {
 		return domain.Note{}, err
 	}
+	if expectedRevision != "" {
+		currentRaw, readErr := s.readPayload(note.RelativePath)
+		if readErr == nil {
+			if revisionOf(currentRaw) != expectedRevision {
+				return domain.Note{}, ErrConflict
+			}
+		} else if !errors.Is(readErr, fs.ErrNotExist) {
+			return domain.Note{}, fmt.Errorf("vérifier la révision disque : %w", readErr)
+		}
+	}
+	return s.saveNoteUnlocked(note, path)
+}
+
+// SaveNoteForce écrit la note sans vérificateur de conflit. Réservé à
+// l'interface utilisateur lorsque l'utilisateur tranche explicitement
+// en faveur de sa version locale.
+func (s *Service) SaveNoteForce(note domain.Note) (domain.Note, error) {
+	s.mutationMu.RLock()
+	defer s.mutationMu.RUnlock()
+	if err := s.requireUnlocked(); err != nil {
+		return domain.Note{}, err
+	}
+	note.RelativePath = filepath.ToSlash(filepath.Clean(filepath.FromSlash(note.RelativePath)))
+	path, err := s.absoluteNotePath(note.RelativePath)
+	if err != nil {
+		return domain.Note{}, err
+	}
+	return s.saveNoteUnlocked(note, path)
+}
+
+func (s *Service) saveNoteUnlocked(note domain.Note, path string) (domain.Note, error) {
 	now := nowUTC()
 	if note.CreatedAt.IsZero() {
 		note.CreatedAt = now
@@ -1139,7 +1392,7 @@ func (s *Service) DuplicateNote(relativePath string) (domain.Note, error) {
 	}
 	note.CreatedAt = now
 	note.UpdatedAt = now
-	return s.SaveNote(note)
+	return s.SaveNoteForce(note)
 }
 
 // OpenInExplorer ouvre le fichier (ou son dossier) dans le gestionnaire
@@ -1172,7 +1425,7 @@ func (s *Service) RenameTitle(relativePath, newTitle string) (domain.Note, error
 	if note.Title == "" {
 		note.Title = "Sans titre"
 	}
-	return s.SaveNote(note)
+	return s.SaveNoteForce(note)
 }
 
 // GetBacklinks retourne les notes qui référencent le titre donné avec un
@@ -1423,7 +1676,7 @@ func (s *Service) startWatcher() error {
 		return nil
 	}
 	s.indexCtx, s.indexStop = context.WithCancel(context.Background())
-	w, err := NewWatcher(s.indexCtx, s.root, s.index, s.reindexFromPath)
+	w, err := NewWatcher(s.indexCtx, s.root, s)
 	if err != nil {
 		s.indexStop()
 		s.indexStop = nil

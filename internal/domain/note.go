@@ -11,6 +11,11 @@ type Note struct {
 	CreatedAt    time.Time `json:"createdAt"`
 	UpdatedAt    time.Time `json:"updatedAt"`
 	Tags         []string  `json:"tags"`
+
+	// ExtraFrontmatter contient les clés de frontmatter non reconnues
+	// par NoteVault (aliases, status, cssclasses, owner, etc.). Round-trip
+	// lossless : ces clés sont préservées telles quelles à la sauvegarde.
+	ExtraFrontmatter map[string]any `json:"extraFrontmatter,omitempty"`
 }
 
 type NoteSummary struct {

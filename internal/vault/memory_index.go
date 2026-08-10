@@ -186,6 +186,34 @@ func (i *memoryIndex) Delete(path string) error {
 	return nil
 }
 
+func (i *memoryIndex) DeletePrefix(prefix string) ([]string, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	prefixSlash := prefix
+	if !strings.HasSuffix(prefixSlash, "/") {
+		prefixSlash = prefixSlash + "/"
+	}
+	deleted := make([]string, 0)
+	pinDirty := false
+	for path := range i.notes {
+		if path == prefix || strings.HasPrefix(path, prefixSlash) {
+			i.deleteTokensLocked(path)
+			delete(i.notes, path)
+			deleted = append(deleted, path)
+			if _, ok := i.pins[path]; ok {
+				delete(i.pins, path)
+				pinDirty = true
+			}
+		}
+	}
+	if pinDirty {
+		if err := i.savePinsLocked(); err != nil {
+			return deleted, err
+		}
+	}
+	return deleted, nil
+}
+
 func (i *memoryIndex) Get(path string) (domain.Note, error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
@@ -593,7 +621,7 @@ func summaryOf(note domain.Note) domain.NoteSummary {
 }
 
 func summaries(ranked []rankedSummary, limit int) []domain.NoteSummary {
-	if len(ranked) > limit {
+	if limit > 0 && len(ranked) > limit {
 		ranked = ranked[:limit]
 	}
 	out := make([]domain.NoteSummary, len(ranked))
@@ -603,12 +631,13 @@ func summaries(ranked []rankedSummary, limit int) []domain.NoteSummary {
 	return out
 }
 
+// clampLimit applique la limite demandée par l'appelant.
+// 0 ou négatif => pas de limite explicite, on retourne toutes les
+// entrées ; on conserve le comportement historique pour les chemins
+// qui passent une limite explicite (ex. recherche).
 func clampLimit(n int) int {
 	if n <= 0 {
-		return 1000
-	}
-	if n > 5000 {
-		return 5000
+		return 0
 	}
 	return n
 }

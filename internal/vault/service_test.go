@@ -41,7 +41,7 @@ func TestServiceCRUD(t *testing.T) {
 	}
 
 	created.Content = "Hello world"
-	updated, err := svc.SaveNote(created)
+	updated, err := svc.SaveNoteForce(created)
 	if err != nil {
 		t.Fatalf("SaveNote: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestServiceSearch(t *testing.T) {
 			t.Fatalf("CreateNote: %v", err)
 		}
 		note.Content = "Contenu de " + title
-		if _, err := svc.SaveNote(note); err != nil {
+		if _, err := svc.SaveNoteForce(note); err != nil {
 			t.Fatalf("SaveNote: %v", err)
 		}
 	}
@@ -228,7 +228,7 @@ func TestServiceAtomicWrite(t *testing.T) {
 		t.Fatalf("CreateNote: %v", err)
 	}
 	note.Content = "premier contenu"
-	if _, err := svc.SaveNote(note); err != nil {
+	if _, err := svc.SaveNoteForce(note); err != nil {
 		t.Fatalf("SaveNote 1: %v", err)
 	}
 	// Aucun fichier .tmp ne doit subsister.
