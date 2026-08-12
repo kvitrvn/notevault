@@ -34,6 +34,13 @@ const validPDFThemeJSON = `{
   "options": {"titlePage": true, "metadata": true, "pageNumbers": true}
 }`
 
+const validPDFThemeStylesheet = `
+body { font-family: "Geist", sans-serif; }
+pre, code { font-family: "Geist Mono", monospace; }
+blockquote { border-left: 3pt solid #0a5bd4; }
+@media print { a { text-decoration: none; } }
+`
+
 func TestListPDFThemesIncludesClassicAndWarnsForInvalidCustomThemes(t *testing.T) {
 	service := newPDFTestService(t)
 	dir := filepath.Join(service.root, ".notevault", "pdf-themes")
@@ -52,6 +59,50 @@ func TestListPDFThemesIncludesClassicAndWarnsForInvalidCustomThemes(t *testing.T
 	}
 	if len(warnings) != 2 {
 		t.Fatalf("warnings = %v, want 2", warnings)
+	}
+}
+
+func TestListPDFThemesSupportsStandaloneAndCompanionStylesheets(t *testing.T) {
+	service := newPDFTestService(t)
+	dir := filepath.Join(service.root, ".notevault", "pdf-themes")
+	writeTestFile(t, filepath.Join(dir, "beewii.css"), []byte(validPDFThemeStylesheet))
+	writeTestFile(t, filepath.Join(dir, "beewii.html"), []byte(`<script>alert("ignored")</script>`))
+	writeTestFile(t, filepath.Join(dir, "report.json"), []byte(validPDFThemeJSON))
+	writeTestFile(t, filepath.Join(dir, "report.css"), []byte("main { max-width: 46rem; }"))
+
+	themes, warnings := service.ListPDFThemes()
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v", warnings)
+	}
+	if len(themes) != 3 || themes[0].ID != "classic" || themes[1].ID != "beewii" || themes[2].ID != "report" {
+		t.Fatalf("themes = %+v", themes)
+	}
+	if themes[1].Builtin || themes[1].stylesheet != validPDFThemeStylesheet {
+		t.Fatalf("standalone CSS theme = %+v", themes[1])
+	}
+	if themes[1].Page.Margins != classicPDFTheme().Page.Margins {
+		t.Fatalf("standalone CSS margins = %+v", themes[1].Page.Margins)
+	}
+	if themes[2].Page.Margins.Top != 15 || themes[2].stylesheet != "main { max-width: 46rem; }" {
+		t.Fatalf("JSON + CSS theme = %+v", themes[2])
+	}
+}
+
+func TestListPDFThemesRejectsStylesheetSymlinks(t *testing.T) {
+	service := newPDFTestService(t)
+	dir := filepath.Join(service.root, ".notevault", "pdf-themes")
+	target := filepath.Join(t.TempDir(), "outside.css")
+	writeTestFile(t, target, []byte(validPDFThemeStylesheet))
+	if err := os.Symlink(target, filepath.Join(dir, "outside.css")); err != nil {
+		t.Fatal(err)
+	}
+
+	themes, warnings := service.ListPDFThemes()
+	if len(themes) != 1 || themes[0].ID != "classic" {
+		t.Fatalf("themes = %+v", themes)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "liens symboliques") {
+		t.Fatalf("warnings = %v", warnings)
 	}
 }
 
@@ -88,6 +139,90 @@ func TestLoadPDFThemeRejectsOversizedFile(t *testing.T) {
 	writeTestFile(t, path, bytes.Repeat([]byte(" "), maxPDFThemeBytes+1))
 	if _, err := loadPDFThemeFile(path, "large"); err == nil || !strings.Contains(err.Error(), "64 Kio") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadPDFThemeStylesheetRejectsUnsafeCSS(t *testing.T) {
+	tests := []struct {
+		name string
+		css  []byte
+	}{
+		{name: "remote URL", css: []byte(`body { background: url(https://example.test/a.png); }`)},
+		{name: "obfuscated import", css: []byte(`@im/**/port "theme.css";`)},
+		{name: "font face", css: []byte(`@font-face { src: local("Geist"); }`)},
+		{name: "HTML escape", css: []byte(`</style><script>alert(1)</script>`)},
+		{name: "CSS escape", css: []byte(`body { background: u\72l(example.test); }`)},
+		{name: "unterminated comment", css: []byte(`body {} /*`)},
+		{name: "invalid UTF-8", css: []byte{0xff}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "theme.css")
+			writeTestFile(t, path, test.css)
+			if _, err := loadPDFThemeStylesheet(path); err == nil {
+				t.Fatal("loadPDFThemeStylesheet succeeded")
+			}
+		})
+	}
+}
+
+func TestLoadPDFThemeStylesheetRejectsOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "large.css")
+	writeTestFile(t, path, bytes.Repeat([]byte(" "), maxPDFStylesheetBytes+1))
+	if _, err := loadPDFThemeStylesheet(path); err == nil || !strings.Contains(err.Error(), "64 Kio") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestBuildNotePDFDocumentUsesLocalCSSTheme(t *testing.T) {
+	service := newPDFTestService(t)
+	dir := filepath.Join(service.root, ".notevault", "pdf-themes")
+	stylesheet := validPDFThemeStylesheet + `
+header { background: linear-gradient(150deg, #062a78 0%, #0a49ab 45%, #0a6fde 100%); }
+pre { background: #f6f8fb; }
+`
+	writeTestFile(t, filepath.Join(dir, "beewii.css"), []byte(stylesheet))
+	note := createPDFTestNote(t, service, "Audit de conformité", strings.Join([]string{
+		"## Synthèse",
+		"",
+		"> Les traitements restent maîtrisés.",
+		"",
+		"| Contrôle | Statut |",
+		"| --- | --- |",
+		"| Chiffrement | Conforme |",
+		"",
+		"```go",
+		`fmt.Println("auditable")`,
+		"```",
+	}, "\n"))
+
+	document, err := service.BuildNotePDFDocument(note.RelativePath, "beewii", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(document.HTML)
+	for _, expected := range []string{
+		`linear-gradient(150deg, #062a78 0%, #0a49ab 45%, #0a6fde 100%)`,
+		`font-family: "Geist",`,
+		`font-family: "Geist Mono",`,
+		`border-left: 3pt solid #0a5bd4`,
+		`background: #f6f8fb`,
+		`font-src 'none'`,
+	} {
+		if !strings.Contains(html, expected) {
+			t.Errorf("local CSS theme HTML does not contain %q", expected)
+		}
+	}
+	for _, forbidden := range []string{"fonts.googleapis.com", "https://", "file://"} {
+		if strings.Contains(html, forbidden) {
+			t.Errorf("local CSS theme HTML contains remote/local resource %q", forbidden)
+		}
+	}
+	if document.Margins != classicPDFTheme().Page.Margins {
+		t.Fatalf("margins = %+v", document.Margins)
+	}
+	if !document.PageNumbers {
+		t.Fatal("standalone CSS theme must inherit page numbers")
 	}
 }
 

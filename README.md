@@ -115,7 +115,7 @@ A vault has the following structure:
 └── .notevault/
     ├── config.json
     ├── pins.json
-    ├── pdf-themes/      # optional declarative PDF themes
+    ├── pdf-themes/      # optional local PDF themes (JSON and CSS)
     └── chat/models/     # downloaded go-anon models; no note index
 ```
 
@@ -144,9 +144,15 @@ remote images, styles, fonts, scripts, or other network resources. Raw HTML in
 Markdown is displayed as escaped text; Mermaid remains a code block in this
 first version.
 
-Custom PDF themes are separate from interface themes. Create JSON files smaller
-than 64 KiB in `.notevault/pdf-themes/`; the filename without `.json` is the
-theme identifier. A complete version 1 theme looks like this:
+**Classique** is the only PDF theme bundled with NoteVault. Local PDF themes are
+separate from interface themes and live in `<vault>/.notevault/pdf-themes/`.
+A stylesheet smaller than 64 KiB can stand alone; its filename becomes the
+theme identifier. For example, `beewii.css` adds the `beewii` theme and inherits
+the Classique page settings.
+
+An optional JSON file with the same basename controls the rendering options.
+For example, `beewii.css` and `beewii.json` form one theme. Existing JSON-only
+themes remain supported. A complete version 1 JSON file looks like this:
 
 ```json
 {
@@ -181,8 +187,14 @@ Allowed page sizes are `A4` and `Letter`; margins are 5–40 mm. The body size i
 9–18 pt, line height 1.2–2, heading scale 1–2, and colors must be six-digit
 hexadecimal values. `family` accepts `serif` or `sans-serif`, while
 `monoFamily` accepts `monospace`. Unknown or invalid fields reject the whole
-theme. Raw CSS, HTML, JavaScript, templates, URLs, external fonts, and file
-paths are not supported.
+theme.
+
+Local stylesheets must be UTF-8 and cannot contain HTML, CSS escapes, imports,
+URLs, external fonts, or browser-specific executable constructs. An invalid
+stylesheet rejects the corresponding theme. NoteVault does not load `.html`
+layouts or execute Amatl templates: it continues to generate and sanitize the
+document HTML itself. A standalone Amatl HTML layout may be stored anywhere
+outside NoteVault and passed directly to the Amatl command line when needed.
 
 ## Update checks and network privacy
 

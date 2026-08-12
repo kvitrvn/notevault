@@ -19,6 +19,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/kvitrvn/notevault/internal/domain"
 	"github.com/yuin/goldmark"
@@ -30,10 +32,11 @@ import (
 )
 
 const (
-	maxPDFThemeBytes = 64 * 1024
-	maxPDFAssetBytes = 20 * 1024 * 1024
-	maxPDFImageSide  = 20_000
-	maxPDFImagePixel = 100_000_000
+	maxPDFThemeBytes      = 64 * 1024
+	maxPDFStylesheetBytes = 64 * 1024
+	maxPDFAssetBytes      = 20 * 1024 * 1024
+	maxPDFImageSide       = 20_000
+	maxPDFImagePixel      = 100_000_000
 )
 
 var (
@@ -41,8 +44,8 @@ var (
 	pdfColorPattern   = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
 )
 
-// PDFTheme is a declarative, versioned print theme. ID and Name are derived
-// by NoteVault and are never read from user JSON.
+// PDFTheme is a local print theme. Its rendering options remain declarative;
+// an optional validated stylesheet is kept private to the vault service.
 type PDFTheme struct {
 	ID         string             `json:"id"`
 	Name       string             `json:"name"`
@@ -52,6 +55,7 @@ type PDFTheme struct {
 	Typography PDFTypographyTheme `json:"typography"`
 	Colors     PDFColorTheme      `json:"colors"`
 	Options    PDFThemeOptions    `json:"options"`
+	stylesheet string
 }
 
 type PDFPageTheme struct {
@@ -140,6 +144,14 @@ func classicPDFTheme() PDFTheme {
 	}
 }
 
+func stylesheetPDFTheme(id string) PDFTheme {
+	theme := classicPDFTheme()
+	theme.ID = id
+	theme.Name = id
+	theme.Builtin = false
+	return theme
+}
+
 func ensurePDFThemeDir(root string) error {
 	if err := os.MkdirAll(filepath.Join(root, ".notevault", "pdf-themes"), 0o755); err != nil {
 		return fmt.Errorf("créer le dossier des thèmes PDF : %w", err)
@@ -147,10 +159,20 @@ func ensurePDFThemeDir(root string) error {
 	return nil
 }
 
-// ListPDFThemes returns the built-in theme, valid custom themes, and
-// actionable warnings for rejected files.
+type pdfThemeFiles struct {
+	json       string
+	stylesheet string
+}
+
+// ListPDFThemes returns the built-in theme, valid local themes, and actionable
+// warnings for rejected files. A CSS file can stand alone or complement JSON
+// rendering options with the same identifier.
 func (s *Service) ListPDFThemes() ([]PDFTheme, []string) {
 	themes := []PDFTheme{classicPDFTheme()}
+	reservedIDs := make(map[string]struct{}, len(themes))
+	for _, theme := range themes {
+		reservedIDs[theme.ID] = struct{}{}
+	}
 	warnings := make([]string, 0)
 	dir := filepath.Join(s.root, ".notevault", "pdf-themes")
 	entries, err := os.ReadDir(dir)
@@ -160,38 +182,100 @@ func (s *Service) ListPDFThemes() ([]PDFTheme, []string) {
 	if err != nil {
 		return themes, []string{"Impossible de lire le dossier des thèmes PDF."}
 	}
+	themeRoot, err := os.OpenRoot(dir)
+	if err != nil {
+		return themes, []string{"Impossible d’ouvrir le dossier des thèmes PDF."}
+	}
+	defer themeRoot.Close()
+
+	filesByID := make(map[string]pdfThemeFiles)
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
+		extension := strings.ToLower(filepath.Ext(entry.Name()))
+		if entry.IsDir() || (extension != ".json" && extension != ".css") {
+			continue
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			warnings = append(warnings, fmt.Sprintf("%s : les liens symboliques ne sont pas autorisés.", entry.Name()))
 			continue
 		}
 		id := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
-		if id == "classic" {
-			warnings = append(warnings, "classic.json : l’identifiant du thème intégré est réservé.")
+		if _, reserved := reservedIDs[id]; reserved {
+			warnings = append(warnings, fmt.Sprintf("%s : l’identifiant du thème intégré est réservé.", entry.Name()))
 			continue
 		}
-		theme, parseErr := loadPDFThemeFile(filepath.Join(dir, entry.Name()), id)
-		if parseErr != nil {
-			warnings = append(warnings, fmt.Sprintf("%s : %s", entry.Name(), parseErr))
+		if !pdfThemeIDPattern.MatchString(id) {
+			warnings = append(warnings, fmt.Sprintf("%s : nom de fichier invalide.", entry.Name()))
 			continue
+		}
+		files := filesByID[id]
+		if extension == ".json" {
+			if files.json != "" {
+				warnings = append(warnings, fmt.Sprintf("%s : plusieurs fichiers JSON utilisent cet identifiant.", entry.Name()))
+				continue
+			}
+			files.json = entry.Name()
+		} else {
+			if files.stylesheet != "" {
+				warnings = append(warnings, fmt.Sprintf("%s : plusieurs feuilles de style utilisent cet identifiant.", entry.Name()))
+				continue
+			}
+			files.stylesheet = entry.Name()
+		}
+		filesByID[id] = files
+	}
+
+	ids := make([]string, 0, len(filesByID))
+	for id := range filesByID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		files := filesByID[id]
+		theme := stylesheetPDFTheme(id)
+		if files.json != "" {
+			var parseErr error
+			theme, parseErr = loadPDFThemeRootFile(themeRoot, files.json, id)
+			if parseErr != nil {
+				warnings = append(warnings, fmt.Sprintf("%s : %s", files.json, parseErr))
+				continue
+			}
+		}
+		if files.stylesheet != "" {
+			stylesheet, parseErr := loadPDFThemeRootStylesheet(themeRoot, files.stylesheet)
+			if parseErr != nil {
+				warnings = append(warnings, fmt.Sprintf("%s : %s", files.stylesheet, parseErr))
+				continue
+			}
+			theme.stylesheet = stylesheet
 		}
 		themes = append(themes, theme)
 	}
-	sort.Slice(themes[1:], func(i, j int) bool {
-		return themes[i+1].ID < themes[j+1].ID
-	})
 	return themes, warnings
 }
 
 func loadPDFThemeFile(path, id string) (PDFTheme, error) {
-	if !pdfThemeIDPattern.MatchString(id) {
-		return PDFTheme{}, errors.New("nom de fichier invalide")
-	}
 	file, err := os.Open(path)
 	if err != nil {
 		return PDFTheme{}, errors.New("fichier illisible")
 	}
 	defer file.Close()
-	raw, err := io.ReadAll(io.LimitReader(file, maxPDFThemeBytes+1))
+	return decodePDFTheme(file, id)
+}
+
+func loadPDFThemeRootFile(root *os.Root, name, id string) (PDFTheme, error) {
+	file, err := root.Open(name)
+	if err != nil {
+		return PDFTheme{}, errors.New("fichier illisible")
+	}
+	defer file.Close()
+	return decodePDFTheme(file, id)
+}
+
+func decodePDFTheme(reader io.Reader, id string) (PDFTheme, error) {
+	if !pdfThemeIDPattern.MatchString(id) {
+		return PDFTheme{}, errors.New("nom de fichier invalide")
+	}
+	raw, err := io.ReadAll(io.LimitReader(reader, maxPDFThemeBytes+1))
 	if err != nil {
 		return PDFTheme{}, errors.New("fichier illisible")
 	}
@@ -221,6 +305,102 @@ func loadPDFThemeFile(path, id string) (PDFTheme, error) {
 		return PDFTheme{}, err
 	}
 	return theme, nil
+}
+
+func loadPDFThemeStylesheet(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", errors.New("fichier illisible")
+	}
+	defer file.Close()
+	return decodePDFThemeStylesheet(file)
+}
+
+func loadPDFThemeRootStylesheet(root *os.Root, name string) (string, error) {
+	file, err := root.Open(name)
+	if err != nil {
+		return "", errors.New("fichier illisible")
+	}
+	defer file.Close()
+	return decodePDFThemeStylesheet(file)
+}
+
+func decodePDFThemeStylesheet(reader io.Reader) (string, error) {
+	raw, err := io.ReadAll(io.LimitReader(reader, maxPDFStylesheetBytes+1))
+	if err != nil {
+		return "", errors.New("fichier illisible")
+	}
+	if len(raw) > maxPDFStylesheetBytes {
+		return "", errors.New("fichier supérieur à 64 Kio")
+	}
+	if err := validatePDFThemeStylesheet(raw); err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+func validatePDFThemeStylesheet(raw []byte) error {
+	if !utf8.Valid(raw) {
+		return errors.New("CSS non UTF-8")
+	}
+	value := string(raw)
+	for _, character := range value {
+		if character == '\\' {
+			return errors.New("les échappements CSS ne sont pas autorisés")
+		}
+		if character == '<' {
+			return errors.New("le balisage HTML n’est pas autorisé")
+		}
+		if unicode.IsControl(character) && character != '\n' && character != '\r' && character != '\t' {
+			return errors.New("caractère de contrôle interdit")
+		}
+	}
+
+	compact, err := compactPDFStylesheet(value)
+	if err != nil {
+		return err
+	}
+	for _, forbidden := range []string{
+		"url(",
+		"@import",
+		"@font-face",
+		"@namespace",
+		"@document",
+		"expression(",
+		"behavior:",
+		"-moz-binding:",
+		"http:",
+		"https:",
+		"file:",
+		"ftp:",
+		"data:",
+	} {
+		if strings.Contains(compact, forbidden) {
+			return fmt.Errorf("construction CSS interdite : %s", forbidden)
+		}
+	}
+	return nil
+}
+
+func compactPDFStylesheet(value string) (string, error) {
+	var compact strings.Builder
+	for index := 0; index < len(value); {
+		if index+1 < len(value) && value[index:index+2] == "/*" {
+			end := strings.Index(value[index+2:], "*/")
+			if end < 0 {
+				return "", errors.New("commentaire CSS non terminé")
+			}
+			index += end + 4
+			continue
+		}
+		character, size := utf8.DecodeRuneInString(value[index:])
+		index += size
+		if unicode.IsSpace(character) {
+			continue
+		}
+		compact.WriteRune(unicode.ToLower(character))
+	}
+	return compact.String(), nil
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {
@@ -560,7 +740,12 @@ func buildPDFHTML(note domain.Note, theme PDFTheme, body []byte) []byte {
 	document.WriteString(theme.Colors.Secondary)
 	document.WriteString(";font-size:.9em}.tags{margin-top:4pt}.task-list-item{list-style:none}input[type=checkbox]{margin-right:6pt}.raw-html{border-left:3pt solid ")
 	document.WriteString(theme.Colors.Secondary)
-	document.WriteString("}</style></head><body>")
+	document.WriteString("}")
+	if theme.stylesheet != "" {
+		document.WriteByte('\n')
+		document.WriteString(theme.stylesheet)
+	}
+	document.WriteString("</style></head><body>")
 
 	titleClass := "document-title"
 	if theme.Options.TitlePage {

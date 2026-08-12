@@ -153,7 +153,7 @@ vault/
 ├── templates/
 ├── themes/
 └── .notevault/
-    └── pdf-themes/       # optional declarative PDF themes
+    └── pdf-themes/       # optional local PDF themes (JSON and CSS)
 ```
 
 Notes and their related data live in this local directory. The in-memory index
@@ -189,7 +189,10 @@ validated raster assets from `assets/`, and applies a restrictive content
 security policy. It must not resolve remote or `file://` resources. Amatl is
 limited to HTML-to-PDF conversion inside a child worker; its templates,
 directives, Markdown processing, and URL resolvers are not exposed to notes or
-themes. A parent timeout terminates the worker and its Chromium process group.
+themes. Local PDF stylesheets are size-limited and validated before being added
+to this controlled HTML; imports, URLs, external fonts, CSS escapes, and HTML
+markup are rejected. A parent timeout terminates the worker and its Chromium
+process group.
 
 Packaged builds make one automatic, unauthenticated HTTPS request per process
 start to GitHub's fixed `kvitrvn/notevault/releases/latest` API endpoint. The

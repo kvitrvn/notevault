@@ -2676,7 +2676,7 @@
           {#if titleEditing}
             <input
               bind:this={titleEl}
-              class="block w-full shrink-0 border-0 bg-transparent px-4 pb-3 pt-5 text-3xl font-semibold leading-tight text-foreground outline-none placeholder:text-faint focus:outline-none focus-visible:outline-none sm:text-4xl"
+              class="note-editor-reading-width block shrink-0 border-0 bg-transparent pb-3 pt-5 text-3xl font-semibold leading-tight text-foreground outline-none placeholder:text-faint focus:outline-none focus-visible:outline-none sm:text-4xl"
               aria-label="Titre de la note"
               bind:value={titleDraft}
               onkeydown={(e) => {
@@ -2693,7 +2693,7 @@
             />
           {:else}
             <h1
-              class="block w-full shrink-0 cursor-text select-none border-0 bg-transparent px-4 pb-2 pt-5 text-3xl font-semibold leading-tight text-foreground sm:text-4xl"
+              class="note-editor-reading-width block shrink-0 cursor-text select-none border-0 bg-transparent pb-2 pt-5 text-3xl font-semibold leading-tight text-foreground sm:text-4xl"
               ondblclick={startRename}
               title="Double-cliquer pour renommer (Ctrl+Shift+R)"
             >
@@ -2701,7 +2701,7 @@
             </h1>
           {/if}
 
-          <div class="flex shrink-0 flex-wrap items-center gap-3 border-b border-border/60 px-4 py-2">
+          <div class="note-editor-reading-width flex shrink-0 flex-wrap items-center gap-3 py-2">
             <TagEditor
               tags={selected.tags ?? []}
               knownTags={tags}

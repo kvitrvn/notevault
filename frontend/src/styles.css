@@ -241,9 +241,66 @@
     --crepe-color-selected: var(--color-selection);
     --crepe-color-inline-area: var(--color-code);
 
+    --crepe-shadow-1: 0 2px 8px rgba(0, 0, 0, 0.24);
+    --crepe-shadow-2: 0 4px 12px rgba(0, 0, 0, 0.28);
+
     --crepe-font-title: var(--font-sans);
     --crepe-font-default: var(--font-sans);
     --crepe-font-code: var(--font-mono);
+  }
+
+  .note-editor-reading-width {
+    width: calc(100% - 2 * clamp(0.75rem, 3vw, 2rem));
+    max-width: 46rem;
+    margin-inline: auto;
+  }
+
+  #app .milkdown .milkdown-toolbar,
+  #app .milkdown .milkdown-slash-menu,
+  #app .milkdown .milkdown-link-preview > .link-preview,
+  #app .milkdown .milkdown-link-edit > .link-edit,
+  #app .milkdown .milkdown-code-block .list-wrapper,
+  #app .milkdown .milkdown-table-block .button-group {
+    border: 1px solid var(--color-border);
+    box-shadow: var(--crepe-shadow-1);
+  }
+
+  #app .milkdown .milkdown-slash-menu {
+    border-radius: var(--radius-lg);
+  }
+
+  #app .milkdown .milkdown-block-handle .operation-item,
+  #app .milkdown .milkdown-toolbar .toolbar-item,
+  #app .milkdown .milkdown-slash-menu li,
+  #app .milkdown .milkdown-link-preview .button,
+  #app .milkdown .milkdown-link-edit .button,
+  #app .milkdown .milkdown-code-block button,
+  #app .milkdown .milkdown-table-block button {
+    border-radius: var(--radius-sm);
+  }
+
+  #app .milkdown .milkdown-block-handle .operation-item:focus-visible,
+  #app .milkdown .milkdown-toolbar .toolbar-item:focus-visible,
+  #app .milkdown .milkdown-slash-menu li:focus-visible,
+  #app .milkdown .milkdown-link-preview :is(.button, .link-display):focus-visible,
+  #app .milkdown .milkdown-link-edit :is(.button, .input-area):focus-visible,
+  #app .milkdown .milkdown-code-block :is(button, input, [tabindex]):focus-visible,
+  #app .milkdown .milkdown-image-block :is(button, input, [tabindex]):focus-visible,
+  #app .milkdown .milkdown-table-block :is(button, [tabindex]):focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  #app .milkdown .milkdown-code-block:focus-within .language-button,
+  #app .milkdown .milkdown-code-block:focus-within .tools-button-group > button,
+  #app .milkdown .milkdown-image-block:focus-within > .image-wrapper .operation,
+  #app .milkdown .milkdown-image-block:focus-within > .image-wrapper .image-resize-handle {
+    opacity: 1;
+  }
+
+  #app .milkdown .milkdown-code-block .tools-button-group > button:first-child,
+  #app .milkdown .milkdown-code-block .tools-button-group > button:last-child {
+    border-radius: var(--radius-sm);
   }
 
   /* Coloration syntaxique CodeMirror : `classHighlighter` émet des classes

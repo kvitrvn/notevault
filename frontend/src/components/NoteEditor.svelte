@@ -125,7 +125,7 @@
       const alt = absolutePath.split('/').pop()?.replace(/\?.*$/, '') || 'image';
       editor.insertAsset(relativePath, alt);
     } catch (err) {
-      reportUploadError(`Image distante : ${err}`);
+      reportUploadError(`Échec de l’import : ${err}`);
     } finally {
       isUploading = false;
     }
@@ -277,9 +277,8 @@
   <div
     class="relative min-h-0 flex-1 overflow-auto bg-background text-foreground"
     bind:this={host}
-    role="textbox"
-    tabindex="-1"
-    aria-label="Éditeur de note"
+    role="group"
+    aria-label="Zone d’édition et d’import d’images"
     data-editor-ready={editorReady}
     ondragenter={onHostDragEnter}
     ondragleave={onHostDragLeave}
@@ -292,13 +291,20 @@
       </div>
     {/if}
     {#if isUploading}
-      <div class="pointer-events-none absolute right-3 top-3 z-20 flex items-center gap-2 rounded-md border border-border bg-panel px-3 py-1.5 text-xs text-foreground shadow-md">
+      <div
+        class="pointer-events-none absolute right-3 top-3 z-20 flex items-center gap-2 rounded-md border border-border bg-panel px-3 py-1.5 text-xs text-foreground shadow-md"
+        role="status"
+        aria-live="polite"
+      >
         <span class="inline-block h-2 w-2 animate-pulse rounded-full bg-accent"></span>
-        Upload en cours…
+        Import de l’image en cours…
       </div>
     {/if}
     {#if uploadError}
-      <div class="pointer-events-none absolute right-3 top-3 z-20 flex items-center gap-2 rounded-md border border-danger bg-panel px-3 py-1.5 text-xs text-danger shadow-md">
+      <div
+        class="pointer-events-none absolute right-3 top-3 z-20 flex items-center gap-2 rounded-md border border-danger bg-panel px-3 py-1.5 text-xs text-danger shadow-md"
+        role="alert"
+      >
         {uploadError}
       </div>
     {/if}
@@ -306,10 +312,19 @@
 </div>
 
 <style>
-  :global(.note-editor-content) {
+  :global(.milkdown .ProseMirror.note-editor-content) {
+    --editor-gutter: clamp(0.75rem, 3vw, 2rem);
+    --editor-reading-width: 46rem;
+
+    display: grid;
+    grid-template-columns:
+      minmax(var(--editor-gutter), 1fr)
+      minmax(0, var(--editor-reading-width))
+      minmax(var(--editor-gutter), 1fr);
+    align-content: start;
     min-height: 100%;
     width: 100%;
-    padding: 1.25rem 1rem 4rem;
+    padding: 1.25rem 0 4rem;
     outline: none;
     background: var(--color-background);
     color: var(--color-foreground);
@@ -317,111 +332,185 @@
     caret-color: var(--color-foreground);
   }
 
-  :global(.note-editor-content:focus) {
+  :global(.milkdown .ProseMirror.note-editor-content > *) {
+    grid-column: 2;
+    min-width: 0;
+  }
+
+  :global(.milkdown .ProseMirror.note-editor-content > .milkdown-image-block),
+  :global(.milkdown .ProseMirror.note-editor-content > .milkdown-table-block) {
+    grid-column: 1 / -1;
+    justify-self: center;
+    width: calc(100% - 2 * var(--editor-gutter));
+  }
+
+  :global(.milkdown .ProseMirror.note-editor-content:focus) {
     outline: none;
   }
 
-  :global(.note-editor-content > :first-child) {
+  :global(.milkdown .ProseMirror.note-editor-content > :first-child) {
     margin-top: 0;
   }
 
-  :global(.note-editor-content h1),
-  :global(.note-editor-content h2),
-  :global(.note-editor-content h3) {
-    margin-top: 1.6rem;
-    margin-bottom: 0.7rem;
+  :global(.milkdown .ProseMirror.note-editor-content h1),
+  :global(.milkdown .ProseMirror.note-editor-content h2),
+  :global(.milkdown .ProseMirror.note-editor-content h3),
+  :global(.milkdown .ProseMirror.note-editor-content h4),
+  :global(.milkdown .ProseMirror.note-editor-content h5),
+  :global(.milkdown .ProseMirror.note-editor-content h6) {
+    padding: 0;
+    margin-top: 1.5rem;
+    margin-bottom: 0.55rem;
     color: var(--color-foreground);
+    line-height: 1.25;
+  }
+
+  :global(.milkdown .ProseMirror.note-editor-content h1) {
+    font-size: 2rem;
+    font-weight: 720;
     line-height: 1.15;
   }
 
-  :global(.note-editor-content h1) {
-    font-size: 2.15rem;
-    font-weight: 720;
-    letter-spacing: 0;
-  }
-
-  :global(.note-editor-content h2) {
-    font-size: 1.55rem;
+  :global(.milkdown .ProseMirror.note-editor-content h2) {
+    font-size: 1.6rem;
     font-weight: 680;
-    letter-spacing: 0;
   }
 
-  :global(.note-editor-content h3) {
-    font-size: 1.2rem;
+  :global(.milkdown .ProseMirror.note-editor-content h3) {
+    font-size: 1.3rem;
     font-weight: 650;
-    letter-spacing: 0;
   }
 
-  :global(.note-editor-content p) {
-    margin: 0.75rem 0;
+  :global(.milkdown .ProseMirror.note-editor-content h4) {
+    font-size: 1.125rem;
+    font-weight: 650;
   }
 
-  :global(.note-editor-content strong) {
+  :global(.milkdown .ProseMirror.note-editor-content h5) {
+    font-size: 1rem;
+    font-weight: 650;
+  }
+
+  :global(.milkdown .ProseMirror.note-editor-content h6) {
+    font-size: 0.875rem;
     font-weight: 700;
   }
 
-  :global(.note-editor-content hr) {
+  :global(.milkdown .ProseMirror.note-editor-content p) {
+    margin: 0.65rem 0;
+    padding: 0;
+  }
+
+  :global(.milkdown .ProseMirror.note-editor-content strong) {
+    font-weight: 700;
+  }
+
+  :global(.milkdown .ProseMirror.note-editor-content hr) {
+    height: 1px;
     margin: 1.75rem 0;
+    padding: 0;
     border: 0;
-    border-top: 1px solid var(--color-border);
+    background: var(--color-border);
   }
 
-  :global(.note-editor-content ul),
-  :global(.note-editor-content ol) {
-    margin: 0.75rem 0;
-    padding-left: 1.55rem;
+  :global(.milkdown .ProseMirror.note-editor-content ul),
+  :global(.milkdown .ProseMirror.note-editor-content ol) {
+    margin: 0.65rem 0;
+    padding: 0;
   }
 
-  /* Preflight Tailwind v4 met `list-style: none` sur tous les ul/ol :
-     on doit restaurer les marqueurs explicitement. Les listes rendues par
-     la feature `list-item` de Crepe utilisent leurs propres puces et sont
-     ré-neutralisées plus bas. */
-  :global(.note-editor-content ul) {
-    list-style-type: disc;
+  :global(.milkdown .ProseMirror.note-editor-content .milkdown-list-item-block) {
+    margin: 0;
+    padding: 0;
   }
 
-  :global(.note-editor-content ul ul) {
-    list-style-type: circle;
-  }
-
-  :global(.note-editor-content ol) {
-    list-style-type: decimal;
-  }
-
-  :global(.note-editor-content li) {
-    margin: 0.25rem 0;
-  }
-
-  :global(.note-editor-content li > p) {
-    margin: 0.25rem 0;
-  }
-
-  :global(.note-editor-content li::marker) {
-    color: var(--color-subtle);
-  }
-
-  /* La feature `list-item` de Crepe rend ses propres marqueurs dans un
-     NodeView : on retire ceux du navigateur pour éviter le doublon. */
-  :global(.note-editor-content li.milkdown-list-item-block) {
+  :global(.milkdown .ProseMirror.note-editor-content .milkdown-list-item-block > .list-item) {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    margin: 0.15rem 0;
+    padding: 0;
     list-style: none;
   }
 
-  :global(.note-editor-content input[type='checkbox']) {
+  :global(.milkdown .ProseMirror.note-editor-content .milkdown-list-item-block > .list-item > .label-wrapper) {
+    display: flex;
+    align-items: flex-start;
+    justify-content: flex-end;
+    flex: 0 0 1.25rem;
+    width: 1.25rem;
+    height: auto;
+    min-height: 1.7em;
+    color: var(--color-subtle);
+    line-height: inherit;
+  }
+
+  :global(.milkdown .ProseMirror.note-editor-content .milkdown-list-item-block > .list-item > .label-wrapper > .label) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 100%;
+    height: 1.7em;
+    padding: 0;
+    line-height: 1;
+  }
+
+  :global(.milkdown .ProseMirror.note-editor-content .milkdown-list-item-block > .list-item > .label-wrapper > .label.ordered) {
+    width: max-content;
+    min-width: 100%;
+    justify-content: flex-end;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  :global(.milkdown .ProseMirror.note-editor-content .milkdown-list-item-block > .list-item > .label-wrapper > .label svg) {
+    display: block;
+    width: 1rem;
+    height: 1rem;
+  }
+
+  :global(.milkdown .ProseMirror.note-editor-content .milkdown-list-item-block .children) {
+    min-width: 0;
+  }
+
+  :global(.milkdown .ProseMirror.note-editor-content .milkdown-list-item-block .children > .content-dom > p:first-child) {
+    margin-top: 0;
+  }
+
+  :global(.milkdown .ProseMirror.note-editor-content .milkdown-list-item-block .children > .content-dom > p:last-child) {
+    margin-bottom: 0;
+  }
+
+  :global(.milkdown .ProseMirror.note-editor-content .milkdown-list-item-block .children > .content-dom > ul),
+  :global(.milkdown .ProseMirror.note-editor-content .milkdown-list-item-block .children > .content-dom > ol) {
+    margin: 0.25rem 0 0;
+  }
+
+  :global(.milkdown .ProseMirror.note-editor-content input[type='checkbox']) {
     width: 1rem;
     height: 1rem;
     accent-color: var(--color-accent);
   }
 
-  :global(.note-editor-content table) {
-    width: 100%;
-    margin: 1rem 0;
-    border-collapse: collapse;
-    overflow: hidden;
-    border-radius: var(--radius-md);
+  :global(.milkdown .ProseMirror.note-editor-content .milkdown-table-block) {
+    max-width: 100%;
+    margin-block: 1rem;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
   }
 
-  :global(.note-editor-content th),
-  :global(.note-editor-content td) {
+  :global(.milkdown .ProseMirror.note-editor-content table) {
+    width: max-content;
+    min-width: 100%;
+    margin: 0;
+    border-collapse: collapse;
+    table-layout: auto;
+    overflow: visible;
+  }
+
+  :global(.milkdown .ProseMirror.note-editor-content th),
+  :global(.milkdown .ProseMirror.note-editor-content td) {
     min-width: 7rem;
     padding: 0.6rem 0.7rem;
     border: 1px solid var(--color-border);
@@ -429,12 +518,12 @@
     vertical-align: top;
   }
 
-  :global(.note-editor-content th) {
+  :global(.milkdown .ProseMirror.note-editor-content th) {
     background: var(--color-panel-muted);
     font-weight: 650;
   }
 
-  :global(.note-editor-content pre) {
+  :global(.milkdown .ProseMirror.note-editor-content pre) {
     overflow-x: auto;
     margin: 1rem 0;
     padding: 0.95rem 1rem;
@@ -444,7 +533,16 @@
     color: var(--color-foreground);
   }
 
-  :global(.note-editor-content code) {
+  :global(.milkdown .ProseMirror.note-editor-content .milkdown-code-block) {
+    overflow-x: auto;
+    margin: 1rem 0;
+    padding: 0.75rem 1rem 1rem;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-lg);
+    background: var(--color-code);
+  }
+
+  :global(.milkdown .ProseMirror.note-editor-content code) {
     padding: 0.08rem 0.24rem;
     border-radius: var(--radius-sm);
     background: var(--color-code);
@@ -452,26 +550,32 @@
     font-size: 0.92em;
   }
 
-  :global(.note-editor-content pre code) {
+  :global(.milkdown .ProseMirror.note-editor-content pre code) {
     padding: 0;
     background: transparent;
     font-size: 0.9rem;
   }
 
-  :global(.note-editor-content blockquote) {
+  :global(.milkdown .ProseMirror.note-editor-content blockquote) {
+    position: relative;
+    box-sizing: border-box;
     margin: 1rem 0;
-    padding: 0.1rem 0 0.1rem 1rem;
+    padding: 0.1rem 0 0.1rem 0.9rem;
     border-left: 3px solid var(--color-accent);
     color: var(--color-subtle);
   }
 
-  :global(.note-editor-content a) {
+  :global(.milkdown .ProseMirror.note-editor-content blockquote::before) {
+    content: none;
+  }
+
+  :global(.milkdown .ProseMirror.note-editor-content a) {
     color: var(--color-accent);
     text-decoration: underline;
     text-underline-offset: 0.15em;
   }
 
-  :global(.note-editor-content .wiki-link) {
+  :global(.milkdown .ProseMirror.note-editor-content .wiki-link) {
     text-decoration: underline;
     text-underline-offset: 0.18em;
     text-decoration-thickness: 1px;
@@ -480,24 +584,31 @@
     cursor: pointer;
   }
 
-  :global(.note-editor-content .wiki-link--exists) {
+  :global(.milkdown .ProseMirror.note-editor-content .wiki-link--exists) {
     color: var(--color-accent);
     text-decoration-color: var(--color-accent);
   }
 
-  :global(.note-editor-content .wiki-link--missing) {
+  :global(.milkdown .ProseMirror.note-editor-content .wiki-link--missing) {
     color: var(--color-danger);
     text-decoration-color: var(--color-danger);
     text-decoration-style: dashed;
   }
 
-  :global(.note-editor-content .ProseMirror-selectednode) {
-    outline: 2px solid var(--color-focus);
+  :global(.milkdown .ProseMirror.note-editor-content .ProseMirror-selectednode) {
+    outline: 1px solid var(--color-focus);
+    outline-offset: 2px;
+    background: color-mix(in srgb, var(--color-selection), transparent 55%);
+  }
+
+  :global(.milkdown .ProseMirror.note-editor-content .list-item.ProseMirror-selectednode) {
+    border-radius: var(--radius-sm);
   }
 
   @media (max-width: 640px) {
-    :global(.note-editor-content) {
-      padding: 1rem 0.75rem 3rem;
+    :global(.milkdown .ProseMirror.note-editor-content) {
+      padding-top: 1rem;
+      padding-bottom: 3rem;
     }
   }
 </style>

@@ -116,7 +116,13 @@ export async function createNoteEditor(options: NoteEditorOptions): Promise<Note
 
       ctx.update(editorViewOptionsCtx, (prev) => ({
         ...prev,
-        attributes: { class: 'note-editor-content', spellcheck: 'true' },
+        attributes: {
+          class: 'note-editor-content',
+          spellcheck: 'true',
+          role: 'textbox',
+          'aria-label': 'Éditeur de note',
+          'aria-multiline': 'true'
+        },
         handlePaste: (_view, event) => handleMarkdownPaste(ctx, event),
         handleDrop: (_view, event) => handleTextDrop(ctx, event, options.onDropURI)
       }));
