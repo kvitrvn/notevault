@@ -18,16 +18,17 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@codemirror/language": "6.12.4",
+    "@codemirror/language-data": "6.5.2",
+    "@codemirror/state": "6.7.1",
+    "@lezer/highlight": "1.2.3",
     "@lucide/svelte": "^1.23.0",
-    "@tiptap/core": "3.27.1",
-    "@tiptap/extension-code-block-lowlight": "^3.27.1",
-    "@tiptap/extension-image": "^3.27.1",
-    "@tiptap/extension-list": "3.27.1",
-    "@tiptap/extension-table": "3.27.1",
-    "@tiptap/markdown": "3.27.1",
-    "@tiptap/starter-kit": "3.27.1",
-    "@tiptap/suggestion": "^3.27.1",
-    "lowlight": "^3.3.0"
+    "@milkdown/crepe": "^7.22.1",
+    "@milkdown/kit": "^7.22.1",
+    "remark-gfm": "4.0.1",
+    "remark-parse": "11.0.0",
+    "remark-stringify": "11.0.0",
+    "unified": "11.0.5"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "5.1.1",

@@ -54,7 +54,7 @@
   import WindowTitleBar from './components/WindowTitleBar.svelte';
   import ChatPanel from './components/ChatPanel.svelte';
   import type { SaveState } from './components/SaveIndicator.svelte';
-  import { isLocalAssetPath, precomputeAssetURLs as resolveAssetURLs } from './lib/assets';
+  import { isLocalAssetPath } from './lib/assets';
   import { createDebouncedTask } from './lib/debounce';
   import { normalizeNotesFolderPath } from './lib/note-paths';
   import { shouldShowVaultUnlock } from './lib/vault-manager';
@@ -312,7 +312,7 @@
         void (async () => {
           try {
             const note = (await OpenNote(openPath)) as Note;
-            const content = await precomputeAssetURLs(note.content);
+            const content = note.content;
             selected = cloneNote(note, content);
             lastSavedSnapshot = snapshot(selected!);
             saveState = 'clean';
@@ -654,7 +654,7 @@
       }
       // Pré-transforme les chemins relatifs d'images en URLs absolues pour
       // que l'éditeur Tiptap puisse les charger dans la webview.
-      const content = await precomputeAssetURLs(note.content);
+      const content = note.content;
       selected = cloneNote(note, content);
       lastSavedSnapshot = snapshot(selected!);
       saveState = 'clean';
@@ -662,12 +662,6 @@
     } catch (err) {
       error = String(err);
     }
-  }
-
-  // Transforme les assets du coffre en URLs loopback pour Tiptap. La politique
-  // de chemin et le traitement Markdown vivent dans un utilitaire testé.
-  async function precomputeAssetURLs(md: string): Promise<string> {
-    return resolveAssetURLs(md, assetURL);
   }
 
   function openTemplatePicker(): void {
@@ -680,7 +674,7 @@
     error = '';
     try {
       const note = await CreateNote(pendingNoteParent, title, templateId);
-      const content = await precomputeAssetURLs(note.content);
+      const content = note.content;
       selected = cloneNote(note, content);
       lastSavedSnapshot = snapshot(selected!);
       saveState = 'clean';
@@ -739,7 +733,7 @@
     error = '';
     try {
       const note = await OpenDailyNote();
-      const content = await precomputeAssetURLs(note.content);
+      const content = note.content;
       selected = cloneNote(note, content);
       lastSavedSnapshot = snapshot(selected!);
       saveState = 'clean';
@@ -1736,7 +1730,7 @@
     if (!selected) return;
     try {
       const restored = await RestoreFromHistory(selected.relativePath, versionID);
-      const content = await precomputeAssetURLs(restored.content);
+      const content = restored.content;
       selected = cloneNote(restored, content);
       lastSavedSnapshot = snapshot(selected!);
       saveState = 'clean';
@@ -2059,7 +2053,7 @@
     try {
       if (!selected || selected.relativePath !== recoveryPath) {
         const recoveredNote = await OpenNote(recoveryPath);
-        selected = cloneNote(recoveredNote, await precomputeAssetURLs(recoveredNote.content));
+        selected = cloneNote(recoveredNote, recoveredNote.content);
       }
     } catch (err) {
       showToast('error', `Impossible d’ouvrir la note à récupérer : ${err}`);

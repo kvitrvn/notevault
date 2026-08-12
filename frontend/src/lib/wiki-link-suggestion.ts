@@ -1,214 +1,242 @@
-// Extension Tiptap qui affiche une popup de suggestions quand l'utilisateur
+// Plugin ProseMirror qui affiche une popup de suggestions quand l'utilisateur
 // tape `[[` dans l'éditeur. La popup liste les titres de notes connus,
 // filtrés en live au fur et à mesure de la frappe.
 //
 // Implémentation : DOM HTML direct (pas de mount Svelte). Plus simple, plus
-// fiable, pas de fuite mémoire potentielle. Le popup est un div positionné
-// en `fixed` au-dessus de l'éditeur, démonté à chaque sortie de Suggestion.
+// fiable, pas de fuite mémoire potentielle. Le positionnement et le cycle
+// affichage/masquage sont délégués à `SlashProvider` (floating-ui), qui
+// ancre la popup sous le curseur ; le clavier reste géré ici via
+// `handleKeyDown`.
 //
 // Roundtrip Markdown : la sélection insère `[[Titre]]` en clair. Les
 // décorations wiki-link de lib/wiki-link.ts s'appliquent ensuite pour la
 // surbrillance et la navigation au click.
 
-import { Extension, type Editor } from '@tiptap/core';
-import Suggestion, { exitSuggestion, type SuggestionOptions } from '@tiptap/suggestion';
-import { PluginKey } from '@tiptap/pm/state';
-import type { Range } from '@tiptap/core';
+import { SlashProvider } from '@milkdown/kit/plugin/slash';
+import { Plugin, PluginKey } from '@milkdown/kit/prose/state';
+import type { EditorView } from '@milkdown/kit/prose/view';
 
 export type WikiLinkSuggestionOptions = {
   knownTitles: () => string[];
 };
 
+/** Position du `[[` courant dans le document, bornes incluses. */
+export type WikiLinkRange = { from: number; to: number };
+
 const PLUGIN_KEY = new PluginKey('wikiLinkSuggestion');
+const MAX_ITEMS = 8;
+/** Au-delà, ce n'est plus une recherche de titre mais du texte qui contient `[[`. */
+const MAX_QUERY_LENGTH = 120;
 
 export function shouldShowWikiLinkSuggestion(query: string): boolean {
   return !query.includes(']]');
 }
 
-export function completeWikiLinkSuggestion(editor: Editor, range: Range, title: string): void {
-  editor.chain().focus().insertContentAt(range, `[[${title}]]`).run();
-  // Le matcher autorise les espaces et considère sinon les `]]` comme une
-  // partie de la requête. Sans sortie explicite, la popup reste active et
-  // capture Entrée/Tab après la sélection du lien.
-  exitSuggestion(editor.view, PLUGIN_KEY);
+/**
+ * Extrait la requête en cours à partir du texte qui précède le curseur dans
+ * le bloc courant. Retourne null s'il n'y a pas de `[[` ouvert.
+ */
+export function findWikiLinkQuery(textBefore: string): string | null {
+  const start = textBefore.lastIndexOf('[[');
+  if (start === -1) return null;
+  const query = textBefore.slice(start + 2);
+  if (query.length > MAX_QUERY_LENGTH) return null;
+  if (query.includes('\n')) return null;
+  if (!shouldShowWikiLinkSuggestion(query)) return null;
+  return query;
 }
 
-export const WikiLinkSuggestion = Extension.create<WikiLinkSuggestionOptions>({
-  name: 'wikiLinkSuggestion',
+/** Titres commençant par la requête d'abord, puis ceux qui la contiennent. */
+export function rankWikiLinkTitles(titles: string[], query: string): string[] {
+  const q = query.toLowerCase();
+  if (!q) return titles.slice(0, MAX_ITEMS);
 
-  addOptions() {
-    return {
-      knownTitles: () => []
-    };
-  },
-
-  addProseMirrorPlugins() {
-    const opts = this.options;
-    const editor: Editor = this.editor;
-
-    const suggestionOptions: Omit<SuggestionOptions<string>, 'editor'> = {
-      char: '[[',
-      startOfLine: false,
-      allowSpaces: true,
-      allowedPrefixes: null,
-      pluginKey: PLUGIN_KEY,
-      shouldShow: ({ query }) => shouldShowWikiLinkSuggestion(query),
-      items: ({ query }) => {
-        const all = opts.knownTitles();
-        const q = query.toLowerCase();
-        if (!q) return all.slice(0, 8);
-        const starts: string[] = [];
-        const contains: string[] = [];
-        for (const t of all) {
-          const lower = t.toLowerCase();
-          if (lower.startsWith(q)) {
-            starts.push(t);
-          } else if (lower.includes(q)) {
-            contains.push(t);
-          }
-        }
-        return [...starts, ...contains].slice(0, 8);
-      },
-      command: ({ editor: ed, range, props }) => {
-        completeWikiLinkSuggestion(ed, range, props);
-      },
-      render: () => {
-        let host: HTMLDivElement | null = null;
-        let listEl: HTMLDivElement | null = null;
-        let items: string[] = [];
-        let selectedIndex = 0;
-        let commandFn: ((item: string) => void) | null = null;
-        let onDocPointerDown: ((event: MouseEvent) => void) | null = null;
-
-        const updatePosition = (clientRect: DOMRect | null) => {
-          if (!host || !clientRect) return;
-          host.style.left = `${clientRect.left}px`;
-          host.style.top = `${clientRect.bottom + 4}px`;
-        };
-
-        const renderList = () => {
-          if (!listEl) return;
-          listEl.innerHTML = '';
-          if (items.length === 0) {
-            const empty = document.createElement('div');
-            empty.className = 'wiki-link-popup__empty';
-            empty.textContent = 'Aucune note';
-            listEl.appendChild(empty);
-            return;
-          }
-          items.forEach((item, index) => {
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'wiki-link-popup__item';
-            if (index === selectedIndex) btn.classList.add('is-active');
-            btn.setAttribute('role', 'option');
-            btn.setAttribute('aria-selected', String(index === selectedIndex));
-            btn.textContent = item;
-            btn.addEventListener('mousedown', (e) => {
-              e.preventDefault();
-              commandFn?.(item);
-            });
-            btn.addEventListener('mouseenter', () => {
-              selectedIndex = index;
-              renderList();
-            });
-            listEl!.appendChild(btn);
-          });
-        };
-
-        const destroy = () => {
-          if (onDocPointerDown) {
-            document.removeEventListener('mousedown', onDocPointerDown, true);
-            onDocPointerDown = null;
-          }
-          if (host) {
-            host.remove();
-            host = null;
-            listEl = null;
-          }
-          items = [];
-          selectedIndex = 0;
-          commandFn = null;
-        };
-
-        return {
-          onStart: (props) => {
-            items = props.items;
-            // Tiptap suggestion's `props.command(item)` attend l'item
-            // directement : il s'occupe déjà de wrapper dans
-            // `{ editor, range, props }` côté interne.
-            commandFn = (item) => props.command(item);
-            selectedIndex = 0;
-
-            host = document.createElement('div');
-            host.className = 'wiki-link-popup-host';
-
-            listEl = document.createElement('div');
-            listEl.className = 'wiki-link-popup';
-            listEl.setAttribute('role', 'listbox');
-            listEl.setAttribute('aria-label', 'Suggestions de wiki-lien');
-
-            host.appendChild(listEl);
-            document.body.appendChild(host);
-
-            renderList();
-            updatePosition(props.clientRect?.() ?? null);
-
-            onDocPointerDown = (event) => {
-              if (!host) return;
-              if (event.target instanceof Node && host.contains(event.target)) return;
-              editor.commands.focus();
-              destroy();
-            };
-            document.addEventListener('mousedown', onDocPointerDown, true);
-          },
-
-          onUpdate: (props) => {
-            items = props.items;
-            selectedIndex = 0;
-            renderList();
-            updatePosition(props.clientRect?.() ?? null);
-          },
-
-          onKeyDown: (props) => {
-            if (props.event.key === 'Escape') {
-              destroy();
-              return true;
-            }
-            if (props.event.key === 'ArrowDown') {
-              selectedIndex = (selectedIndex + 1) % Math.max(items.length, 1);
-              renderList();
-              props.event.preventDefault();
-              return true;
-            }
-            if (props.event.key === 'ArrowUp') {
-              selectedIndex = (selectedIndex - 1 + items.length) % Math.max(items.length, 1);
-              renderList();
-              props.event.preventDefault();
-              return true;
-            }
-            if (props.event.key === 'Enter' || props.event.key === 'Tab') {
-              if (items.length > 0 && commandFn) {
-                commandFn(items[selectedIndex]);
-              }
-              props.event.preventDefault();
-              return true;
-            }
-            return false;
-          },
-
-          onExit: () => {
-            destroy();
-          }
-        };
-      }
-    };
-
-    return [
-      Suggestion({
-        editor,
-        ...suggestionOptions
-      })
-    ];
+  const starts: string[] = [];
+  const contains: string[] = [];
+  for (const title of titles) {
+    const lower = title.toLowerCase();
+    if (lower.startsWith(q)) {
+      starts.push(title);
+    } else if (lower.includes(q)) {
+      contains.push(title);
+    }
   }
-});
+  return [...starts, ...contains].slice(0, MAX_ITEMS);
+}
+
+/** Remplace le `[[requête` en cours par `[[Titre]]` et replace le curseur après. */
+export function completeWikiLinkSuggestion(
+  view: EditorView,
+  range: WikiLinkRange,
+  title: string
+): void {
+  const text = `[[${title}]]`;
+  const tr = view.state.tr.insertText(text, range.from, range.to);
+  view.dispatch(tr);
+  view.focus();
+}
+
+export function wikiLinkSuggestionPlugin(opts: WikiLinkSuggestionOptions): Plugin {
+  // `handleKeyDown` vit dans `props` et n'a pas accès au PluginView : on garde
+  // donc l'instance courante dans la closure du plugin.
+  let instance: WikiLinkSuggestionView | null = null;
+
+  return new Plugin({
+    key: PLUGIN_KEY,
+    view: (view) => {
+      instance = new WikiLinkSuggestionView(view, opts);
+      return {
+        update: (updatedView, prevState) => instance?.update(updatedView, prevState),
+        destroy: () => {
+          instance?.destroy();
+          instance = null;
+        }
+      };
+    },
+    props: {
+      handleKeyDown: (_view, event) => instance?.handleKeyDown(event) ?? false
+    }
+  });
+}
+
+class WikiLinkSuggestionView {
+  readonly #provider: SlashProvider;
+  readonly #host: HTMLDivElement;
+  readonly #list: HTMLDivElement;
+  readonly #opts: WikiLinkSuggestionOptions;
+  #view: EditorView;
+  #items: string[] = [];
+  #selectedIndex = 0;
+  #range: WikiLinkRange | null = null;
+  #visible = false;
+
+  constructor(view: EditorView, opts: WikiLinkSuggestionOptions) {
+    this.#view = view;
+    this.#opts = opts;
+
+    this.#host = document.createElement('div');
+    this.#host.className = 'wiki-link-popup-host';
+
+    this.#list = document.createElement('div');
+    this.#list.className = 'wiki-link-popup';
+    this.#list.setAttribute('role', 'listbox');
+    this.#list.setAttribute('aria-label', 'Suggestions de wiki-lien');
+    this.#host.appendChild(this.#list);
+
+    this.#provider = new SlashProvider({
+      content: this.#host,
+      debounce: 0,
+      offset: 4,
+      shouldShow: (activeView) => this.#refreshQuery(activeView)
+    });
+    this.#provider.onShow = () => {
+      this.#visible = true;
+    };
+    this.#provider.onHide = () => {
+      this.#visible = false;
+      this.#range = null;
+    };
+
+    this.#provider.update(view);
+  }
+
+  update(view: EditorView, prevState?: Parameters<SlashProvider['update']>[1]): void {
+    this.#view = view;
+    this.#provider.update(view, prevState);
+  }
+
+  destroy(): void {
+    this.#provider.destroy();
+    this.#host.remove();
+  }
+
+  handleKeyDown(event: KeyboardEvent): boolean {
+    if (!this.#visible) return false;
+
+    if (event.key === 'Escape') {
+      this.#provider.hide();
+      event.preventDefault();
+      return true;
+    }
+    if (event.key === 'ArrowDown') {
+      this.#move(1);
+      event.preventDefault();
+      return true;
+    }
+    if (event.key === 'ArrowUp') {
+      this.#move(-1);
+      event.preventDefault();
+      return true;
+    }
+    if (event.key === 'Enter' || event.key === 'Tab') {
+      const item = this.#items[this.#selectedIndex];
+      if (item && this.#range) {
+        this.#complete(item);
+      }
+      event.preventDefault();
+      return true;
+    }
+    return false;
+  }
+
+  // Recalcule requête, items et bornes ; retourne false pour masquer la popup.
+  #refreshQuery(view: EditorView): boolean {
+    const content = this.#provider.getContent(view);
+    if (content === undefined) return false;
+
+    const query = findWikiLinkQuery(content);
+    if (query === null) return false;
+
+    const cursor = view.state.selection.from;
+    this.#range = { from: cursor - query.length - 2, to: cursor };
+    this.#items = rankWikiLinkTitles(this.#opts.knownTitles(), query);
+    this.#selectedIndex = 0;
+    this.#renderList();
+    return true;
+  }
+
+  #move(delta: number): void {
+    const count = this.#items.length;
+    if (count === 0) return;
+    this.#selectedIndex = (this.#selectedIndex + delta + count) % count;
+    this.#renderList();
+  }
+
+  #complete(title: string): void {
+    if (!this.#range) return;
+    const range = this.#range;
+    this.#provider.hide();
+    completeWikiLinkSuggestion(this.#view, range, title);
+  }
+
+  #renderList(): void {
+    this.#list.replaceChildren();
+
+    if (this.#items.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'wiki-link-popup__empty';
+      empty.textContent = 'Aucune note';
+      this.#list.appendChild(empty);
+      return;
+    }
+
+    this.#items.forEach((item, index) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'wiki-link-popup__item';
+      if (index === this.#selectedIndex) button.classList.add('is-active');
+      button.setAttribute('role', 'option');
+      button.setAttribute('aria-selected', String(index === this.#selectedIndex));
+      button.textContent = item;
+      button.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        this.#complete(item);
+      });
+      button.addEventListener('mouseenter', () => {
+        this.#selectedIndex = index;
+        this.#renderList();
+      });
+      this.#list.appendChild(button);
+    });
+  }
+}

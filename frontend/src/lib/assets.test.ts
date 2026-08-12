@@ -3,8 +3,6 @@ import {
   isLocalAssetPath,
   isRemoteImageSource,
   isSafeEditorImageSource,
-  precomputeAssetURLs,
-  scrubAbsoluteAssetURLs,
   withTimeout
 } from './assets';
 
@@ -31,32 +29,6 @@ describe('asset path policy', () => {
     expect(isSafeEditorImageSource('http://127.0.0.1:43125/files/assets/photo.png')).toBe(true);
     expect(isSafeEditorImageSource('https://example.com/tracker.png')).toBe(false);
     expect(isRemoteImageSource('https://example.com/tracker.png')).toBe(true);
-  });
-});
-
-describe('Markdown asset URLs', () => {
-  it('resolves local assets without touching remote images', async () => {
-    const resolve = vi.fn(async (path: string) => `http://127.0.0.1:1234/files/${path}`);
-    const markdown = '![locale](assets/photo.png)\n![distante](https://example.com/tracker.png)';
-
-    await expect(precomputeAssetURLs(markdown, resolve)).resolves.toBe(
-      '![locale](http://127.0.0.1:1234/files/assets/photo.png)\n![distante](https://example.com/tracker.png)'
-    );
-    expect(resolve).toHaveBeenCalledOnce();
-  });
-
-  it('restores portable paths before saving', () => {
-    expect(
-      scrubAbsoluteAssetURLs('![photo](http://127.0.0.1:1234/files/assets/mes%20photos/a.png)')
-    ).toBe('![photo](assets/mes photos/a.png)');
-  });
-
-  it('drops the asset server session token before saving', () => {
-    expect(
-      scrubAbsoluteAssetURLs(
-        '![photo](http://127.0.0.1:1234/files/assets/mes%20photos/a.png?t=deadbeef0123456789)'
-      )
-    ).toBe('![photo](assets/mes photos/a.png)');
   });
 });
 

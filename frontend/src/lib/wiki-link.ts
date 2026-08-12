@@ -1,18 +1,18 @@
-// Extension Tiptap qui surligne les motifs [[Titre]] en wiki-links cliquables.
+// Plugin ProseMirror qui surligne les motifs [[Titre]] en wiki-links cliquables.
 //
 // Approche : décorations ProseMirror. Le texte `[[Titre]]` reste tel quel
-// dans le document (donc préservé par la sérialisation Markdown), seule
-// l'apparence change (souligné + couleur d'accent) via une Decoration.inline
-// qui wrappe le texte dans une balise <a class="wiki-link">.
+// dans le document (donc préservé par la sérialisation Markdown, cf.
+// `lib/editor/wiki-link-escape.ts`), seule l'apparence change (souligné +
+// couleur d'accent) via une Decoration.inline qui wrappe le texte dans une
+// balise <a class="wiki-link">.
 //
 // Les titres de notes existantes sont marqués en bleu accent, les titres
 // inconnus en rouge (avec une classe distincte). Un click sur le lien
 // émet un callback fourni par l'hôte.
 
-import { Extension, type Editor } from '@tiptap/core';
-import { Plugin, PluginKey, type Transaction } from '@tiptap/pm/state';
-import { Decoration, DecorationSet } from '@tiptap/pm/view';
-import type { Node as PMNode } from '@tiptap/pm/model';
+import { Plugin, PluginKey, type Transaction } from '@milkdown/kit/prose/state';
+import { Decoration, DecorationSet, type EditorView } from '@milkdown/kit/prose/view';
+import type { Node as PMNode } from '@milkdown/kit/prose/model';
 
 export type WikiLinkClickHandler = (target: string) => void;
 export type WikiLinkCreateHandler = (target: string) => void;
@@ -30,56 +30,41 @@ export type WikiLinkOptions = {
 const WIKI_LINK_RE = /\[\[([^\]\n]+?)\]\]/g;
 const PLUGIN_KEY = new PluginKey('wiki-link');
 
-export const WikiLink = Extension.create<WikiLinkOptions>({
-  name: 'wikiLink',
-
-  addOptions() {
-    return {
-      onNavigate: () => {},
-      onCreate: undefined,
-      resolve: () => () => true
-    };
-  },
-
-  addProseMirrorPlugins() {
-    const opts = this.options;
-    return [
-      new Plugin({
-        key: PLUGIN_KEY,
-        state: {
-          init: () => DecorationSet.empty,
-          apply(tr, old) {
-            if (!tr.docChanged && !tr.getMeta('wiki-link-refresh')) return old;
-            if (tr.getMeta('wiki-link-refresh')) {
-              return buildDecorations(tr.doc, opts.resolve());
-            }
-            return applyIncremental(tr, old, opts.resolve());
-          }
-        },
-        props: {
-          decorations(state) {
-            return PLUGIN_KEY.getState(state) as DecorationSet;
-          },
-          handleClick(view, pos, event) {
-            const target = event.target as HTMLElement | null;
-            if (!target) return false;
-            const link = target.closest('.wiki-link') as HTMLElement | null;
-            if (!link) return false;
-            const targetName = link.getAttribute('data-target') ?? '';
-            if (!targetName) return false;
-            event.preventDefault();
-            if (event.metaKey || event.ctrlKey) {
-              opts.onCreate?.(targetName);
-            } else {
-              opts.onNavigate(targetName);
-            }
-            return true;
-          }
+export function wikiLinkPlugin(opts: WikiLinkOptions): Plugin {
+  return new Plugin({
+    key: PLUGIN_KEY,
+    state: {
+      init: () => DecorationSet.empty,
+      apply(tr, old) {
+        if (!tr.docChanged && !tr.getMeta('wiki-link-refresh')) return old;
+        if (tr.getMeta('wiki-link-refresh')) {
+          return buildDecorations(tr.doc, opts.resolve());
         }
-      })
-    ];
-  }
-});
+        return applyIncremental(tr, old, opts.resolve());
+      }
+    },
+    props: {
+      decorations(state) {
+        return PLUGIN_KEY.getState(state) as DecorationSet;
+      },
+      handleClick(_view, _pos, event) {
+        const target = event.target as HTMLElement | null;
+        if (!target) return false;
+        const link = target.closest('.wiki-link') as HTMLElement | null;
+        if (!link) return false;
+        const targetName = link.getAttribute('data-target') ?? '';
+        if (!targetName) return false;
+        event.preventDefault();
+        if (event.metaKey || event.ctrlKey) {
+          opts.onCreate?.(targetName);
+        } else {
+          opts.onNavigate(targetName);
+        }
+        return true;
+      }
+    }
+  });
+}
 
 function applyIncremental(
   tr: Transaction,
@@ -193,9 +178,7 @@ function buildDecorations(doc: PMNode, resolve: WikiLinkResolve): DecorationSet 
 // transaction meta-only ; sans `addToHistory: false`, prosemirror-history
 // empile ces transactions dans la pile d'undo et un Ctrl+Z défait d'abord
 // ces entrées invisibles avant d'atteindre la saisie de l'utilisateur.
-export function refreshWikiLinkDecorations(editor: Editor): void {
-  if (!editor) return;
-  editor.view.dispatch(
-    editor.state.tr.setMeta('wiki-link-refresh', true).setMeta('addToHistory', false)
-  );
+export function refreshWikiLinkDecorations(view: EditorView | null | undefined): void {
+  if (!view) return;
+  view.dispatch(view.state.tr.setMeta('wiki-link-refresh', true).setMeta('addToHistory', false));
 }

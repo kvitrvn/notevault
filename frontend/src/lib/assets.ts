@@ -18,41 +18,9 @@ export function isRemoteImageSource(source: string): boolean {
   return /^https?:\/\//i.test(source.trim());
 }
 
-// Convertit uniquement les assets du coffre. Les URL distantes restent dans
-// le Markdown, mais l'éditeur les rend sous forme de contenu bloqué.
-export async function precomputeAssetURLs(
-  markdown: string,
-  resolve: (relativePath: string) => Promise<string>
-): Promise<string> {
-  const imagePattern = /!\[([^\]]*)\]\(([^)]+)\)/g;
-  const replacements = new Map<string, string>();
-
-  for (const match of markdown.matchAll(imagePattern)) {
-    const source = match[2].trim();
-    if (!isLocalAssetPath(source)) continue;
-    const absolute = await resolve(source);
-    if (absolute !== source) {
-      replacements.set(match[0], `![${match[1]}](${absolute})`);
-    }
-  }
-
-  let output = markdown;
-  for (const [original, replacement] of replacements) {
-    output = output.replaceAll(original, replacement);
-  }
-  return output;
-}
-
-// Les URL loopback ne doivent jamais être persistées dans les fichiers .md.
-// On retire aussi la query string (`?t=...` ajouté par le serveur d'assets
-// pour son token de session) pour ne garder que le chemin relatif propre.
-export function scrubAbsoluteAssetURLs(markdown: string): string {
-  return markdown.replace(
-    /(!\[[^\]]*\]\()http:\/\/127\.0\.0\.1:\d+\/files\/(assets\/[^?)]+)(\?[^)]*)?(\))/g,
-    (_match, prefix: string, relativePath: string, _query: string | undefined, suffix: string) =>
-      `${prefix}${decodeURI(relativePath)}${suffix}`
-  );
-}
+// Le Markdown ne contient que des chemins relatifs au coffre : la résolution
+// vers l'URL loopback se fait au rendu (`proxyDomURL` de Crepe), jamais dans
+// le document. Rien à réécrire avant chargement ni à nettoyer avant save.
 
 export async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;

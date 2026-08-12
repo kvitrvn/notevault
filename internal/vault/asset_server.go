@@ -16,9 +16,9 @@ import (
 )
 
 // AssetServer expose les fichiers du coffre (images, pièces jointes) sur un
-// port HTTP local. Nécessaire parce que les `<img src=...>` injectés par
-// Tiptap ne peuvent pas charger un chemin relatif sur le système de fichiers
-// — la webview a besoin d'une URL http://.
+// port HTTP local. Nécessaire parce que les `<img src=...>` rendus par
+// l'éditeur ne peuvent pas charger un chemin relatif sur le système de
+// fichiers — la webview a besoin d'une URL http://.
 //
 // Le port est attribué dynamiquement par le kernel (port 0), ce qui évite
 // les collisions. L'URL absolue est reconstruite par l'App pour chaque

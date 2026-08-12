@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Editor } from '@tiptap/core';
-  import StarterKit from '@tiptap/starter-kit';
-  import { Markdown } from '@tiptap/markdown';
+  import { defaultValueCtx, Editor, editorViewOptionsCtx, rootCtx } from '@milkdown/kit/core';
+  import { commonmark } from '@milkdown/kit/preset/commonmark';
+  import { gfm } from '@milkdown/kit/preset/gfm';
 
   type Props = {
     markdown: string;
@@ -11,30 +11,42 @@
   let { markdown }: Props = $props();
   let host: HTMLDivElement | undefined;
 
+  // Rendu seul : pas de Crepe ici (ni slash menu, ni poignée de bloc, ni
+  // CodeMirror) — juste le parseur Markdown de Milkdown en lecture seule.
+  // Les liens ne sont jamais suivis : la webview ne doit pas naviguer.
   onMount(() => {
     if (!host) return;
-    const editor = new Editor({
-      element: host,
-      editable: false,
-      extensions: [StarterKit, Markdown],
-      content: markdown,
-      contentType: 'markdown',
-      editorProps: {
-        attributes: {
-          class: 'chat-markdown',
-          'aria-readonly': 'true'
-        },
-        handleDOMEvents: {
-          click: (_view, event) => {
-            const target = event.target;
-            if (!(target instanceof Element) || !target.closest('a')) return false;
-            event.preventDefault();
-            return true;
+    let editor: Editor | null = null;
+
+    void Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, host as HTMLElement);
+        ctx.set(defaultValueCtx, markdown);
+        ctx.update(editorViewOptionsCtx, (prev) => ({
+          ...prev,
+          editable: () => false,
+          attributes: { class: 'chat-markdown', 'aria-readonly': 'true' },
+          handleDOMEvents: {
+            click: (_view, event) => {
+              const target = event.target;
+              if (!(target instanceof Element) || !target.closest('a')) return false;
+              event.preventDefault();
+              return true;
+            }
           }
-        }
-      }
-    });
-    return () => editor.destroy();
+        }));
+      })
+      .use(commonmark)
+      .use(gfm)
+      .create()
+      .then((instance) => {
+        editor = instance;
+      })
+      .catch((err) => console.error('[chat-markdown] init failed:', err));
+
+    return () => {
+      void editor?.destroy();
+    };
   });
 </script>
 

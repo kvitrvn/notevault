@@ -1,5 +1,23 @@
 @import "tailwindcss";
 
+/* Structure de l'éditeur Crepe. Les thèmes livrés par Crepe ne sont PAS
+   importés : seules ces feuilles structurelles le sont, et les variables
+   `--crepe-*` sont mappées plus bas sur les tokens NoteVault pour que les
+   thèmes du coffre (.notevault/themes/*.json) pilotent aussi l'éditeur.
+   Les features latex / top-bar / diff / ai ne sont pas activées, leur CSS
+   n'est donc pas embarqué. */
+@import "@milkdown/crepe/theme/common/prosemirror.css";
+@import "@milkdown/crepe/theme/common/reset.css";
+@import "@milkdown/crepe/theme/common/block-edit.css";
+@import "@milkdown/crepe/theme/common/code-mirror.css";
+@import "@milkdown/crepe/theme/common/cursor.css";
+@import "@milkdown/crepe/theme/common/image-block.css";
+@import "@milkdown/crepe/theme/common/link-tooltip.css";
+@import "@milkdown/crepe/theme/common/list-item.css";
+@import "@milkdown/crepe/theme/common/placeholder.css";
+@import "@milkdown/crepe/theme/common/toolbar.css";
+@import "@milkdown/crepe/theme/common/table.css";
+
 @source ".";
 @source not "../dist";
 
@@ -129,10 +147,18 @@
     background: transparent;
   }
 
-  /* Popup wiki-link (rendue dans document.body via WikiLinkSuggestion). */
+  /* Popup wiki-link (ancrée sous le curseur par SlashProvider). */
+  /* SlashProvider positionne l'hôte en stratégie « absolute » (floating-ui)
+     dans le conteneur de scroll de l'éditeur, et bascule `data-show`. */
   .wiki-link-popup-host {
-    position: fixed;
+    position: absolute;
+    top: 0;
+    left: 0;
     z-index: 9999;
+  }
+
+  .wiki-link-popup-host:not([data-show='true']) {
+    display: none;
   }
 
   .wiki-link-popup {
@@ -178,7 +204,7 @@
     color: var(--color-accent-foreground);
   }
 
-  /* Images dans l'éditeur Tiptap. */
+  /* Images dans l'éditeur. */
   .note-editor-content img {
     display: block;
     max-width: 100%;
@@ -193,78 +219,93 @@
     outline: 2px solid var(--color-focus);
   }
 
-  .note-editor-blocked-image {
-    display: inline-block;
-    margin: 0.5rem 0;
-    padding: 0.25rem 0.5rem;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-sm);
-    color: var(--color-faint);
-    font-size: 0.8125rem;
+  /* Variables de l'éditeur Crepe mappées sur les tokens NoteVault : les
+     thèmes du coffre pilotent donc aussi le slash menu, la barre flottante,
+     les blocs image/tableau/code. */
+  .milkdown {
+    --crepe-color-background: var(--color-background);
+    --crepe-color-on-background: var(--color-foreground);
+    --crepe-color-surface: var(--color-panel);
+    --crepe-color-surface-low: var(--color-panel-muted);
+    --crepe-color-on-surface: var(--color-foreground);
+    --crepe-color-on-surface-variant: var(--color-subtle);
+    --crepe-color-outline: var(--color-border-strong);
+    --crepe-color-primary: var(--color-accent);
+    --crepe-color-secondary: var(--color-selection);
+    --crepe-color-on-secondary: var(--color-foreground);
+    --crepe-color-inverse: var(--color-foreground);
+    --crepe-color-on-inverse: var(--color-background);
+    --crepe-color-inline-code: var(--color-danger);
+    --crepe-color-error: var(--color-danger);
+    --crepe-color-hover: var(--color-panel-muted);
+    --crepe-color-selected: var(--color-selection);
+    --crepe-color-inline-area: var(--color-code);
+
+    --crepe-font-title: var(--font-sans);
+    --crepe-font-default: var(--font-sans);
+    --crepe-font-code: var(--font-mono);
   }
 
-  /* Thème highlight.js (lowlight) confiné à l'éditeur. */
-  .note-editor-content pre {
+  /* Coloration syntaxique CodeMirror : `classHighlighter` émet des classes
+     `tok-*`, on les rattache aux tokens de thème plutôt qu'à des couleurs
+     figées dans le JS. */
+  .note-editor-content .cm-editor {
+    background: transparent;
     color: var(--color-foreground);
   }
-  .note-editor-content .hljs-comment,
-  .note-editor-content .hljs-quote {
+  .note-editor-content .tok-comment {
     color: var(--color-faint);
     font-style: italic;
   }
-  .note-editor-content .hljs-keyword,
-  .note-editor-content .hljs-selector-tag,
-  .note-editor-content .hljs-literal,
-  .note-editor-content .hljs-section,
-  .note-editor-content .hljs-link {
+  .note-editor-content .tok-keyword,
+  .note-editor-content .tok-modifier,
+  .note-editor-content .tok-operator,
+  .note-editor-content .tok-link {
     color: var(--color-accent);
   }
-  .note-editor-content .hljs-string,
-  .note-editor-content .hljs-attr,
-  .note-editor-content .hljs-template-tag,
-  .note-editor-content .hljs-template-variable {
+  .note-editor-content .tok-string,
+  .note-editor-content .tok-attributeValue {
     color: #c8a96a;
   }
-  .note-editor-content [data-theme='light'] .hljs-string,
-  .note-editor-content [data-theme='light'] .hljs-attr,
-  .note-editor-content [data-theme='light'] .hljs-template-tag,
-  .note-editor-content [data-theme='light'] .hljs-template-variable {
-    color: #a36a18;
-  }
-  .note-editor-content .hljs-number,
-  .note-editor-content .hljs-symbol,
-  .note-editor-content .hljs-bullet,
-  .note-editor-content .hljs-meta {
+  .note-editor-content .tok-number,
+  .note-editor-content .tok-bool,
+  .note-editor-content .tok-atom,
+  .note-editor-content .tok-meta {
     color: #d28a7a;
   }
-  .note-editor-content [data-theme='light'] .hljs-number,
-  .note-editor-content [data-theme='light'] .hljs-symbol,
-  .note-editor-content [data-theme='light'] .hljs-bullet,
-  .note-editor-content [data-theme='light'] .hljs-meta {
-    color: #b54d3a;
-  }
-  .note-editor-content .hljs-title,
-  .note-editor-content .hljs-name,
-  .note-editor-content .hljs-type,
-  .note-editor-content .hljs-built_in,
-  .note-editor-content .hljs-class .hljs-title,
-  .note-editor-content .hljs-tag {
+  .note-editor-content .tok-typeName,
+  .note-editor-content .tok-className,
+  .note-editor-content .tok-tagName,
+  .note-editor-content .tok-attributeName,
+  .note-editor-content .tok-function,
+  .note-editor-content .tok-macroName {
     color: #8fb6e0;
   }
-  .note-editor-content [data-theme='light'] .hljs-title,
-  .note-editor-content [data-theme='light'] .hljs-name,
-  .note-editor-content [data-theme='light'] .hljs-type,
-  .note-editor-content [data-theme='light'] .hljs-built_in,
-  .note-editor-content [data-theme='light'] .hljs-class .hljs-title,
-  .note-editor-content [data-theme='light'] .hljs-tag {
-    color: #2a5a9a;
-  }
-  .note-editor-content .hljs-variable,
-  .note-editor-content .hljs-regexp,
-  .note-editor-content .hljs-deletion {
+  .note-editor-content .tok-variableName,
+  .note-editor-content .tok-regexp,
+  .note-editor-content .tok-deleted {
     color: var(--color-danger);
   }
-  .note-editor-content .hljs-addition {
+  .note-editor-content .tok-inserted {
     color: #8ec07c;
+  }
+
+  :root[data-theme='light'] .note-editor-content .tok-string,
+  :root[data-theme='light'] .note-editor-content .tok-attributeValue {
+    color: #a36a18;
+  }
+  :root[data-theme='light'] .note-editor-content .tok-number,
+  :root[data-theme='light'] .note-editor-content .tok-bool,
+  :root[data-theme='light'] .note-editor-content .tok-atom,
+  :root[data-theme='light'] .note-editor-content .tok-meta {
+    color: #b54d3a;
+  }
+  :root[data-theme='light'] .note-editor-content .tok-typeName,
+  :root[data-theme='light'] .note-editor-content .tok-className,
+  :root[data-theme='light'] .note-editor-content .tok-tagName,
+  :root[data-theme='light'] .note-editor-content .tok-attributeName,
+  :root[data-theme='light'] .note-editor-content .tok-function,
+  :root[data-theme='light'] .note-editor-content .tok-macroName {
+    color: #2a5a9a;
   }
 }
