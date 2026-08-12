@@ -191,7 +191,7 @@ func (s *Service) ensureDailyNoteImpl() (string, error) {
 		UpdatedAt:    now,
 		Tags:         []string{"daily"},
 	}
-	if _, err := s.SaveNoteForce(note); err != nil {
+	if _, err := s.SaveNote(note); err != nil {
 		return "", err
 	}
 	return rel, nil
@@ -632,34 +632,6 @@ func (s *Service) OpenNote(relativePath string) (domain.Note, error) {
 	return s.readAbsolute(path)
 }
 
-// OpenNoteFile ouvre une note conjointement avec une révision disque
-// (sha256 du contenu brut). Utilisé pour détecter les conflits d'édition
-// quand le fichier est modifié hors de NoteVault entre deux sauvegardes.
-func (s *Service) OpenNoteFile(relativePath string) (NoteFile, error) {
-	path, err := s.absoluteNotePath(relativePath)
-	if err != nil {
-		return NoteFile{}, err
-	}
-	relativePath, err = filepath.Rel(s.root, path)
-	if err != nil {
-		return NoteFile{}, err
-	}
-	relativePath = filepath.ToSlash(relativePath)
-	raw, err := s.readPayload(relativePath)
-	if err != nil {
-		return NoteFile{}, fmt.Errorf("lire la note : %w", err)
-	}
-	note := parse(string(raw))
-	note.RelativePath = relativePath
-	if note.Title == "" {
-		note.Title = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	}
-	if info, err := os.Stat(path); err == nil && note.UpdatedAt.IsZero() {
-		note.UpdatedAt = info.ModTime().UTC()
-	}
-	return NoteFile{Note: note, Revision: revisionOf(raw)}, nil
-}
-
 // CreateNote crée une nouvelle note dans le dossier indiqué. parentRelPath
 // est un chemin relatif (par exemple "inbox", "projets" ou "projets/web"),
 // ou une chaîne vide pour utiliser le dossier par défaut (notes/inbox/).
@@ -688,7 +660,7 @@ func (s *Service) CreateNote(parentRelPath, title, templateKey string) (domain.N
 		UpdatedAt:    now,
 		Tags:         []string{},
 	}
-	return s.SaveNoteForce(note)
+	return s.SaveNote(note)
 }
 
 // CreateFolder crée un nouveau dossier vide sous notes/. parentRelPath est
@@ -1106,34 +1078,7 @@ func (s *Service) resolveTemplateBody(key string) string {
 	return template(key)
 }
 
-func (s *Service) SaveNote(note domain.Note, expectedRevision string) (domain.Note, error) {
-	s.mutationMu.RLock()
-	defer s.mutationMu.RUnlock()
-	if err := s.requireUnlocked(); err != nil {
-		return domain.Note{}, err
-	}
-	note.RelativePath = filepath.ToSlash(filepath.Clean(filepath.FromSlash(note.RelativePath)))
-	path, err := s.absoluteNotePath(note.RelativePath)
-	if err != nil {
-		return domain.Note{}, err
-	}
-	if expectedRevision != "" {
-		currentRaw, readErr := s.readPayload(note.RelativePath)
-		if readErr == nil {
-			if revisionOf(currentRaw) != expectedRevision {
-				return domain.Note{}, ErrConflict
-			}
-		} else if !errors.Is(readErr, fs.ErrNotExist) {
-			return domain.Note{}, fmt.Errorf("vérifier la révision disque : %w", readErr)
-		}
-	}
-	return s.saveNoteUnlocked(note, path)
-}
-
-// SaveNoteForce écrit la note sans vérificateur de conflit. Réservé à
-// l'interface utilisateur lorsque l'utilisateur tranche explicitement
-// en faveur de sa version locale.
-func (s *Service) SaveNoteForce(note domain.Note) (domain.Note, error) {
+func (s *Service) SaveNote(note domain.Note) (domain.Note, error) {
 	s.mutationMu.RLock()
 	defer s.mutationMu.RUnlock()
 	if err := s.requireUnlocked(); err != nil {
@@ -1392,7 +1337,7 @@ func (s *Service) DuplicateNote(relativePath string) (domain.Note, error) {
 	}
 	note.CreatedAt = now
 	note.UpdatedAt = now
-	return s.SaveNoteForce(note)
+	return s.SaveNote(note)
 }
 
 // OpenInExplorer ouvre le fichier (ou son dossier) dans le gestionnaire
@@ -1425,7 +1370,7 @@ func (s *Service) RenameTitle(relativePath, newTitle string) (domain.Note, error
 	if note.Title == "" {
 		note.Title = "Sans titre"
 	}
-	return s.SaveNoteForce(note)
+	return s.SaveNote(note)
 }
 
 // GetBacklinks retourne les notes qui référencent le titre donné avec un

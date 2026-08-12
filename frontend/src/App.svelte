@@ -51,7 +51,6 @@
   import StatsView from './components/StatsView.svelte';
   import ExportDialog from './components/ExportDialog.svelte';
   import RecoveryDialog from './components/RecoveryDialog.svelte';
-  import ConflictDialog from './components/ConflictDialog.svelte';
   import WindowTitleBar from './components/WindowTitleBar.svelte';
   import ChatPanel from './components/ChatPanel.svelte';
   import type { SaveState } from './components/SaveIndicator.svelte';
@@ -90,14 +89,12 @@
     OpenDailyNote,
     OpenInExplorer,
     OpenNote,
-    OpenNoteFile,
     PinNote,
     RenameFolder,
     RenameTitle,
     RestoreFromHistory,
     SaveAsset,
     SaveNote,
-    SaveNoteForce,
     SearchNotes,
     SetDirtyBuffer,
     SnapshotForStartup,
@@ -148,8 +145,6 @@
   let templates: Template[] = $state([]);
   let selected: Note | null = $state<Note | null>(null);
   let lastSavedSnapshot = '';
-  let selectedRevision = '';
-  let conflictNote: { path: string } | null = $state(null);
   let vaultPath = $state('');
   let loading = $state(true);
   let saving = $state(false);
@@ -304,23 +299,21 @@
       }
     }
     if (upserts.length > 0) {
-      // Détection de conflit : la note ouverte est dirty et un upsert
-      // arrive pour son chemin → modif externe concurrente à trancher.
+      // La note ouverte est dirty et un upsert arrive pour son chemin →
+      // modif externe concurrente : on avertit sans toucher aux édits locaux.
       const openPath = selected?.relativePath;
       if (openPath && upserts.includes(openPath) && hasUnsavedChanges) {
-        conflictNote = { path: openPath };
         showToast(
           'error',
-          `Modification externe détectée sur ${openPath}. Conflit à résoudre.`
+          `Modification externe détectée sur ${openPath}. Vos modifications locales sont conservées.`
         );
       } else if (openPath && upserts.includes(openPath) && !hasUnsavedChanges) {
         // Note ouverte mais clean → on recharge silencieusement.
         void (async () => {
           try {
-            const file = (await OpenNoteFile(openPath)) as { note: Note; revision: string };
-            const content = await precomputeAssetURLs(file.note.content);
-            selected = cloneNote(file.note, content);
-            selectedRevision = String(file.revision ?? '');
+            const note = (await OpenNote(openPath)) as Note;
+            const content = await precomputeAssetURLs(note.content);
+            selected = cloneNote(note, content);
             lastSavedSnapshot = snapshot(selected!);
             saveState = 'clean';
           } catch (err) {
@@ -654,20 +647,17 @@
     if (!(await flushSave())) return;
     error = '';
     try {
-      const file = await safeCall('OpenNoteFile', OpenNoteFile(relativePath), null);
-      if (!file) {
+      const note = await safeCall('OpenNote', OpenNote(relativePath), null);
+      if (!note) {
         error = `Impossible d'ouvrir ${relativePath}`;
         return;
       }
       // Pré-transforme les chemins relatifs d'images en URLs absolues pour
       // que l'éditeur Tiptap puisse les charger dans la webview.
-      const note = file.note as Note;
       const content = await precomputeAssetURLs(note.content);
       selected = cloneNote(note, content);
-      selectedRevision = String(file.revision ?? '');
       lastSavedSnapshot = snapshot(selected!);
       saveState = 'clean';
-      conflictNote = null;
       isCurrentPinned = await safeCall('IsNotePinned', IsNotePinned(relativePath), false);
     } catch (err) {
       error = String(err);
@@ -872,15 +862,13 @@
     const noteToSave = domain.Note.createFrom({ ...selected });
     const saveSnapshot = snapshot(noteToSave);
     const savePath = noteToSave.relativePath;
-    const expectedRevision = selectedRevision;
     try {
-      const saved = await SaveNote(noteToSave, expectedRevision);
+      const saved = await SaveNote(noteToSave);
       const currentSnapshot = selected?.relativePath === savePath ? snapshot(selected) : '';
       const changedDuringSave = currentSnapshot !== '' && currentSnapshot !== saveSnapshot;
 
       if (!changedDuringSave) {
         selected = saved;
-        selectedRevision = expectedRevision;
       }
       lastSavedSnapshot = snapshot(saved);
       saveState = changedDuringSave ? 'dirty' : 'clean';
@@ -899,11 +887,6 @@
     } catch (err) {
       saveState = 'error';
       const message = String(err);
-      if (message.includes('conflit') || message.toLowerCase().includes('conflict')) {
-        conflictNote = { path: savePath };
-        showToast('error', `Conflit détecté sur ${savePath}. Choisissez une option.`);
-        return false;
-      }
       error = message;
       showToast('error', `Échec de l'enregistrement : ${message}`);
       return false;
@@ -3226,41 +3209,6 @@
   onRecover={onRecoverAccept}
   onDiscard={onRecoverDiscard}
   onClose={() => (recoveryOpen = false)}
-/>
-
-<ConflictDialog
-  open={conflictNote !== null}
-  path={conflictNote?.path ?? ''}
-  onTakeDisk={async () => {
-    const path = conflictNote?.path;
-    conflictNote = null;
-    if (path) await openNote(path);
-  }}
-  onForceSave={async () => {
-    if (!selected) {
-      conflictNote = null;
-      return;
-    }
-    conflictNote = null;
-    try {
-      const noteToSave = domain.Note.createFrom({ ...selected });
-      const saved = await SaveNoteForce(noteToSave);
-      selected = saved;
-      selectedRevision = '';
-      lastSavedSnapshot = snapshot(saved);
-      saveState = 'clean';
-      lastSavedAt = new Date();
-      try {
-        await ClearDirtyBuffer();
-      } catch {
-        /* non bloquant */
-      }
-      await refreshPinnedAndTags();
-    } catch (err) {
-      showToast('error', `Échec : ${err}`);
-    }
-  }}
-  onClose={() => (conflictNote = null)}
 />
 
 {#if contextMenu}

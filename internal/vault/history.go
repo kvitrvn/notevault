@@ -203,7 +203,7 @@ func (s *Service) RestoreFromHistory(relativePath, versionID string) (domain.Not
 	if note.Title == "" {
 		note.Title = strings.TrimSuffix(filepath.Base(relativePath), filepath.Ext(relativePath))
 	}
-	return s.SaveNoteForce(note)
+	return s.SaveNote(note)
 }
 
 // DiffHistory retourne un diff unifié entre deux versions (a -> b).

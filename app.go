@@ -717,18 +717,8 @@ func (a *App) DeleteFolder(rel string, force bool) error {
 func (a *App) FolderContents(rel string) (vault.FolderContentsInfo, error) {
 	return withSession(a, func(s *vaultSession) (vault.FolderContentsInfo, error) { return s.service.FolderContents(rel) })
 }
-func (a *App) SaveNote(note domain.Note, expectedRevision string) (domain.Note, error) {
-	return withSession(a, func(s *vaultSession) (domain.Note, error) {
-		return s.service.SaveNote(note, expectedRevision)
-	})
-}
-func (a *App) SaveNoteForce(note domain.Note) (domain.Note, error) {
-	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.SaveNoteForce(note) })
-}
-func (a *App) OpenNoteFile(path string) (vault.NoteFile, error) {
-	return withSession(a, func(s *vaultSession) (vault.NoteFile, error) {
-		return s.service.OpenNoteFile(path)
-	})
+func (a *App) SaveNote(note domain.Note) (domain.Note, error) {
+	return withSession(a, func(s *vaultSession) (domain.Note, error) { return s.service.SaveNote(note) })
 }
 func (a *App) DeleteNote(path string) error {
 	return a.sessionError(func(s *vault.Service) error { return s.DeleteNote(path) })

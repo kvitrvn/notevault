@@ -154,7 +154,7 @@ func TestPDFWorkerWithRealChromium(t *testing.T) {
 		t.Fatal(err)
 	}
 	note.Content = "| A | B |\n|---|---|\n| 1 | 2 |\n\n- [x] Tâche\n\n```go\nfmt.Println(\"ok\")\n```\n\n![Pixel](assets/pixel.png)"
-	if _, err := service.SaveNoteForce(note); err != nil {
+	if _, err := service.SaveNote(note); err != nil {
 		t.Fatal(err)
 	}
 	document, err := service.BuildNotePDFDocument(note.RelativePath, "classic", false)

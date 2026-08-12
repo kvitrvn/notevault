@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,7 +42,7 @@ func TestServiceCRUD(t *testing.T) {
 	}
 
 	created.Content = "Hello world"
-	updated, err := svc.SaveNoteForce(created)
+	updated, err := svc.SaveNote(created)
 	if err != nil {
 		t.Fatalf("SaveNote: %v", err)
 	}
@@ -96,7 +97,7 @@ func TestServiceSearch(t *testing.T) {
 			t.Fatalf("CreateNote: %v", err)
 		}
 		note.Content = "Contenu de " + title
-		if _, err := svc.SaveNoteForce(note); err != nil {
+		if _, err := svc.SaveNote(note); err != nil {
 			t.Fatalf("SaveNote: %v", err)
 		}
 	}
@@ -228,7 +229,7 @@ func TestServiceAtomicWrite(t *testing.T) {
 		t.Fatalf("CreateNote: %v", err)
 	}
 	note.Content = "premier contenu"
-	if _, err := svc.SaveNoteForce(note); err != nil {
+	if _, err := svc.SaveNote(note); err != nil {
 		t.Fatalf("SaveNote 1: %v", err)
 	}
 	// Aucun fichier .tmp ne doit subsister.
@@ -418,6 +419,59 @@ func contains(haystack, needle string) bool {
 		}
 	}
 	return false
+}
+
+func TestRescanVault(t *testing.T) {
+	svc, dir := setupVault(t)
+	capture := &captureHandler{}
+	svc.OnChange(capture.Callback)
+
+	external := filepath.Join(dir, "notes", "inbox", "fresh.md")
+	if err := os.MkdirAll(filepath.Dir(external), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(external, []byte("# Fresh\n\nbody"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if err := svc.RescanVault(); err != nil {
+		t.Fatalf("RescanVault: %v", err)
+	}
+
+	if !capture.HasFullRescan() {
+		t.Fatalf("RescanVault doit publier FullRescan=true")
+	}
+	if _, err := svc.index.Get("notes/inbox/fresh.md"); err != nil {
+		t.Fatalf("index.Get fresh.md: %v", err)
+	}
+}
+
+// SaveNote écrase toujours la version disque, y compris quand le fichier a
+// été modifié hors de l'app depuis sa lecture : aucune vérification de
+// révision ne doit bloquer l'écriture.
+func TestSaveNoteOverwritesExternalModification(t *testing.T) {
+	svc, _ := setupVault(t)
+	note, err := svc.CreateNote("", "Hello", "")
+	if err != nil {
+		t.Fatalf("CreateNote: %v", err)
+	}
+
+	path := filepath.Join(svc.Root(), filepath.FromSlash(note.RelativePath))
+	if err := os.WriteFile(path, []byte("# Hello\n\nmodifié hors app"), 0o644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	note.Content = "# Hello\n\nlocal edit"
+	if _, err := svc.SaveNote(note); err != nil {
+		t.Fatalf("SaveNote: %v", err)
+	}
+	saved, err := svc.OpenNote(note.RelativePath)
+	if err != nil {
+		t.Fatalf("OpenNote: %v", err)
+	}
+	if !strings.Contains(saved.Content, "local edit") {
+		t.Fatalf("contenu disque = %q, attendu la version locale", saved.Content)
+	}
 }
 
 func writeNoteFile(t *testing.T, root string, note domain.Note) {

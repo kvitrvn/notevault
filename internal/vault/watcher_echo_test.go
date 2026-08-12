@@ -156,7 +156,7 @@ func TestSaveNoteSuppressesWatcherEcho(t *testing.T) {
 	baseline := counted.upserts.Load()
 
 	note.Content = "deuxième contenu"
-	if _, err := svc.SaveNoteForce(note); err != nil {
+	if _, err := svc.SaveNote(note); err != nil {
 		t.Fatalf("SaveNote: %v", err)
 	}
 	time.Sleep(watcherDebounce + 300*time.Millisecond)

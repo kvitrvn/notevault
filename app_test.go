@@ -181,7 +181,7 @@ func TestAppExportNotePDFUsesNativeDialogAndWritesAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	note.Content = "# Contenu"
-	if _, err := app.session.service.SaveNoteForce(note); err != nil {
+	if _, err := app.session.service.SaveNote(note); err != nil {
 		t.Fatal(err)
 	}
 	destination := filepath.Join(t.TempDir(), "partage")

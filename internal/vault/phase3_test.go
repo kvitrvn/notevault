@@ -98,7 +98,7 @@ func TestServiceDuplicateNote(t *testing.T) {
 	svc, _ := setupVault(t)
 	original, _ := svc.CreateNote("", "Original", "")
 	original.Tags = []string{"projet", "important"}
-	original, _ = svc.SaveNoteForce(original)
+	original, _ = svc.SaveNote(original)
 
 	dup, err := svc.DuplicateNote(original.RelativePath)
 	if err != nil {
