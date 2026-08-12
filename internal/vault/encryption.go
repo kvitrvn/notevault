@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -632,8 +633,7 @@ func (s *Service) readPayload(relativePath string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(s.root, filepath.FromSlash(relativePath))
-	raw, err := os.ReadFile(path)
+	raw, err := s.readVaultFile(relativePath)
 	if err != nil {
 		return nil, err
 	}
@@ -681,6 +681,33 @@ func (s *Service) writePayload(relativePath string, plaintext []byte, perm os.Fi
 		perm = 0o600
 	}
 	return writeAtomic(filepath.Join(s.root, filepath.FromSlash(relativePath)), stored, perm)
+}
+
+// readVaultFile lit un fichier du coffre en restant confiné à sa racine.
+// os.Root refuse de suivre un lien symbolique qui sort du coffre : sans lui,
+// un `.md` symbolique déposé dans notes/ (coffre synchronisé, archive
+// extraite) serait indexé puis lisible comme une note ordinaire.
+func (s *Service) readVaultFile(relativePath string) ([]byte, error) {
+	root, err := os.OpenRoot(s.root)
+	if err != nil {
+		return nil, fmt.Errorf("ouvrir la racine du coffre : %w", err)
+	}
+	defer root.Close()
+
+	file, err := root.Open(filepath.FromSlash(relativePath))
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("%s est un dossier", relativePath)
+	}
+	return io.ReadAll(file)
 }
 
 func normalizeVaultRelative(relativePath string) (string, error) {

@@ -87,11 +87,31 @@ func (s *Store) Save(cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("encoder la configuration : %w", err)
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	// Nom temporaire unique + Sync avant Rename : un nom fixe faisait que deux
+	// sauvegardes concurrentes écrivaient dans le même fichier, et sans Sync le
+	// rename pouvait précéder l'arrivée des données sur le disque.
+	tmp, err := os.CreateTemp(filepath.Dir(s.path), "config.json.tmp-*")
+	if err != nil {
+		return fmt.Errorf("créer la configuration temporaire : %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("protéger la configuration temporaire : %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
 		return fmt.Errorf("écrire la configuration (tmp) : %w", err)
 	}
-	if err := os.Rename(tmp, s.path); err != nil {
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("synchroniser la configuration temporaire : %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("fermer la configuration temporaire : %w", err)
+	}
+	if err := os.Rename(tmpPath, s.path); err != nil {
 		return fmt.Errorf("renommer la configuration : %w", err)
 	}
 	return nil

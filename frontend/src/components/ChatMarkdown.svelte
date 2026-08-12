@@ -3,6 +3,7 @@
   import { defaultValueCtx, Editor, editorViewOptionsCtx, rootCtx } from '@milkdown/kit/core';
   import { commonmark } from '@milkdown/kit/preset/commonmark';
   import { gfm } from '@milkdown/kit/preset/gfm';
+  import { BLOCKED_IMAGE_SRC, isSafeEditorImageSource } from '../lib/assets';
 
   type Props = {
     markdown: string;
@@ -26,6 +27,21 @@
           ...prev,
           editable: () => false,
           attributes: { class: 'chat-markdown', 'aria-readonly': 'true' },
+          // Une réponse de modèle peut contenir `![](https://…)`. Sans ce
+          // nodeView, le schéma image de commonmark recopie `node.attrs` tel
+          // quel dans le <img> et la webview part chercher l'image — pixel
+          // espion dans une application qui ne doit rien émettre. Crepe fait
+          // l'équivalent côté éditeur via `proxyDomURL`.
+          nodeViews: {
+            image: (node: { attrs: Record<string, unknown> }) => {
+              const dom = document.createElement('img');
+              const src = typeof node.attrs.src === 'string' ? node.attrs.src : '';
+              dom.setAttribute('src', isSafeEditorImageSource(src) ? src : BLOCKED_IMAGE_SRC);
+              if (typeof node.attrs.alt === 'string') dom.setAttribute('alt', node.attrs.alt);
+              if (typeof node.attrs.title === 'string') dom.setAttribute('title', node.attrs.title);
+              return { dom };
+            }
+          },
           handleDOMEvents: {
             click: (_view, event) => {
               const target = event.target;

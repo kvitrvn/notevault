@@ -4,6 +4,7 @@
   import ArrowUp from '@lucide/svelte/icons/arrow-up';
   import ArrowDown from '@lucide/svelte/icons/arrow-down';
   import type { Snippet } from 'svelte';
+  import { createDebouncedTask } from '../lib/debounce';
 
   type Entry = {
     relativePath: string;
@@ -11,6 +12,8 @@
     updatedAt: string;
     score: number;
   };
+
+  type IndexedEntry = { entry: Entry; title: string; path: string };
 
   type Props = {
     open: boolean;
@@ -24,20 +27,40 @@
 
   let inputEl: HTMLInputElement | undefined = $state();
   let query = $state('');
+  let appliedQuery = $state('');
   let selectedIndex = $state(0);
   const MAX_RESULTS = 50;
+  const QUERY_DEBOUNCE_MS = 90;
+
+  // Le scoring parcourt jusqu'à 10 000 entrées ; on ne le relance pas à chaque
+  // frappe. `flush()` avant Enter garantit qu'on ouvre bien le résultat visé.
+  const applyQuery = createDebouncedTask(QUERY_DEBOUNCE_MS, () => {
+    appliedQuery = query;
+  });
+
+  // Les minuscules ne dépendent que de `entries` : les précalculer ici évite
+  // deux allocations de chaîne par entrée et par frappe.
+  const indexed = $derived(
+    entries.map((entry) => ({
+      entry,
+      title: entry.title.toLowerCase(),
+      path: entry.relativePath.toLowerCase()
+    }))
+  );
 
   const filtered = $derived.by(() => {
-    const q = query.trim();
+    const q = appliedQuery.trim();
     if (!q) {
       return entries.slice(0, MAX_RESULTS).map((e) => ({ ...e, score: 0 }));
     }
-    return scoreEntries(entries, q).slice(0, MAX_RESULTS);
+    return scoreEntries(indexed, q).slice(0, MAX_RESULTS);
   });
 
   $effect(() => {
     if (open) {
+      applyQuery.cancel();
       query = '';
+      appliedQuery = '';
       selectedIndex = 0;
       requestAnimationFrame(() => inputEl?.focus());
     }
@@ -66,21 +89,26 @@
       }
     } else if (event.key === 'Enter') {
       event.preventDefault();
+      applyQuery.flush();
       const entry = filtered[selectedIndex];
       if (entry) onPick(entry);
     }
   }
 
-  function scoreEntries(entries: Entry[], raw: string): Entry[] {
+  function scoreEntries(candidates: IndexedEntry[], raw: string): Entry[] {
     const q = raw.toLowerCase();
     const words = q.split(/\s+/).filter(Boolean);
     const out: Entry[] = [];
-    for (const e of entries) {
-      const title = e.title.toLowerCase();
-      const path = e.relativePath.toLowerCase();
+    for (const { entry, title, path } of candidates) {
       let s = 0;
       let matched = 0;
       for (const w of words) {
+        // Préfiltre : une sous-séquence exige au minimum que le premier
+        // caractère du mot soit présent. Le test coûte un indexOf natif et
+        // écarte la grande majorité des entrées avant le scoring caractère
+        // par caractère.
+        const first = w[0];
+        if (title.indexOf(first) < 0 && path.indexOf(first) < 0) break;
         const tScore = subsequenceScore(title, w) * 2;
         const pScore = subsequenceScore(path, w);
         const local = Math.max(tScore, pScore);
@@ -90,7 +118,7 @@
         }
       }
       if (matched === words.length && s > 0) {
-        out.push({ ...e, score: s });
+        out.push({ ...entry, score: s });
       }
     }
     out.sort((a, b) => b.score - a.score);
@@ -144,6 +172,7 @@
         <input
           bind:this={inputEl}
           bind:value={query}
+          oninput={() => applyQuery.schedule()}
           type="search"
           class="block w-full bg-transparent py-3 text-sm text-foreground outline-none placeholder:text-faint"
           placeholder="Rechercher une note, un tag, un chemin…"

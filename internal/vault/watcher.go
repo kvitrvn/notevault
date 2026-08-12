@@ -55,6 +55,17 @@ type pathProcessor interface {
 
 const watcherDebounce = 200 * time.Millisecond
 
+// watcherMaxDelay borne le report du flush. Le debounce réarme le timer à
+// chaque événement : sous un flux soutenu (copie en masse, synchronisation,
+// git checkout dans le coffre), le batch n'était jamais vidé et `pending`
+// grossissait sans limite. Passé ce délai depuis le premier événement en
+// attente, on vide quoi qu'il arrive.
+const watcherMaxDelay = 2 * time.Second
+
+// watcherMaxBatch force un flush quand trop de chemins sont en attente. Le
+// batch part au frontend en un seul EventsEmit, donc en un seul document JSON.
+const watcherMaxBatch = 512
+
 // Watcher observe les changements dans le coffre et synchronise l'index.
 // Il agit comme un coalesceur : plusieurs événements rapprochés sur le
 // même chemin ne déclenchent qu'une seule action par fenêtre de
@@ -147,8 +158,18 @@ func (w *Watcher) loop(ctx context.Context) {
 	var pendingMu sync.Mutex
 	var timer *time.Timer
 	var timerC <-chan time.Time
+	// deadline borne le report cumulé depuis le premier événement en attente.
+	var deadline time.Time
 
 	schedule := func() {
+		now := time.Now()
+		if deadline.IsZero() {
+			deadline = now.Add(watcherMaxDelay)
+		}
+		delay := watcherDebounce
+		if remaining := deadline.Sub(now); remaining < delay {
+			delay = max(remaining, 0)
+		}
 		if timer != nil {
 			if !timer.Stop() {
 				select {
@@ -157,7 +178,7 @@ func (w *Watcher) loop(ctx context.Context) {
 				}
 			}
 		}
-		timer = time.NewTimer(watcherDebounce)
+		timer = time.NewTimer(delay)
 		timerC = timer.C
 	}
 
@@ -184,6 +205,7 @@ func (w *Watcher) loop(ctx context.Context) {
 		}
 		timer = nil
 		timerC = nil
+		deadline = time.Time{}
 
 		_ = reason
 		if _, _, err := w.processor.ApplyFsEvents(batch); err != nil {
@@ -240,7 +262,12 @@ func (w *Watcher) loop(ctx context.Context) {
 			if !exists || previous.kind == fsEventUpsert || obs.kind == fsEventRemove {
 				pending[obs.path] = obs
 			}
+			full := len(pending) >= watcherMaxBatch
 			pendingMu.Unlock()
+			if full {
+				flush("batch-plein")
+				continue
+			}
 			schedule()
 		case err, ok := <-w.fs.Errors:
 			if !ok {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  base64FromDataURL,
   isLocalAssetPath,
   isRemoteImageSource,
   isSafeEditorImageSource,
@@ -44,5 +45,29 @@ describe('withTimeout', () => {
     await vi.advanceTimersByTimeAsync(20);
     await assertion;
     vi.useRealTimers();
+  });
+});
+
+describe('base64FromDataURL', () => {
+  it('strips the data URL prefix', () => {
+    expect(base64FromDataURL('data:image/png;base64,iVBORw0KGgo=')).toBe('iVBORw0KGgo=');
+  });
+
+  it('keeps a payload that contains no comma', () => {
+    expect(base64FromDataURL('iVBORw0KGgo=')).toBe('iVBORw0KGgo=');
+  });
+
+  it('splits on the first comma only', () => {
+    // Le base64 standard n'utilise jamais la virgule, mais on ne veut pas
+    // dépendre de cette propriété pour découper.
+    expect(base64FromDataURL('data:text/plain;base64,YQ==,YQ==')).toBe('YQ==,YQ==');
+  });
+
+  it('produces what Go base64.StdEncoding decodes', () => {
+    // Vecteur de contrôle : "NoteVault" en base64 standard, tel que
+    // base64.StdEncoding.DecodeString le relit côté SaveAsset.
+    const encoded = btoa('NoteVault');
+    expect(encoded).toBe('Tm90ZVZhdWx0');
+    expect(base64FromDataURL(`data:application/octet-stream;base64,${encoded}`)).toBe('Tm90ZVZhdWx0');
   });
 });

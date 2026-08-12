@@ -19,18 +19,26 @@
   let themes = $state<Theme[]>([]);
   let rootEl: HTMLDivElement | undefined = $state();
 
-  $effect(() => {
+  // Les thèmes ne sont utiles qu'une fois le menu déroulé. Les charger au
+  // montage doublonnait le ListThemes déjà fait par refreshDeferred.
+  let themesLoaded = false;
+
+  function loadThemes(): void {
+    if (themesLoaded) return;
+    themesLoaded = true;
     void ListThemes()
       .then((list) => {
         themes = (list ?? []) as Theme[];
       })
       .catch(() => {
         themes = [];
+        themesLoaded = false;
       });
-  });
+  }
 
   function toggle(): void {
     open = !open;
+    if (open) loadThemes();
   }
 
   function pick(id: string): void {

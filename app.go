@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,7 +35,14 @@ type vaultSession struct {
 	assetPort int
 	chatMu    sync.Mutex
 	chat      *chat.Service
+	chatDead  bool
 }
+
+// ErrSessionClosed signale une session fermée entre l'acquisition et l'usage.
+// Les appels de chat relâchent volontairement sessionMu avant de contacter le
+// fournisseur, pour ne pas bloquer un changement de coffre pendant un appel
+// réseau : un close() concurrent est donc possible et doit être visible.
+var ErrSessionClosed = errors.New("session de coffre fermée")
 
 func (s *vaultSession) close() {
 	if s == nil {
@@ -44,6 +52,7 @@ func (s *vaultSession) close() {
 		_ = s.assetSrv.Stop()
 	}
 	s.chatMu.Lock()
+	s.chatDead = true
 	if s.chat != nil {
 		s.chat.Close()
 		s.chat = nil
@@ -57,6 +66,12 @@ func (s *vaultSession) close() {
 func (s *vaultSession) chatService(secrets chat.SecretStore) (*chat.Service, error) {
 	s.chatMu.Lock()
 	defer s.chatMu.Unlock()
+	// Sans ce garde, un close() concurrent laissait chatService() reconstruire
+	// un service neuf sur une session morte, dans un coffre en cours de
+	// fermeture.
+	if s.chatDead {
+		return nil, ErrSessionClosed
+	}
 	if s.chat != nil {
 		return s.chat, nil
 	}
@@ -75,7 +90,7 @@ type appOptions struct {
 	secrets        chat.SecretStore
 	version        string
 	checkForUpdate func(context.Context, string) (updatecheck.Result, error)
-	pdfSaveDialog  func(context.Context, wailsruntime.SaveDialogOptions) (string, error)
+	saveDialog     func(context.Context, wailsruntime.SaveDialogOptions) (string, error)
 	pdfBrowser     func() (detectedPDFBrowser, error)
 	pdfExecutable  func() (string, error)
 	pdfRender      func(context.Context, string, detectedPDFBrowser, vault.PDFDocument) ([]byte, error)
@@ -100,7 +115,7 @@ type App struct {
 
 	version        string
 	checkForUpdate func(context.Context, string) (updatecheck.Result, error)
-	pdfSaveDialog  func(context.Context, wailsruntime.SaveDialogOptions) (string, error)
+	saveDialog     func(context.Context, wailsruntime.SaveDialogOptions) (string, error)
 	pdfBrowser     func() (detectedPDFBrowser, error)
 	pdfExecutable  func() (string, error)
 	pdfRender      func(context.Context, string, detectedPDFBrowser, vault.PDFDocument) ([]byte, error)
@@ -136,8 +151,8 @@ func newApp(opts appOptions) (*App, error) {
 		checker := updatecheck.New(nil, "")
 		opts.checkForUpdate = checker.Check
 	}
-	if opts.pdfSaveDialog == nil {
-		opts.pdfSaveDialog = func(ctx context.Context, dialogOptions wailsruntime.SaveDialogOptions) (string, error) {
+	if opts.saveDialog == nil {
+		opts.saveDialog = func(ctx context.Context, dialogOptions wailsruntime.SaveDialogOptions) (string, error) {
 			return wailsruntime.SaveFileDialog(ctx, dialogOptions)
 		}
 	}
@@ -172,7 +187,7 @@ func newApp(opts appOptions) (*App, error) {
 		secrets:        opts.secrets,
 		version:        opts.version,
 		checkForUpdate: opts.checkForUpdate,
-		pdfSaveDialog:  opts.pdfSaveDialog,
+		saveDialog:     opts.saveDialog,
 		pdfBrowser:     opts.pdfBrowser,
 		pdfExecutable:  opts.pdfExecutable,
 		pdfRender:      opts.pdfRender,
@@ -629,7 +644,17 @@ func (a *App) GetBacklinks(title, exclude string, limit int) ([]domain.NoteSumma
 		return s.service.GetBacklinks(title, exclude, limit)
 	})
 }
-func (a *App) SaveAsset(data []byte, filename string) (string, error) {
+
+// SaveAsset reçoit le contenu encodé en base64 standard. Le frontend envoyait
+// auparavant un tableau JS d'octets, ce qui produisait un tableau JSON d'un
+// élément par octet (des dizaines de Mo de texte pour une image de 10 Mo, et
+// autant de temps de thread principal bloqué). Le base64 est ~1.37x la taille
+// binaire au lieu de ~4x, et se décode ici en une seule passe.
+func (a *App) SaveAsset(dataBase64 string, filename string) (string, error) {
+	data, err := base64.StdEncoding.DecodeString(dataBase64)
+	if err != nil {
+		return "", fmt.Errorf("décoder le contenu de l'asset : %w", err)
+	}
 	return withSession(a, func(s *vaultSession) (string, error) { return s.service.SaveAsset(data, filename) })
 }
 func (a *App) ImportAssetFromFilePath(path string) (string, error) {
@@ -749,8 +774,59 @@ func (a *App) ListThemes() []vault.Theme {
 func (a *App) Theme(id string) (vault.Theme, error) {
 	return withSession(a, func(s *vaultSession) (vault.Theme, error) { return s.service.Theme(id) })
 }
-func (a *App) ExportNotes(paths []string, dest string) error {
-	return a.sessionError(func(s *vault.Service) error { return s.ExportNotes(paths, dest) })
+
+// ExportNotes writes a ZIP archive of the given notes. Like ExportNotePDF, the
+// destination comes exclusively from the native save dialog: the frontend
+// cannot provide an arbitrary path. Returns the written path, or "" if the user
+// cancelled the dialog.
+func (a *App) ExportNotes(paths []string, defaultFilename string) (string, error) {
+	return withSession(a, func(session *vaultSession) (string, error) {
+		ctx := a.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		name := sanitizeExportFilename(defaultFilename)
+		destination, err := a.saveDialog(ctx, wailsruntime.SaveDialogOptions{
+			Title:                "Exporter les notes en ZIP",
+			DefaultFilename:      name,
+			CanCreateDirectories: true,
+			Filters: []wailsruntime.FileFilter{
+				{DisplayName: "Archive ZIP (*.zip)", Pattern: "*.zip"},
+			},
+		})
+		if err != nil {
+			return "", fmt.Errorf("ouvrir le dialogue d’export : %w", err)
+		}
+		if destination == "" {
+			return "", nil
+		}
+		if !strings.EqualFold(filepath.Ext(destination), ".zip") {
+			destination += ".zip"
+		}
+		if err := session.service.ExportNotes(paths, destination); err != nil {
+			return "", err
+		}
+		return destination, nil
+	})
+}
+
+// sanitizeExportFilename keeps the frontend suggestion as a mere dialog
+// prefill: only the base name is retained, so a path can never leak through.
+func sanitizeExportFilename(suggested string) string {
+	// On coupe sur les deux séparateurs : filepath.Base ignore "\" sous Unix,
+	// et la suggestion vient du frontend, pas du système de fichiers local.
+	name := strings.TrimSpace(suggested)
+	if index := strings.LastIndexAny(name, `/\`); index >= 0 {
+		name = name[index+1:]
+	}
+	name = filepath.Base(name)
+	if name == "." || name == string(filepath.Separator) || name == "" {
+		name = "notevault-export.zip"
+	}
+	if !strings.EqualFold(filepath.Ext(name), ".zip") {
+		name += ".zip"
+	}
+	return name
 }
 
 // PDFExportOptions reports the local renderer availability and declarative
@@ -797,7 +873,7 @@ func (a *App) ExportNotePDF(relativePath, themeID string, plaintextConfirmed boo
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		destination, err := a.pdfSaveDialog(ctx, wailsruntime.SaveDialogOptions{
+		destination, err := a.saveDialog(ctx, wailsruntime.SaveDialogOptions{
 			Title:                "Exporter la note en PDF",
 			DefaultFilename:      defaultName,
 			CanCreateDirectories: true,

@@ -348,3 +348,47 @@ func containsString(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+// Un flux d'événements ininterrompu réarmait le debounce indéfiniment : le
+// batch n'était jamais vidé. watcherMaxDelay borne ce report.
+func TestWatcherFlushesUnderSustainedEventStream(t *testing.T) {
+	svc, dir := setupVault(t)
+	notesRoot := filepath.Join(dir, "notes", "inbox")
+	if err := os.MkdirAll(notesRoot, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := NewWatcher(ctx, svc.root, svc); err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+
+	// Écrit sans interruption, à une cadence plus rapide que le debounce, de
+	// sorte que sans borne le flush n'arriverait jamais.
+	stop := make(chan struct{})
+	go func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			path := filepath.Join(notesRoot, "flux-"+itoa(i)+".md")
+			_ = os.WriteFile(path, []byte("# "+itoa(i)), 0o644)
+			time.Sleep(watcherDebounce / 4)
+		}
+	}()
+	defer close(stop)
+
+	// Marge : watcherMaxDelay plus le temps d'appliquer le batch.
+	deadline := time.Now().Add(watcherMaxDelay + 3*time.Second)
+	for time.Now().Before(deadline) {
+		notes, err := svc.ListNotesFiltered(FilterQuery{}, 100)
+		if err == nil && len(notes) > 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("aucun flush pendant un flux soutenu (borne watcherMaxDelay=%s inopérante)", watcherMaxDelay)
+}

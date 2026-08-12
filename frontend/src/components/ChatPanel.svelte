@@ -77,15 +77,23 @@
   let initializedForOpen = false;
   let previousProvider: ChatProvider = 'ollama';
 
-  const filteredNotes = $derived(
-    notes.filter((note) => {
-      const query = noteFilter.trim().toLocaleLowerCase('fr-FR');
-      return !query || note.title.toLocaleLowerCase('fr-FR').includes(query) || note.relativePath.toLocaleLowerCase('fr-FR').includes(query);
-    })
-  );
+  // La mise en minuscules de la requête était calculée à l'intérieur du
+  // callback, donc une fois par note et par frappe.
+  const filteredNotes = $derived.by(() => {
+    const query = noteFilter.trim().toLocaleLowerCase('fr-FR');
+    if (!query) return notes;
+    return notes.filter(
+      (note) =>
+        note.title.toLocaleLowerCase('fr-FR').includes(query) ||
+        note.relativePath.toLocaleLowerCase('fr-FR').includes(query)
+    );
+  });
   const remote = $derived(isRemoteProvider(provider));
   const hasStoredKey = $derived(hasStoredAPIKey(storedAPIKeyProviders, provider));
   const selectedPaths = $derived(resolveChatPaths(notes, manualSelectedPaths, selectedTags, excludedPaths));
+  // Consulté une fois par ligne du sélecteur : un Array.includes rendait le
+  // rendu quadratique sur la liste complète des notes.
+  const selectedPathSet = $derived(new Set(selectedPaths));
 
   $effect(() => {
     if (!open) {
@@ -134,7 +142,7 @@
   function togglePath(path: string): void {
     const note = notes.find((item) => item.relativePath === path);
     const selectedByTag = selectedTags.some((tag) => (note?.tags ?? []).includes(tag));
-    if (selectedPaths.includes(path)) {
+    if (selectedPathSet.has(path)) {
       manualSelectedPaths = manualSelectedPaths.filter((item) => item !== path);
       if (selectedByTag && !excludedPaths.includes(path)) excludedPaths = [...excludedPaths, path];
       return;
@@ -463,7 +471,7 @@
                     <label class="flex cursor-pointer items-center gap-2 px-2 py-1.5 hover:bg-panel-muted">
                       <input
                         type="checkbox"
-                        checked={selectedPaths.includes(note.relativePath)}
+                        checked={selectedPathSet.has(note.relativePath)}
                         onchange={() => togglePath(note.relativePath)}
                         disabled={busy !== ''}
                       />

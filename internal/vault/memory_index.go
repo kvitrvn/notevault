@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -228,44 +229,63 @@ func (i *memoryIndex) Get(path string) (domain.Note, error) {
 func (i *memoryIndex) List(filter ListFilter) ([]domain.NoteSummary, error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
+
+	// Tout ce qui ne dépend que du filtre est calculé une fois, pas par note :
+	// le tri de `query`, ses parties analysées, et les tags exigés/exclus.
+	hasQuery := strings.TrimSpace(filter.Query) != ""
+	parts := parseQueryParts(filter.Query)
+	matcher := newListFilterMatcher(filter)
+
 	out := make([]rankedSummary, 0, len(i.notes))
-	paths := i.queryCandidatesLocked(filter.Query)
-	if strings.TrimSpace(filter.Query) == "" {
-		paths = make(map[string]struct{}, len(i.notes))
-		for path := range i.notes {
-			paths[path] = struct{}{}
+	appendMatch := func(path string, note domain.Note) {
+		if !matcher.matches(note) {
+			return
+		}
+		score, ok := scoreParts(note, i.noteKeys[path], i.foldedBodies[path], parts)
+		if hasQuery && !ok {
+			return
+		}
+		out = append(out, rankedSummary{summary: summaryRefOf(note), score: score})
+	}
+
+	// Sans requête, tout le corpus est candidat : on itère directement la map
+	// des notes au lieu d'en matérialiser une copie des clés.
+	if !hasQuery {
+		for path, note := range i.notes {
+			appendMatch(path, note)
+		}
+	} else {
+		for path := range i.candidatesForParts(parts) {
+			note, exists := i.notes[path]
+			if !exists {
+				continue
+			}
+			appendMatch(path, note)
 		}
 	}
-	for path := range paths {
-		note, exists := i.notes[path]
-		if !exists {
-			continue
+
+	// slices.SortStableFunc plutôt que sort.SliceStable : ce dernier trie via
+	// la réflexion, ce qui domine le temps de List sur un gros coffre.
+	slices.SortStableFunc(out, func(a, b rankedSummary) int {
+		if hasQuery && a.score != b.score {
+			return b.score - a.score
 		}
-		if !matchesListFilter(note, filter) {
-			continue
+		if !a.summary.UpdatedAt.Equal(b.summary.UpdatedAt) {
+			if a.summary.UpdatedAt.After(b.summary.UpdatedAt) {
+				return -1
+			}
+			return 1
 		}
-		keys := i.noteKeys[path]
-		folded := i.foldedBodies[path]
-		score, ok := scoreQuery(note, keys, folded, filter.Query)
-		if strings.TrimSpace(filter.Query) != "" && !ok {
-			continue
-		}
-		out = append(out, rankedSummary{summary: summaryOf(note), score: score})
-	}
-	sort.SliceStable(out, func(a, b int) bool {
-		if strings.TrimSpace(filter.Query) != "" && out[a].score != out[b].score {
-			return out[a].score > out[b].score
-		}
-		if !out[a].summary.UpdatedAt.Equal(out[b].summary.UpdatedAt) {
-			return out[a].summary.UpdatedAt.After(out[b].summary.UpdatedAt)
-		}
-		return out[a].summary.RelativePath < out[b].summary.RelativePath
+		return strings.Compare(a.summary.RelativePath, b.summary.RelativePath)
 	})
 	return summaries(out, clampLimit(filter.Limit)), nil
 }
 
 func (i *memoryIndex) queryCandidatesLocked(query string) map[string]struct{} {
-	parts := parseQueryParts(query)
+	return i.candidatesForParts(parseQueryParts(query))
+}
+
+func (i *memoryIndex) candidatesForParts(parts []queryPart) map[string]struct{} {
 	if len(parts) == 0 {
 		all := make(map[string]struct{}, len(i.notes))
 		for path := range i.notes {
@@ -302,36 +322,68 @@ func (i *memoryIndex) queryCandidatesLocked(query string) map[string]struct{} {
 	return candidates
 }
 
-func matchesListFilter(note domain.Note, filter ListFilter) bool {
+// listFilterMatcher pré-calcule la partie du filtre qui ne dépend pas de la
+// note. L'ancienne version construisait une map des tags de chaque note à
+// chaque appel, y compris quand aucun tag n'était filtré : sur un coffre de
+// 10 000 notes, cela faisait 10 000 allocations de map par List.
+type listFilterMatcher struct {
+	folder       string
+	required     []string
+	excluded     []string
+	updatedFrom  time.Time
+	updatedTo    time.Time
+	needsTagScan bool
+}
+
+func newListFilterMatcher(filter ListFilter) listFilterMatcher {
+	m := listFilterMatcher{
+		updatedFrom: filter.UpdatedFrom,
+		updatedTo:   filter.UpdatedTo,
+	}
 	if folder := strings.Trim(strings.TrimSpace(filter.Folder), "/"); folder != "" {
-		folder = strings.TrimPrefix(folder, "notes/")
-		path := strings.TrimPrefix(note.RelativePath, "notes/")
-		if path != folder && !strings.HasPrefix(path, folder+"/") {
-			return false
-		}
+		m.folder = strings.TrimPrefix(folder, "notes/")
 	}
-	tags := make(map[string]struct{}, len(note.Tags))
-	for _, tag := range note.Tags {
-		tags[tag] = struct{}{}
-	}
-	required := append([]string{filter.Tag}, filter.Tags...)
-	for _, tag := range required {
+	for _, tag := range append([]string{filter.Tag}, filter.Tags...) {
 		if tag = strings.TrimSpace(tag); tag != "" {
-			if _, ok := tags[tag]; !ok {
-				return false
-			}
+			m.required = append(m.required, tag)
 		}
 	}
 	for _, tag := range filter.ExcludeTags {
-		if _, ok := tags[strings.TrimSpace(tag)]; ok {
+		if tag = strings.TrimSpace(tag); tag != "" {
+			m.excluded = append(m.excluded, tag)
+		}
+	}
+	m.needsTagScan = len(m.required) > 0 || len(m.excluded) > 0
+	return m
+}
+
+func (m listFilterMatcher) matches(note domain.Note) bool {
+	if m.folder != "" {
+		path := strings.TrimPrefix(note.RelativePath, "notes/")
+		if path != m.folder && !strings.HasPrefix(path, m.folder+"/") {
 			return false
 		}
 	}
-	if !filter.UpdatedFrom.IsZero() && note.UpdatedAt.Before(filter.UpdatedFrom) {
+	if !m.updatedFrom.IsZero() && note.UpdatedAt.Before(m.updatedFrom) {
 		return false
 	}
-	if !filter.UpdatedTo.IsZero() && !note.UpdatedAt.Before(filter.UpdatedTo) {
+	if !m.updatedTo.IsZero() && !note.UpdatedAt.Before(m.updatedTo) {
 		return false
+	}
+	if !m.needsTagScan {
+		return true
+	}
+	// Les notes portent une poignée de tags : une recherche linéaire y est
+	// moins chère qu'une map, et surtout n'alloue rien.
+	for _, tag := range m.required {
+		if !slices.Contains(note.Tags, tag) {
+			return false
+		}
+	}
+	for _, tag := range m.excluded {
+		if slices.Contains(note.Tags, tag) {
+			return false
+		}
 	}
 	return true
 }
@@ -372,7 +424,12 @@ func parseQueryParts(query string) []queryPart {
 // plié, tokens du titre) sont recalculés par candidat car leur coût est
 // proportionnel à la taille du titre et non du contenu.
 func scoreQuery(note domain.Note, keys map[string]int, folded string, query string) (int, bool) {
-	parts := parseQueryParts(query)
+	return scoreParts(note, keys, folded, parseQueryParts(query))
+}
+
+// scoreParts reçoit la requête déjà analysée : List l'analyse une seule fois
+// pour tout le corpus au lieu d'une fois par candidat.
+func scoreParts(note domain.Note, keys map[string]int, folded string, parts []queryPart) (int, bool) {
 	if len(parts) == 0 {
 		return 0, true
 	}
@@ -462,37 +519,70 @@ func (i *memoryIndex) IsPinned(path string) (bool, error) {
 	return ok, nil
 }
 
+// ListPinned est un chemin de lecture pure : il prenait le verrou en écriture
+// (et pouvait écrire pins.json en le tenant) uniquement pour purger au passage
+// les épingles devenues orphelines. La purge est maintenant l'exception, faite
+// dans un second temps ; le cas courant ne bloque plus les autres lecteurs.
 func (i *memoryIndex) ListPinned() ([]domain.NoteSummary, error) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
 	type pinnedNote struct {
 		note domain.NoteSummary
 		at   time.Time
 	}
+
+	i.mu.RLock()
 	out := make([]pinnedNote, 0, len(i.pins))
-	dirty := false
+	var stale []string
 	for path, at := range i.pins {
 		note, ok := i.notes[path]
 		if !ok {
-			delete(i.pins, path)
-			dirty = true
+			stale = append(stale, path)
 			continue
 		}
 		out = append(out, pinnedNote{note: summaryOf(note), at: at})
 	}
-	if dirty {
-		if err := i.savePinsLocked(); err != nil {
+	i.mu.RUnlock()
+
+	if len(stale) > 0 {
+		if err := i.prunePins(stale); err != nil {
 			return nil, err
 		}
 	}
-	sort.Slice(out, func(a, b int) bool {
-		return out[a].at.After(out[b].at) || out[a].at.Equal(out[b].at) && out[a].note.RelativePath < out[b].note.RelativePath
+
+	slices.SortStableFunc(out, func(a, b pinnedNote) int {
+		if !a.at.Equal(b.at) {
+			if a.at.After(b.at) {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(a.note.RelativePath, b.note.RelativePath)
 	})
 	result := make([]domain.NoteSummary, len(out))
 	for n := range out {
 		result[n] = out[n].note
 	}
 	return result, nil
+}
+
+// prunePins retire les épingles dont la note a disparu. La condition est
+// revérifiée sous verrou d'écriture : la note a pu revenir entre-temps.
+func (i *memoryIndex) prunePins(candidates []string) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	removed := false
+	for _, path := range candidates {
+		if _, ok := i.notes[path]; ok {
+			continue
+		}
+		if _, ok := i.pins[path]; ok {
+			delete(i.pins, path)
+			removed = true
+		}
+	}
+	if !removed {
+		return nil
+	}
+	return i.savePinsLocked()
 }
 
 func (i *memoryIndex) GetBacklinks(title string, opts SearchOpts) ([]domain.NoteSummary, error) {
@@ -620,6 +710,19 @@ func summaryOf(note domain.Note) domain.NoteSummary {
 	}
 }
 
+// summaryRefOf ne copie pas les tags : le slice reste celui de l'index. Réservé
+// aux résultats intermédiaires produits sous verrou, que summaries() finit de
+// matérialiser. Copier avant le tri revenait à dupliquer les tags de tout le
+// corpus pour n'en renvoyer souvent qu'une page.
+func summaryRefOf(note domain.Note) domain.NoteSummary {
+	return domain.NoteSummary{
+		RelativePath: note.RelativePath,
+		Title:        note.Title,
+		UpdatedAt:    note.UpdatedAt,
+		Tags:         note.Tags,
+	}
+}
+
 func summaries(ranked []rankedSummary, limit int) []domain.NoteSummary {
 	if limit > 0 && len(ranked) > limit {
 		ranked = ranked[:limit]
@@ -627,6 +730,7 @@ func summaries(ranked []rankedSummary, limit int) []domain.NoteSummary {
 	out := make([]domain.NoteSummary, len(ranked))
 	for n := range ranked {
 		out[n] = ranked[n].summary
+		out[n].Tags = append([]string(nil), ranked[n].summary.Tags...)
 	}
 	return out
 }

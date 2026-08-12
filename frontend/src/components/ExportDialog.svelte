@@ -130,13 +130,14 @@
       error = 'Confirmez que l’archive contiendra les notes en clair.';
       return;
     }
-    const name = filename.trim() || defaultFilename;
-    const safe = name.endsWith('.zip') ? name : name + '.zip';
     busy = true;
     error = '';
     try {
-      await ExportNotes(Array.from(selected), safe);
-      onSuccess(safe);
+      // Le nom saisi n'est qu'une pré-saisie du dialogue natif : c'est le
+      // backend qui choisit la destination réelle.
+      const written = await ExportNotes(Array.from(selected), filename.trim() || defaultFilename);
+      if (!written) return; // dialogue annulé
+      onSuccess(written);
       onClose();
     } catch (err) {
       error = String(err);
@@ -332,7 +333,9 @@
           </ul>
 
           <label class="flex flex-col gap-1">
-            <span class="text-xs font-medium text-subtle">Nom du fichier (écrit à la racine du coffre)</span>
+            <span class="text-xs font-medium text-subtle"
+              >Nom proposé (l’emplacement est choisi dans la fenêtre suivante)</span
+            >
             <input
               type="text"
               bind:value={filename}

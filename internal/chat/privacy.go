@@ -45,6 +45,19 @@ var goAnonPlaceholderPattern = regexp.MustCompile(`^\[([[:alpha:]][[:alnum:]_]*)
 
 const maxModelResponseBytes int64 = 512 << 20
 
+// modelManifestURL épingle l'endpoint du manifeste des modèles d'anonymisation.
+//
+// go-anon vérifie déjà l'empreinte SHA-256 de chaque modèle téléchargé, et
+// revalide celle du cache à chaque chargement : les charges utiles ne sont donc
+// pas le maillon faible. C'est le manifeste qui fournit ces empreintes, et il
+// est servi sans signature — qui le contrôle contrôle aussi les digests.
+//
+// La valeur ci-dessous est le défaut de la bibliothèque. On la fixe ici pour
+// que l'endpoint reste une décision de NoteVault, visible dans son code au même
+// titre que l'allowlist de fournisseurs (voir provider.go), plutôt qu'un défaut
+// upstream qu'une montée de version pourrait déplacer sans qu'on le remarque.
+const modelManifestURL = "https://bornholm.github.io/go-anon-resources/manifest.json"
+
 type modelTransport struct {
 	base http.RoundTripper
 }
@@ -90,6 +103,7 @@ func newGoAnonPrivacy(cacheDir string) (*goAnonPrivacy, error) {
 	store, err := modelstore.New(
 		modelstore.WithCacheDir(cacheDir),
 		modelstore.WithHTTPClient(client),
+		modelstore.WithManifestURL(modelManifestURL),
 	)
 	log.SetOutput(previousWriter)
 	modelStoreLogMu.Unlock()

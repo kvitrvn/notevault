@@ -26,12 +26,20 @@ type Service struct {
 	index     Index
 	config    *config.Store
 	state     *stateStore
-	watcher   *Watcher
 	templates *TemplateLoader
 	themes    *ThemeLoader
-	indexCtx  context.Context
-	indexStop context.CancelFunc
 	changes   *changeBus
+
+	// watcherMu protège le cycle de vie du watcher. start/stopWatcher sont
+	// appelés depuis Close(), EnableEncryption, DisableEncryption, UnlockVault
+	// et resumeMigration, qui ne sont pas mutuellement exclus : ces champs
+	// étaient mutés sans aucun verrou. securityMu est toujours relâché avant
+	// ces appels, donc ce mutex dédié n'introduit pas d'ordre de verrous.
+	watcherMu     sync.Mutex
+	watcher       *Watcher
+	watcherWanted bool
+	indexCtx      context.Context
+	indexStop     context.CancelFunc
 
 	securityMu         sync.RWMutex
 	mutationMu         sync.RWMutex
@@ -42,7 +50,20 @@ type Service struct {
 	encryptionWarnings []string
 	migrationCurrent   int
 	migrationTotal     int
-	watcherWanted      bool
+
+	// configCacheMu protège une copie mémoire de la configuration, utilisée
+	// uniquement par le chemin chaud de SaveNote : chaque autosave relisait et
+	// désérialisait config.json depuis le disque. GetConfig continue de lire le
+	// fichier, pour qu'une édition manuelle reste visible.
+	configCacheMu sync.Mutex
+	configCache   *config.Config
+
+	// notePathMu sérialise les sauvegardes visant la même note. mutationMu est
+	// pris en lecture par les mutations de notes — c'est voulu, elles doivent
+	// pouvoir se dérouler en parallèle, seules les opérations structurelles
+	// sont exclusives — mais deux SaveNote sur le même chemin entrelaçaient
+	// alors instantané d'historique, rotation et écriture.
+	notePathMu sync.Map // string -> *sync.Mutex
 
 	recentWriteMu sync.Mutex
 	// recentWrites mémorise les chemins absolus que le service vient
@@ -204,6 +225,8 @@ func (s *Service) Root() string { return s.root }
 // Utilisé pour les opérations longues (indexation initiale) qui doivent
 // pouvoir être annulées par Close().
 func (s *Service) BootstrapContext() context.Context {
+	s.watcherMu.Lock()
+	defer s.watcherMu.Unlock()
 	if s.indexCtx != nil {
 		return s.indexCtx
 	}
@@ -212,7 +235,9 @@ func (s *Service) BootstrapContext() context.Context {
 
 // Close ferme les ressources ouvertes.
 func (s *Service) Close() error {
+	s.watcherMu.Lock()
 	s.watcherWanted = false
+	s.watcherMu.Unlock()
 	s.stopWatcher()
 	s.securityMu.Lock()
 	zeroBytes(s.vaultKey)
@@ -1089,7 +1114,17 @@ func (s *Service) SaveNote(note domain.Note) (domain.Note, error) {
 	if err != nil {
 		return domain.Note{}, err
 	}
+	unlock := s.lockNotePath(note.RelativePath)
+	defer unlock()
 	return s.saveNoteUnlocked(note, path)
+}
+
+// lockNotePath prend le verrou dédié à une note et retourne sa libération.
+func (s *Service) lockNotePath(relativePath string) func() {
+	value, _ := s.notePathMu.LoadOrStore(relativePath, &sync.Mutex{})
+	mu := value.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 func (s *Service) saveNoteUnlocked(note domain.Note, path string) (domain.Note, error) {
@@ -1104,11 +1139,7 @@ func (s *Service) saveNoteUnlocked(note domain.Note, path string) (domain.Note, 
 	}
 
 	// Snapshot d'historique avant écrasement (best-effort).
-	cfg, _ := s.config.Load()
-	maxVersions := config.Default().HistoryPerNote
-	if cfg.HistoryPerNote > 0 {
-		maxVersions = cfg.HistoryPerNote
-	}
+	maxVersions := s.historyPerNote()
 	if maxVersions > 0 {
 		if _, err := os.Stat(path); err == nil {
 			_, _ = s.snapshotHistory(note.RelativePath, maxVersions)
@@ -1212,12 +1243,46 @@ func (s *Service) EmptyTrash() error {
 
 // GetConfig retourne la configuration courante.
 func (s *Service) GetConfig() (config.Config, error) {
-	return s.config.Load()
+	cfg, err := s.config.Load()
+	if err == nil {
+		s.cacheConfig(cfg)
+	}
+	return cfg, err
 }
 
 // UpdateConfig enregistre la configuration.
 func (s *Service) UpdateConfig(cfg config.Config) error {
-	return s.config.Save(cfg)
+	if err := s.config.Save(cfg); err != nil {
+		return err
+	}
+	s.cacheConfig(cfg)
+	return nil
+}
+
+func (s *Service) cacheConfig(cfg config.Config) {
+	s.configCacheMu.Lock()
+	s.configCache = &cfg
+	s.configCacheMu.Unlock()
+}
+
+// historyPerNote lit le nombre de versions conservées sans toucher au disque
+// une fois la configuration en cache. Appelé à chaque sauvegarde de note.
+func (s *Service) historyPerNote() int {
+	s.configCacheMu.Lock()
+	cached := s.configCache
+	s.configCacheMu.Unlock()
+
+	cfg := config.Default()
+	if cached != nil {
+		cfg = *cached
+	} else if loaded, err := s.config.Load(); err == nil {
+		cfg = loaded
+		s.cacheConfig(loaded)
+	}
+	if cfg.HistoryPerNote > 0 {
+		return cfg.HistoryPerNote
+	}
+	return config.Default().HistoryPerNote
 }
 
 // OpenDailyNote ouvre (ou crée) la note du jour.
@@ -1614,10 +1679,14 @@ func (s *Service) readAbsolute(path string) (domain.Note, error) {
 }
 
 func (s *Service) startWatcher() error {
-	if !s.watcherWanted || s.watcher != nil {
+	// requireUnlocked prend securityMu : on l'appelle hors de watcherMu pour
+	// garder les deux verrous indépendants.
+	if err := s.requireUnlocked(); err != nil {
 		return nil
 	}
-	if err := s.requireUnlocked(); err != nil {
+	s.watcherMu.Lock()
+	defer s.watcherMu.Unlock()
+	if !s.watcherWanted || s.watcher != nil {
 		return nil
 	}
 	s.indexCtx, s.indexStop = context.WithCancel(context.Background())
@@ -1632,12 +1701,16 @@ func (s *Service) startWatcher() error {
 }
 
 func (s *Service) stopWatcher() {
+	s.watcherMu.Lock()
 	w := s.watcher
 	s.watcher = nil
 	if s.indexStop != nil {
 		s.indexStop()
 		s.indexStop = nil
 	}
+	s.watcherMu.Unlock()
+	// Close() attend la fin de la goroutine du watcher : on le fait hors du
+	// verrou pour ne pas bloquer un start/stop concurrent pendant l'attente.
 	if w != nil {
 		_ = w.Close()
 	}

@@ -8,7 +8,7 @@ WAILS_BUILD_FLAGS ?= -trimpath
 APP_VERSION ?= $(shell ./scripts/build-version.sh)
 WAILS_LDFLAGS ?= -X main.buildVersion=$(APP_VERSION)
 
-.PHONY: dev regen build test test-pdf-integration frontend-test fmt check verify patch-models frontend-install
+.PHONY: dev regen build test test-race test-pdf-integration frontend-test fmt fmt-check vet vuln check verify patch-models frontend-install
 
 # Workflow dev : `wails dev` régénère les bindings à chaque démarrage,
 # ce qui écrase la classe Time corrigée. Le hook `frontend:dev:watcher`
@@ -29,11 +29,29 @@ build: $(WAILS)
 test:
 	go test ./...
 
+# Le code a un watcher, un bus de changements, un swap de session et
+# plusieurs RWMutex : la version sérielle seule ne prouve pas grand-chose.
+test-race:
+	go test -race ./...
+
 test-pdf-integration:
 	NOTEAULT_PDF_INTEGRATION=1 go test . -run '^TestPDFWorkerWithRealChromium$$'
 
 fmt:
 	gofmt -w .
+
+# `fmt` écrit ; `fmt-check` échoue au lieu de corriger, pour la CI.
+fmt-check:
+	@unformatted=$$(gofmt -l . | grep -v '^frontend/' || true); \
+	if [ -n "$$unformatted" ]; then \
+		echo "gofmt requis sur :"; echo "$$unformatted"; exit 1; \
+	fi
+
+vet:
+	go vet ./...
+
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 check: frontend/node_modules/.package-lock.json frontend/wailsjs/go/models.ts
 	cd frontend && npm run check
@@ -41,7 +59,7 @@ check: frontend/node_modules/.package-lock.json frontend/wailsjs/go/models.ts
 frontend-test: frontend/node_modules/.package-lock.json
 	cd frontend && npm test
 
-verify: test frontend-test check
+verify: fmt-check vet test-race frontend-test check
 
 frontend-install:
 	cd frontend && npm ci

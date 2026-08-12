@@ -9,6 +9,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/linux"
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 var buildVersion = "dev"
@@ -39,8 +40,25 @@ func main() {
 	}
 }
 
+// singleInstanceID identifie le verrou d'instance unique. Deux processus
+// NoteVault sur la même machine s'écraseraient mutuellement sur la config
+// applicative (dernier écrivain gagne), feraient tourner deux watchers sur le
+// même coffre, et pourraient lire pendant une migration de chiffrement.
+const singleInstanceID = "dev.kvitrvn.notevault"
+
 func applicationOptions(app *App) *options.App {
 	return &options.App{
+		SingleInstanceLock: &options.SingleInstanceLock{
+			UniqueId: singleInstanceID,
+			OnSecondInstanceLaunch: func(options.SecondInstanceData) {
+				// Le second processus s'arrête ; on ramène la fenêtre
+				// existante au premier plan plutôt que de l'ignorer.
+				if app.ctx != nil {
+					wailsruntime.WindowUnminimise(app.ctx)
+					wailsruntime.WindowShow(app.ctx)
+				}
+			},
+		},
 		Title:         "NoteVault",
 		Width:         1280,
 		Height:        820,
@@ -49,7 +67,10 @@ func applicationOptions(app *App) *options.App {
 		Frameless:     true,
 		DisableResize: false,
 		Fullscreen:    false,
-		AssetServer:   &assetserver.Options{Assets: assets},
+		AssetServer: &assetserver.Options{
+			Assets:     assets,
+			Middleware: securityHeadersMiddleware,
+		},
 		// Wails active ce menu en développement mais le désactive par défaut
 		// en production. Il est nécessaire aux actions natives de l'éditeur
 		// (couper, copier, coller et sélection).

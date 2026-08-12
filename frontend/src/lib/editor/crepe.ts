@@ -38,21 +38,11 @@ import { Plugin, PluginKey } from '@milkdown/kit/prose/state';
 import type { Ctx } from '@milkdown/kit/ctx';
 import type { EditorView } from '@milkdown/kit/prose/view';
 
-import { isLocalAssetPath, isSafeEditorImageSource, withTimeout } from '../assets';
+import { BLOCKED_IMAGE_SRC, isLocalAssetPath, isSafeEditorImageSource, withTimeout } from '../assets';
 import { plaintextMarkdownFromClipboard } from '../markdown-paste';
 import { refreshWikiLinkDecorations, wikiLinkPlugin } from '../wiki-link';
 import { wikiLinkSuggestionPlugin } from '../wiki-link-suggestion';
 import { MARKDOWN_STRINGIFY_OPTIONS, preserveWikiLinksTextHandler } from './wiki-link-escape';
-
-/** Placeholder affiché à la place d'une image dont la source sort du coffre. */
-const BLOCKED_IMAGE_SRC =
-  'data:image/svg+xml;charset=utf-8,' +
-  encodeURIComponent(
-    '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="64">' +
-      '<rect width="320" height="64" fill="none" stroke="#888" stroke-dasharray="4 4"/>' +
-      '<text x="160" y="37" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#888">' +
-      'Image distante bloquée</text></svg>'
-  );
 
 const ASSET_URL_TIMEOUT_MS = 5_000;
 

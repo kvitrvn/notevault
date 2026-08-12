@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import Moon from '@lucide/svelte/icons/moon';
   import Plus from '@lucide/svelte/icons/plus';
   import Save from '@lucide/svelte/icons/save';
@@ -43,18 +44,14 @@
   import TemplatePickerDialog from './components/TemplatePickerDialog.svelte';
   import MoveDialog from './components/MoveDialog.svelte';
   import BacklinksPanel from './components/BacklinksPanel.svelte';
-  import HistoryPanel from './components/HistoryPanel.svelte';
   import VaultPickerDialog from './components/VaultPickerDialog.svelte';
   import OnboardingModal from './components/OnboardingModal.svelte';
   import ShortcutsOverlay from './components/ShortcutsOverlay.svelte';
   import ThemeMenu from './components/ThemeMenu.svelte';
-  import StatsView from './components/StatsView.svelte';
-  import ExportDialog from './components/ExportDialog.svelte';
   import RecoveryDialog from './components/RecoveryDialog.svelte';
   import WindowTitleBar from './components/WindowTitleBar.svelte';
-  import ChatPanel from './components/ChatPanel.svelte';
   import type { SaveState } from './components/SaveIndicator.svelte';
-  import { isLocalAssetPath } from './lib/assets';
+  import { fileToBase64, isLocalAssetPath } from './lib/assets';
   import { createDebouncedTask } from './lib/debounce';
   import { normalizeNotesFolderPath } from './lib/note-paths';
   import { shouldShowVaultUnlock } from './lib/vault-manager';
@@ -212,6 +209,27 @@
   let foldersLoaded = $state(false);
   let foldersLoading = $state(false);
 
+  // Ces quatre panneaux ne servent qu'à la demande, et ChatPanel embarque une
+  // seconde instance Milkdown. On diffère leur import jusqu'au premier
+  // affichage, sans les démonter ensuite : leur état local (transcript du chat,
+  // sélection d'export) doit survivre à une fermeture, comme aujourd'hui.
+  let chatLoaded = $state(false);
+  let historyLoaded = $state(false);
+  let statsLoaded = $state(false);
+  let exportLoaded = $state(false);
+  $effect(() => {
+    if (chatOpen) chatLoaded = true;
+  });
+  $effect(() => {
+    if (historyOpen) historyLoaded = true;
+  });
+  $effect(() => {
+    if (statsOpen) statsLoaded = true;
+  });
+  $effect(() => {
+    if (exportOpen) exportLoaded = true;
+  });
+
   // History panel
   let historyOpen = $state(false);
 
@@ -259,10 +277,13 @@
 // Charge la liste des dossiers dès qu'on affiche la vue arborescente
   // (sinon les dossiers vides restent invisibles tant qu'on n'ouvre pas
   // une modale qui les charge paresseusement).
+  // La seule dépendance doit être `view` : loadFolders lit (et écrit)
+  // foldersLoading/foldersLoaded, donc l'appeler sans untrack ferait relancer
+  // l'effet à chaque fin de chargement — soit une boucle ListFolders infinie.
+  // L'invalidation après mutation passe par invalidateFolders(), pas par ici.
   $effect(() => {
-    if (view === 'tree' && !foldersLoading) {
-      void loadFolders(true);
-    }
+    if (view !== 'tree') return;
+    untrack(() => void loadFolders());
   });
 
   // --- Vault change events (0.4.2) ----------------------------------------
@@ -421,8 +442,11 @@
   const isDev = Boolean((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV);
   let refreshSeq = 0;
   let perfSeq = 0;
+  // Taper dans le champ de filtre ne change pas la liste complète du coffre :
+  // seul le contenu de la liste affichée bouge. On saute donc le ListNotes non
+  // filtré (qui alimente le quick switcher et le chat) sur ce chemin-là.
   const pendingFilterRefresh = createDebouncedTask(FILTER_REFRESH_DEBOUNCE_MS, () => {
-    void refresh();
+    void refresh({ refreshAllNotes: false });
   });
 
   function startPerf(label: string): string {
@@ -528,7 +552,8 @@
     }
   };
 
-  async function refresh(): Promise<void> {
+  async function refresh(options: { refreshAllNotes?: boolean } = {}): Promise<void> {
+    const refreshAllNotes = options.refreshAllNotes ?? true;
     const seq = ++refreshSeq;
     const criticalPerf = startPerf('refresh:critical');
     loading = true;
@@ -562,7 +587,10 @@
         applyThemeLocally(cfgTheme);
       }
       loading = false;
-      scheduleIdle(() => void refreshDeferred(seq, cfg, fetchAll));
+      scheduleIdle(() => void refreshDeferred(seq, cfg, fetchAll || !refreshAllNotes));
+      // fetchAll : la liste complète vient d'être récupérée ci-dessus.
+      // !refreshAllNotes : appel déclenché par la frappe dans le filtre, la
+      // liste complète en mémoire reste valide.
     } catch (err) {
       error = String(err);
       console.error('[refresh] global error:', err);
@@ -572,20 +600,22 @@
     }
   }
 
-  async function refreshDeferred(seq: number, cfg: unknown, fetchAll: boolean): Promise<void> {
+  // allNotesFresh : la liste complète (chatNotes/allEntries) est déjà à jour,
+  // inutile de relancer un ListNotes non filtré.
+  async function refreshDeferred(seq: number, cfg: unknown, allNotesFresh: boolean): Promise<void> {
     const deferredPerf = startPerf('refresh:deferred');
     try {
       const [tpl, tg, themes, all] = await Promise.all([
         safeCall('ListTemplates', ListTemplates(), []),
         safeCall('ListTags', ListTags(), []),
         safeCall('ListThemes', ListThemes(), []),
-        fetchAll ? Promise.resolve(null) : safeCall('ListNotes (allEntries)', ListNotes(), [])
+        allNotesFresh ? Promise.resolve(null) : safeCall('ListNotes (allEntries)', ListNotes(), [])
       ]);
       if (seq !== refreshSeq) return;
       templates = (tpl ?? []) as Template[];
       tags = (tg ?? []) as TagCount[];
       customThemes = (themes ?? []) as vault.Theme[];
-      if (!fetchAll) {
+      if (!allNotesFresh) {
         chatNotes = (all ?? []) as NoteSummary[];
         allEntries = ((all ?? []) as NoteSummary[]).map((n) => ({
           relativePath: n.relativePath,
@@ -1677,9 +1707,9 @@
   // --- Assets (paste/drop d'images) ---------------------------------------
   async function onAssetUpload(file: File): Promise<string | null> {
     try {
-      const buffer = new Uint8Array(await file.arrayBuffer());
-      // Wails transporte []byte sous forme de base64 côté JS.
-      const rel = await SaveAsset(Array.from(buffer), file.name);
+      // SaveAsset attend du base64 : Go décode nativement une chaîne base64
+      // en []byte, et on évite de sérialiser un tableau d'un élément par octet.
+      const rel = await SaveAsset(await fileToBase64(file), file.name);
       showToast('info', `Image enregistrée : ${rel}`);
       return rel;
     } catch (err) {
@@ -2780,18 +2810,22 @@
         </div>
       {/if}
     </section>
-    {#key vaultPath}
-      <ChatPanel
-        open={chatOpen}
-        notes={chatNotes}
-        availableTags={tags}
-        currentPath={selected?.relativePath ?? ''}
-        encrypted={vaultStatus?.encryptionEnabled ?? false}
-        beforePrepare={beforeChatPrepare}
-        onOpenNote={(path) => void openNote(path)}
-        onClose={() => (chatOpen = false)}
-      />
-    {/key}
+    {#if chatLoaded}
+      {#key vaultPath}
+        {#await import('./components/ChatPanel.svelte') then { default: ChatPanel }}
+          <ChatPanel
+            open={chatOpen}
+            notes={chatNotes}
+            availableTags={tags}
+            currentPath={selected?.relativePath ?? ''}
+            encrypted={vaultStatus?.encryptionEnabled ?? false}
+            beforePrepare={beforeChatPrepare}
+            onOpenNote={(path) => void openNote(path)}
+            onClose={() => (chatOpen = false)}
+          />
+        {/await}
+      {/key}
+    {/if}
     </div>
     </main>
   </div>
@@ -3153,12 +3187,16 @@
   </div>
 {/if}
 
-<HistoryPanel
-  open={historyOpen}
-  relativePath={selected?.relativePath ?? ''}
-  onRestore={restoreFromHistory}
-  onClose={() => (historyOpen = false)}
-/>
+{#if historyLoaded}
+  {#await import('./components/HistoryPanel.svelte') then { default: HistoryPanel }}
+    <HistoryPanel
+      open={historyOpen}
+      relativePath={selected?.relativePath ?? ''}
+      onRestore={restoreFromHistory}
+      onClose={() => (historyOpen = false)}
+    />
+  {/await}
+{/if}
 
 <VaultPickerDialog
   open={vaultPickerOpen}
@@ -3180,22 +3218,30 @@
 
 <ShortcutsOverlay open={shortcutsOpen} onClose={() => (shortcutsOpen = false)} onReviewGuide={reviewGuide} />
 
-<StatsView
-  open={statsOpen}
-  onClose={() => (statsOpen = false)}
-  onPickTag={onStatsPickTag}
-/>
+{#if statsLoaded}
+  {#await import('./components/StatsView.svelte') then { default: StatsView }}
+    <StatsView
+      open={statsOpen}
+      onClose={() => (statsOpen = false)}
+      onPickTag={onStatsPickTag}
+    />
+  {/await}
+{/if}
 
-<ExportDialog
-  open={exportOpen}
-  notes={notes}
-  activeNote={selected}
-  encrypted={vaultStatus?.encryptionEnabled ?? false}
-  defaultFilename={`notevault-${new Date().toISOString().slice(0, 10)}.zip`}
-  onBeforePDFExport={flushSave}
-  onClose={() => (exportOpen = false)}
-  onSuccess={onExportSuccess}
-/>
+{#if exportLoaded}
+  {#await import('./components/ExportDialog.svelte') then { default: ExportDialog }}
+    <ExportDialog
+      open={exportOpen}
+      notes={notes}
+      activeNote={selected}
+      encrypted={vaultStatus?.encryptionEnabled ?? false}
+      defaultFilename={`notevault-${new Date().toISOString().slice(0, 10)}.zip`}
+      onBeforePDFExport={flushSave}
+      onClose={() => (exportOpen = false)}
+      onSuccess={onExportSuccess}
+    />
+  {/await}
+{/if}
 
 <RecoveryDialog
   open={recoveryOpen}

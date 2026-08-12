@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -149,6 +150,102 @@ func TestAppAssetMethodsRejectTraversal(t *testing.T) {
 	}
 }
 
+func TestAppSaveAssetDecodesBase64(t *testing.T) {
+	app := setupAppForTest(t)
+	content := []byte("\x89PNG\r\n\x1a\n binary \x00 bytes")
+
+	rel, err := app.SaveAsset(base64.StdEncoding.EncodeToString(content), "photo.png")
+	if err != nil {
+		t.Fatalf("SaveAsset: %v", err)
+	}
+
+	stored, err := os.ReadFile(filepath.Join(app.session.service.Root(), filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatalf("read stored asset: %v", err)
+	}
+	if !bytes.Equal(stored, content) {
+		t.Fatalf("stored %q, want %q", stored, content)
+	}
+}
+
+func TestAppSaveAssetRejectsInvalidBase64(t *testing.T) {
+	app := setupAppForTest(t)
+
+	if _, err := app.SaveAsset("pas du base64 !!", "photo.png"); err == nil {
+		t.Fatal("SaveAsset accepted invalid base64, want an error")
+	}
+}
+
+func TestAppExportNotesUsesNativeDialog(t *testing.T) {
+	app := setupAppForTest(t)
+	note, err := app.session.service.CreateNote("", "A exporter", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "archive")
+	var seen wailsruntime.SaveDialogOptions
+	app.saveDialog = func(_ context.Context, options wailsruntime.SaveDialogOptions) (string, error) {
+		seen = options
+		return destination, nil
+	}
+
+	// Le frontend propose un chemin ; seul le nom de base doit survivre, et il
+	// ne sert que de pré-saisie du dialogue.
+	got, err := app.ExportNotes([]string{note.RelativePath}, "../../etc/passwd")
+	if err != nil {
+		t.Fatalf("ExportNotes: %v", err)
+	}
+	if seen.DefaultFilename != "passwd.zip" {
+		t.Fatalf("DefaultFilename = %q, want passwd.zip", seen.DefaultFilename)
+	}
+	if got != destination+".zip" {
+		t.Fatalf("got %q, want %q", got, destination+".zip")
+	}
+	if _, err := os.Stat(got); err != nil {
+		t.Fatalf("archive absente : %v", err)
+	}
+}
+
+func TestAppExportNotesCancelledDialogWritesNothing(t *testing.T) {
+	app := setupAppForTest(t)
+	note, err := app.session.service.CreateNote("", "A exporter", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.saveDialog = func(context.Context, wailsruntime.SaveDialogOptions) (string, error) {
+		return "", nil
+	}
+
+	got, err := app.ExportNotes([]string{note.RelativePath}, "export.zip")
+	if err != nil {
+		t.Fatalf("ExportNotes: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("got %q, want \"\" après annulation", got)
+	}
+}
+
+func TestSanitizeExportFilename(t *testing.T) {
+	for input, want := range map[string]string{
+		"export.zip":            "export.zip",
+		"export":                "export.zip",
+		"  mes notes  ":         "mes notes.zip",
+		"../../etc/passwd":      "passwd.zip",
+		"/etc/shadow":           "shadow.zip",
+		"notes/sous-dossier/a":  "a.zip",
+		"":                      "notevault-export.zip",
+		"/":                     "notevault-export.zip",
+		"..":                    "...zip",
+		`C:\Windows\system.ini`: "system.ini.zip",
+	} {
+		t.Run(input, func(t *testing.T) {
+			if got := sanitizeExportFilename(input); got != want {
+				t.Fatalf("sanitizeExportFilename(%q) = %q, want %q", input, got, want)
+			}
+		})
+	}
+}
+
 func TestAppPDFExportOptionsReportsBrowserAvailability(t *testing.T) {
 	app := setupPDFAppForTest(t)
 	app.pdfBrowser = func() (detectedPDFBrowser, error) {
@@ -186,7 +283,7 @@ func TestAppExportNotePDFUsesNativeDialogAndWritesAtomically(t *testing.T) {
 	}
 	destination := filepath.Join(t.TempDir(), "partage")
 	dialogCalled := false
-	app.pdfSaveDialog = func(_ context.Context, options wailsruntime.SaveDialogOptions) (string, error) {
+	app.saveDialog = func(_ context.Context, options wailsruntime.SaveDialogOptions) (string, error) {
 		dialogCalled = true
 		if !strings.HasSuffix(options.DefaultFilename, "a-partager.pdf") || len(options.Filters) != 1 {
 			t.Fatalf("dialog options = %+v", options)
@@ -224,7 +321,7 @@ func TestAppExportNotePDFCancellationDoesNotRender(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app.pdfSaveDialog = func(context.Context, wailsruntime.SaveDialogOptions) (string, error) {
+	app.saveDialog = func(context.Context, wailsruntime.SaveDialogOptions) (string, error) {
 		return "", nil
 	}
 	app.pdfRender = func(context.Context, string, detectedPDFBrowser, vault.PDFDocument) ([]byte, error) {
@@ -262,7 +359,7 @@ func TestAppExportNotePDFDoesNotLeaveFileOnRendererFailureOrInvalidOutput(t *tes
 				t.Fatal(err)
 			}
 			destination := filepath.Join(t.TempDir(), "failed.pdf")
-			app.pdfSaveDialog = func(context.Context, wailsruntime.SaveDialogOptions) (string, error) {
+			app.saveDialog = func(context.Context, wailsruntime.SaveDialogOptions) (string, error) {
 				return destination, nil
 			}
 			app.pdfRender = test.render
@@ -285,7 +382,7 @@ func TestAppExportNotePDFRequiresEncryptedPlaintextConfirmationBeforeDialog(t *t
 	if err := app.session.service.EnableEncryption("phrase secrète robuste"); err != nil {
 		t.Fatal(err)
 	}
-	app.pdfSaveDialog = func(context.Context, wailsruntime.SaveDialogOptions) (string, error) {
+	app.saveDialog = func(context.Context, wailsruntime.SaveDialogOptions) (string, error) {
 		t.Fatal("dialog opened without plaintext confirmation")
 		return "", nil
 	}
