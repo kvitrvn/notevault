@@ -6,7 +6,7 @@ require (
 	github.com/Bornholm/amatl v0.31.0
 	github.com/blevesearch/bleve/v2 v2.5.0
 	github.com/bornholm/amoxtli v0.1.0
-	github.com/bornholm/go-anon v0.0.6-0.20260717211550-31cfe3d8c91a
+	github.com/bornholm/go-anon v0.2.2
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/wailsapp/wails/v2 v2.12.0
 	github.com/yuin/goldmark v1.7.17

@@ -73,8 +73,8 @@ github.com/bornholm/amoxtli v0.1.0 h1:R9tOk0m0D53fJVrurp9WKJP7ktRZ0GK3/E4C9nQ8kr
 github.com/bornholm/amoxtli v0.1.0/go.mod h1:agYw9qx7K8t1aGfcXDxYcd8sXFw7lmsHzrV3eD0ih18=
 github.com/bornholm/genai v0.17.1 h1:n7xjk5aoyrq36vUK1gnEuoj5HS5t4rMSV5z2FlUMq+I=
 github.com/bornholm/genai v0.17.1/go.mod h1:OmbuElbTAc78us9NFtktRIA7pb9QZnVk41zYtoHepqI=
-github.com/bornholm/go-anon v0.0.6-0.20260717211550-31cfe3d8c91a h1:nFCoC2NPvAbWHKpvb53KJQlNRwR7adg43EJNlpqjl+Q=
-github.com/bornholm/go-anon v0.0.6-0.20260717211550-31cfe3d8c91a/go.mod h1:PDc/KuqCfXkgndkZuOXnt1mO/9/Qo8V0jLEl3btgJ00=
+github.com/bornholm/go-anon v0.2.2 h1:T+zSUdgx9U5Av/Dc0uqQCJatAE1m/xjMpOBzOt/S8I8=
+github.com/bornholm/go-anon v0.2.2/go.mod h1:q9EiQH9IdPYxfcj3+Htua+WgR0Us4GIJ5uV5j3LZRRA=
 github.com/chromedp/cdproto v0.0.0-20250803210736-d308e07a266d h1:ZtA1sedVbEW7EW80Iz2GR3Ye6PwbJAJXjv7D74xG6HU=
 github.com/chromedp/cdproto v0.0.0-20250803210736-d308e07a266d/go.mod h1:NItd7aLkcfOA/dcMXvl8p1u+lQqioRMq/SqDp71Pb/k=
 github.com/chromedp/chromedp v0.14.2 h1:r3b/WtwM50RsBZHMUm9fsNhhzRStTHrKdr2zmwbZSzM=

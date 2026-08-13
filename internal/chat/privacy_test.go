@@ -52,8 +52,8 @@ func TestModelTransportLimitsResponseSize(t *testing.T) {
 func TestDeanonymizeRestoresLLMPlaceholderVariants(t *testing.T) {
 	t.Parallel()
 	session := goanonAnonymizer.NewSession()
-	session.Mapping["[PERSON_1]"] = "Nadia Ferreira"
-	session.Mapping["[IP_ADDRESS_2]"] = "192.0.2.42"
+	session.Mapping["⟦PERSON_1_a3f2c1⟧"] = "Nadia Ferreira"
+	session.Mapping["⟦IP_ADDRESS_2_a3f2c1⟧"] = "192.0.2.42"
 	privacy := &goAnonPrivacy{}
 
 	tests := []struct {
@@ -61,12 +61,17 @@ func TestDeanonymizeRestoresLLMPlaceholderVariants(t *testing.T) {
 		text string
 		want string
 	}{
-		{name: "exact", text: "[PERSON_1]", want: "Nadia Ferreira"},
-		{name: "lower case", text: "[person_1]", want: "Nadia Ferreira"},
-		{name: "markdown escaped", text: `\[PERSON\_1\]`, want: "Nadia Ferreira"},
-		{name: "without brackets", text: "PERSON_1", want: "Nadia Ferreira"},
-		{name: "spaces", text: "[PERSON 1]", want: "Nadia Ferreira"},
-		{name: "compound label", text: "IP-ADDRESS 2", want: "192.0.2.42"},
+		{name: "exact", text: "⟦PERSON_1_a3f2c1⟧", want: "Nadia Ferreira"},
+		{name: "lower case", text: "⟦person_1_a3f2c1⟧", want: "Nadia Ferreira"},
+		{name: "escaped delimiters", text: "[[PERSON_1_a3f2c1]]", want: "Nadia Ferreira"},
+		{name: "single brackets", text: "[PERSON_1_a3f2c1]", want: "Nadia Ferreira"},
+		{name: "markdown escaped", text: `\[PERSON\_1\_a3f2c1\]`, want: "Nadia Ferreira"},
+		{name: "without delimiters", text: "PERSON_1_a3f2c1", want: "Nadia Ferreira"},
+		{name: "spaces", text: "⟦PERSON 1 a3f2c1⟧", want: "Nadia Ferreira"},
+		{name: "compound label", text: "IP-ADDRESS 2 a3f2c1", want: "192.0.2.42"},
+		{name: "unknown placeholder untouched", text: "⟦PERSON_9_a3f2c1⟧", want: "⟦PERSON_9_a3f2c1⟧"},
+		{name: "other session nonce untouched", text: "⟦PERSON_1_ffffff⟧", want: "⟦PERSON_1_ffffff⟧"},
+		{name: "legacy format untouched", text: "[PERSON_1]", want: "[PERSON_1]"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

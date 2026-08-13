@@ -494,7 +494,7 @@
 
         <div
           bind:this={transcript}
-          class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 py-3"
+          class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4"
           role="log"
           aria-label="Messages de la discussion"
           aria-live="polite"
@@ -506,20 +506,22 @@
             </div>
           {/if}
 
-          <div class="flex flex-col gap-4">
+          <div class="flex flex-col gap-5">
             {#each messages as message (message.id)}
-              <article class={message.role === 'user' ? 'ml-8 border-r-2 border-border-strong pr-3 text-right' : 'mr-4 border-l-2 border-accent pl-3'}>
+              <article class={message.role === 'user'
+                ? 'ml-auto w-fit min-w-0 max-w-[85%] rounded-md border border-border bg-panel-muted px-3 py-2'
+                : 'w-full min-w-0 rounded-md border border-border bg-background px-3.5 py-3'}>
                 {#if message.role === 'assistant'}
                   <ChatMarkdown markdown={message.content} />
                 {:else}
                   <p class="whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{message.content}</p>
                 {/if}
                 {#if message.citations.length > 0}
-                  <ul class="mt-2 flex flex-col gap-1" aria-label="Sources de la réponse">
+                  <ul class="mt-3 flex flex-col gap-1" aria-label="Sources de la réponse">
                     {#each message.citations as citation (`${message.id}-${citation.sourceID}`)}
                       <li>
                         <button
-                          class="flex w-full min-w-0 items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-left text-xs text-subtle hover:bg-panel-muted hover:text-foreground"
+                          class="flex w-full min-w-0 items-center gap-1.5 rounded-md border border-border bg-panel px-2 py-1 text-left text-xs text-subtle hover:bg-panel-muted hover:text-foreground"
                           type="button"
                           onclick={() => onOpenNote(citation.path)}
                           title={citation.path}

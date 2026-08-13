@@ -41,7 +41,11 @@ type goAnonPrivacy struct {
 
 var modelStoreLogMu sync.Mutex
 
-var goAnonPlaceholderPattern = regexp.MustCompile(`^\[([[:alpha:]][[:alnum:]_]*)_([0-9]+)\]$`)
+// goAnonPlaceholderPattern décrit le format de jeton produit par go-anon depuis
+// la v0.2 : ⟦TYPE_1_a3f2c1⟧, où le suffixe hexadécimal est le nonce de session.
+// Les marqueurs de secret (⟦TYPE_REDACTED⟧) n'ont ni index ni nonce et ne
+// matchent donc pas : ils sont irréversibles par conception.
+var goAnonPlaceholderPattern = regexp.MustCompile(`^⟦([[:alpha:]][[:alnum:]_]*)_([0-9]+)_([0-9a-f]{6})⟧$`)
 
 const maxModelResponseBytes int64 = 512 << 20
 
@@ -142,13 +146,23 @@ func (p *goAnonPrivacy) Anonymize(ctx context.Context, session privacySession, t
 	if err != nil {
 		return privacyResult{}, err
 	}
-	result, err := anon.Anonymize(text, goanonAnonymizer.WithSession(upstreamSession))
+	// WithEscapeCollisions : une note contenant littéralement ⟦ ou ⟧ ferait sinon
+	// échouer toute la requête (ErrPlaceholderCollision). L'échappement se limite
+	// à ces deux délimiteurs, jamais au contenu détecté, et l'utilisateur voit de
+	// toute façon la charge utile exacte avant l'envoi.
+	result, err := anon.Anonymize(text,
+		goanonAnonymizer.WithSession(upstreamSession),
+		goanonAnonymizer.WithEscapeCollisions(),
+	)
 	if err != nil {
 		return privacyResult{}, fmt.Errorf("anonymiser le texte : %w", err)
 	}
 
 	entities := make([]DetectedEntity, 0, len(result.Entities))
 	for _, entity := range result.Entities {
+		// Pour les entités de type secret, go-anon caviarde déjà entity.Text : la
+		// recherche échoue et le placeholder reste vide, ce qui est voulu — la
+		// forme de surface d'un secret ne doit ressortir ni dans l'UI ni ailleurs.
 		entities = append(entities, DetectedEntity{
 			Type:        string(entity.Type),
 			Placeholder: result.OriginalToPlaceholder[entity.Text],
@@ -212,21 +226,27 @@ func (p *goAnonPrivacy) Deanonymize(session privacySession, text string) string 
 
 // replacePlaceholderVariants tolerates the harmless formatting changes that
 // language models sometimes apply to go-anon tokens: lower-casing, Markdown
-// escaping, dropped brackets, or a space/hyphen instead of an underscore.
+// escaping, delimiters swapped for brackets or dropped entirely, or a
+// space/hyphen instead of an underscore.
 // Only placeholders present in the local session mapping can be restored.
 func replacePlaceholderVariants(text, placeholder, original string) string {
 	parts := goAnonPlaceholderPattern.FindStringSubmatch(placeholder)
-	if len(parts) != 3 {
+	if len(parts) != 4 {
 		return text
 	}
 	labels := strings.Split(parts[1], "_")
-	escapedLabels := make([]string, 0, len(labels)+1)
+	escapedLabels := make([]string, 0, len(labels)+2)
 	for _, label := range labels {
 		escapedLabels = append(escapedLabels, regexp.QuoteMeta(label))
 	}
-	escapedLabels = append(escapedLabels, regexp.QuoteMeta(parts[2]))
+	escapedLabels = append(escapedLabels, regexp.QuoteMeta(parts[2]), regexp.QuoteMeta(parts[3]))
 	body := strings.Join(escapedLabels, `\\?[_ -]\s*`)
+	// Les crochets doublés viennent avant les simples : sinon le motif simple
+	// consommerait le crochet intérieur de « [[TYPE_1_nonce]] » et laisserait
+	// une paire orpheline dans la réponse.
 	patterns := []string{
+		`(?i)⟦\s*` + body + `\s*⟧`,
+		`(?i)\\?\[\\?\[\s*` + body + `\s*\\?\]\\?\]`,
 		`(?i)\\?\[\s*` + body + `\s*\\?\]`,
 		`(?i)\b` + body + `\b`,
 	}

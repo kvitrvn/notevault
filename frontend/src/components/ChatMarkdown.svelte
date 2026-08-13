@@ -69,91 +69,141 @@
 <div bind:this={host}></div>
 
 <style>
-  :global(.chat-markdown) {
+  /* Les sélecteurs sont préfixés par `#app` à dessein : le thème structurel de
+     Crepe est importé globalement (styles.css) et cible `.milkdown .ProseMirror`,
+     ce qui l'emporterait sinon sur `.chat-markdown`. Une réponse de modèle n'est
+     pas une note : ni gouttière d'édition de 120 px, ni titres à 2,25 em. */
+  :global(#app .chat-markdown) {
+    padding: 0;
     overflow-wrap: anywhere;
     color: var(--color-foreground);
-    font-size: 0.875rem;
-    line-height: 1.55rem;
+    font-size: 0.9375rem;
+    line-height: 1.65;
   }
 
-  :global(.chat-markdown > :first-child) {
+  :global(#app .chat-markdown > :first-child) {
     margin-top: 0;
   }
 
-  :global(.chat-markdown > :last-child) {
+  :global(#app .chat-markdown > :last-child) {
     margin-bottom: 0;
   }
 
-  :global(.chat-markdown p),
-  :global(.chat-markdown ul),
-  :global(.chat-markdown ol),
-  :global(.chat-markdown pre),
-  :global(.chat-markdown blockquote) {
-    margin: 0.55rem 0;
+  :global(#app .chat-markdown p),
+  :global(#app .chat-markdown ul),
+  :global(#app .chat-markdown ol),
+  :global(#app .chat-markdown pre),
+  :global(#app .chat-markdown blockquote),
+  :global(#app .chat-markdown table) {
+    margin: 0.7rem 0;
   }
 
-  :global(.chat-markdown h1),
-  :global(.chat-markdown h2),
-  :global(.chat-markdown h3) {
-    margin: 1rem 0 0.4rem;
-    font-weight: 650;
-    line-height: 1.3;
+  :global(#app .chat-markdown h1),
+  :global(#app .chat-markdown h2),
+  :global(#app .chat-markdown h3),
+  :global(#app .chat-markdown h4),
+  :global(#app .chat-markdown h5),
+  :global(#app .chat-markdown h6) {
+    margin: 1.15rem 0 0.45rem;
+    padding: 0;
+    font-weight: 600;
+    line-height: 1.35;
   }
 
-  :global(.chat-markdown h1) { font-size: 1.1rem; }
-  :global(.chat-markdown h2) { font-size: 1rem; }
-  :global(.chat-markdown h3) { font-size: 0.925rem; }
+  :global(#app .chat-markdown h1) { font-size: 1.125rem; }
+  :global(#app .chat-markdown h2) { font-size: 1.0625rem; }
+  :global(#app .chat-markdown h3) { font-size: 1rem; }
+  :global(#app .chat-markdown h4),
+  :global(#app .chat-markdown h5),
+  :global(#app .chat-markdown h6) { font-size: 0.9375rem; }
 
-  :global(.chat-markdown ul),
-  :global(.chat-markdown ol) {
-    padding-left: 1.25rem;
+  :global(#app .chat-markdown ul),
+  :global(#app .chat-markdown ol) {
+    padding-left: 1.35rem;
   }
 
-  :global(.chat-markdown ul) { list-style: disc; }
-  :global(.chat-markdown ol) { list-style: decimal; }
-  :global(.chat-markdown li) { margin: 0.2rem 0; }
-  :global(.chat-markdown li::marker) { color: var(--color-subtle); }
-  :global(.chat-markdown strong) { font-weight: 700; }
+  :global(#app .chat-markdown ul) { list-style: disc; }
+  :global(#app .chat-markdown ol) { list-style: decimal; }
 
-  :global(.chat-markdown code) {
+  :global(#app .chat-markdown li) {
+    margin: 0.25rem 0;
+    padding: 0;
+  }
+
+  :global(#app .chat-markdown li > ul),
+  :global(#app .chat-markdown li > ol) {
+    margin: 0.25rem 0;
+  }
+
+  :global(#app .chat-markdown li p) { margin: 0; }
+  :global(#app .chat-markdown li::marker) { color: var(--color-faint); }
+  :global(#app .chat-markdown strong) { font-weight: 600; }
+
+  :global(#app .chat-markdown code) {
     border-radius: var(--radius-sm);
     background: var(--color-code);
-    padding: 0.08rem 0.24rem;
-    font-size: 0.9em;
+    padding: 0.1rem 0.28rem;
+    font-family: var(--font-mono);
+    font-size: 0.85em;
   }
 
-  :global(.chat-markdown pre) {
+  :global(#app .chat-markdown pre) {
     overflow-x: auto;
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
     background: var(--color-code);
-    padding: 0.75rem 1rem;
-    font-size: 0.85rem;
-    line-height: 1.45;
+    padding: 0.7rem 0.85rem;
+    font-size: 0.8125rem;
+    line-height: 1.5;
   }
 
-  :global(.chat-markdown pre code) {
+  :global(#app .chat-markdown pre code) {
     padding: 0;
     background: transparent;
     font-size: inherit;
   }
 
-  :global(.chat-markdown blockquote) {
+  :global(#app .chat-markdown blockquote) {
     border-left: 2px solid var(--color-border-strong);
     padding-left: 0.75rem;
     color: var(--color-subtle);
   }
 
-  :global(.chat-markdown hr) {
-    margin: 0.9rem 0;
+  :global(#app .chat-markdown table) {
+    display: block;
+    overflow-x: auto;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+  }
+
+  :global(#app .chat-markdown th),
+  :global(#app .chat-markdown td) {
+    border: 1px solid var(--color-border);
+    padding: 0.35rem 0.55rem;
+    text-align: left;
+    vertical-align: top;
+  }
+
+  :global(#app .chat-markdown th) {
+    background: var(--color-panel-muted);
+    font-weight: 600;
+  }
+
+  :global(#app .chat-markdown hr) {
+    margin: 1rem 0;
     border: 0;
     border-top: 1px solid var(--color-border);
   }
 
-  :global(.chat-markdown a) {
+  :global(#app .chat-markdown a) {
     color: var(--color-accent);
     text-decoration: underline;
     text-underline-offset: 0.15em;
     cursor: default;
+  }
+
+  :global(#app .chat-markdown img) {
+    border-radius: var(--radius-md);
+    max-width: 100%;
   }
 </style>
