@@ -12,7 +12,7 @@ requested.
 
 ## Stack
 
-- Go 1.25, Wails v2, and an in-memory vault index.
+- Go 1.26, Wails v2, and an in-memory vault index.
 - Svelte 5, Vite, TypeScript, Tailwind CSS, Milkdown/Crepe.
 - The Wails CLI is installed locally in `tools/wails/bin/wails`.
 - Default vault path: `~/NoteVault/`.

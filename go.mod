@@ -1,6 +1,6 @@
 module github.com/kvitrvn/notevault
 
-go 1.25.5
+go 1.26.0
 
 require (
 	github.com/Bornholm/amatl v0.31.0

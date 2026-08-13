@@ -250,7 +250,7 @@ so no plaintext derived index can weaken vault encryption.
 
 ### Prerequisites
 
-- Go 1.25.5 or later
+- Go 1.26.0 or later
 - Node.js 22 or another current LTS release
 - npm
 - The [Wails v2 platform dependencies](https://wails.io/docs/gettingstarted/installation)

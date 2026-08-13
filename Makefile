@@ -50,8 +50,13 @@ fmt-check:
 vet:
 	go vet ./...
 
+# govulncheck est épinglé : en `@latest`, une publication amont casse la CI sans
+# qu'aucun commit du dépôt ne change. La base de vulnérabilités, elle, reste
+# téléchargée à chaque exécution — l'épinglage ne fige que le moteur d'analyse.
+GOVULNCHECK_VERSION ?= v1.7.0
+
 vuln:
-	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 check: frontend/node_modules/.package-lock.json frontend/wailsjs/go/models.ts
 	cd frontend && npm run check
