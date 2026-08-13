@@ -145,7 +145,11 @@ export async function createNoteEditor(options: NoteEditorOptions): Promise<Note
     });
 
   crepe
-    .addFeature(cursor)
+    // Le curseur virtuel doublonne le caret natif et se positionne mal dans la
+    // grille du contenu (widget inséré à la position 0, donc enfant direct de
+    // `.ProseMirror`). Désactivé : `cursorPlugin` reste actif, donc le drop
+    // cursor et le gap cursor sont conservés.
+    .addFeature(cursor, { virtual: false })
     .addFeature(listItem)
     .addFeature(linkTooltip)
     .addFeature(imageBlock, {
