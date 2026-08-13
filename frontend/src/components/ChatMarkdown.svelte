@@ -127,12 +127,15 @@
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
     background: var(--color-code);
-    padding: 0.65rem 0.75rem;
+    padding: 0.75rem 1rem;
+    font-size: 0.85rem;
+    line-height: 1.45;
   }
 
   :global(.chat-markdown pre code) {
     padding: 0;
     background: transparent;
+    font-size: inherit;
   }
 
   :global(.chat-markdown blockquote) {

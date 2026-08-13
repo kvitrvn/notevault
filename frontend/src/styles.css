@@ -305,11 +305,8 @@
 
   /* Coloration syntaxique CodeMirror : `classHighlighter` émet des classes
      `tok-*`, on les rattache aux tokens de thème plutôt qu'à des couleurs
-     figées dans le JS. */
-  .note-editor-content .cm-editor {
-    background: transparent;
-    color: var(--color-foreground);
-  }
+     figées dans le JS. Crepe ne définit aucune classe `tok-*`, ces règles
+     peuvent donc rester dans `@layer base`. */
   .note-editor-content .tok-comment {
     color: var(--color-faint);
     font-style: italic;
@@ -365,4 +362,51 @@
   :root[data-theme='light'] .note-editor-content .tok-macroName {
     color: #2a5a9a;
   }
+}
+
+/* Hors `@layer base`, volontairement : les feuilles Crepe importées plus haut
+   ne sont dans aucune couche, et du CSS sans couche l'emporte sur n'importe
+   quelle couche quelle que soit la spécificité. Une règle placée dans
+   `@layer base` ne peut donc jamais annuler `code-mirror.css`.
+
+   Objectif : un bloc de code plat, à la GitHub. Le fond unique est celui du
+   conteneur `.milkdown-code-block` (cf. NoteEditor.svelte), CodeMirror ne
+   repeint rien par-dessus, et la gouttière de `basicSetup` (numéros de ligne,
+   repli) est masquée — Crepe passe `basicSetup` en dur, on ne peut pas retirer
+   ces extensions côté configuration. */
+#app .milkdown .milkdown-code-block .cm-editor,
+#app .milkdown .milkdown-code-block .cm-panel {
+  background: transparent;
+  color: var(--color-foreground);
+}
+
+#app .milkdown .milkdown-code-block .cm-gutters {
+  display: none;
+}
+
+#app .milkdown .milkdown-code-block .cm-activeLine,
+#app .milkdown .milkdown-code-block .cm-activeLineGutter {
+  background: transparent;
+}
+
+/* Défauts CodeMirror (`4px 0` et `0 2px 0 6px`) : sans ça le texte est décalé
+   du padding du bloc. */
+#app .milkdown .milkdown-code-block .cm-content,
+#app .milkdown .milkdown-code-block .cm-line {
+  padding: 0;
+}
+
+#app .milkdown .milkdown-code-block .cm-scroller {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+#app .milkdown .milkdown-code-block .cm-cursor {
+  border-left-color: var(--color-foreground);
+}
+
+#app .milkdown .milkdown-code-block .cm-selectionBackground,
+#app .milkdown .milkdown-code-block .cm-content ::selection {
+  background: var(--color-selection);
 }

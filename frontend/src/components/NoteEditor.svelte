@@ -526,19 +526,23 @@
   :global(.milkdown .ProseMirror.note-editor-content pre) {
     overflow-x: auto;
     margin: 1rem 0;
-    padding: 0.95rem 1rem;
+    padding: 0.75rem 1rem;
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-md);
     background: var(--color-code);
     color: var(--color-foreground);
+    font-size: 0.85rem;
+    line-height: 1.45;
   }
 
+  /* Padding haut réduit : le `.language-button` de Crepe garde sa place même
+     masqué (`opacity: 0`), il fournit déjà l'essentiel de la marge du haut. */
   :global(.milkdown .ProseMirror.note-editor-content .milkdown-code-block) {
     overflow-x: auto;
     margin: 1rem 0;
-    padding: 0.75rem 1rem 1rem;
+    padding: 0.5rem 0.85rem 0.7rem;
     border: 1px solid var(--color-border);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-md);
     background: var(--color-code);
   }
 
@@ -553,7 +557,7 @@
   :global(.milkdown .ProseMirror.note-editor-content pre code) {
     padding: 0;
     background: transparent;
-    font-size: 0.9rem;
+    font-size: inherit;
   }
 
   :global(.milkdown .ProseMirror.note-editor-content blockquote) {
