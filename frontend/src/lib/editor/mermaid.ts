@@ -30,23 +30,38 @@ async function loadMermaid(): Promise<MermaidAPI> {
   return modulePromise;
 }
 
+/**
+ * Configuration commune aux deux consommateurs, thème mis à part.
+ *
+ * `htmlLabels: false` doit être posé **à la racine** : Mermaid 11 ignore les
+ * clés par diagramme (`flowchart.htmlLabels`, `class.htmlLabels`) et continue
+ * d'émettre des libellés `<foreignObject><p>…<br>…</p>`. Ces libellés sont
+ * doublement inutilisables pour l'export PDF : le SVG n'est alors pas du XML
+ * bien formé (le `<br>` HTML n'est pas auto-fermé, `sizeMermaidSVG` le rejette),
+ * et le contenu HTML d'un `foreignObject` n'est de toute façon pas rendu quand
+ * le SVG est incorporé via `<img>`. Les clés par diagramme sont conservées :
+ * elles ne coûtent rien et documentent l'intention.
+ */
+export const MERMAID_BASE_CONFIG = {
+  startOnLoad: false,
+  // Assainit les libellés et neutralise les directives `click` : le contenu
+  // d'une note est une entrée non fiable.
+  securityLevel: 'strict',
+  // Une erreur de syntaxe doit remonter par l'exception, jamais par un SVG
+  // d'erreur injecté dans le document.
+  suppressErrorRendering: true,
+  htmlLabels: false,
+  flowchart: { htmlLabels: false },
+  class: { htmlLabels: false },
+  // Idem : une police externe ne se charge pas dans un SVG incorporé.
+  fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'
+} as const;
+
 function initialize(mermaid: MermaidAPI, theme: MermaidTheme): void {
   if (appliedTheme === theme) return;
   mermaid.initialize({
-    startOnLoad: false,
-    // Assainit les libellés et neutralise les directives `click` : le contenu
-    // d'une note est une entrée non fiable.
-    securityLevel: 'strict',
-    // Une erreur de syntaxe doit remonter par l'exception, jamais par un SVG
-    // d'erreur injecté dans le document.
-    suppressErrorRendering: true,
-    theme: theme === 'dark' ? 'dark' : 'default',
-    // `foreignObject` (libellés HTML) n'est pas rendu quand le SVG est
-    // incorporé via `<img>` dans l'export PDF : on force des libellés `<text>`.
-    flowchart: { htmlLabels: false },
-    class: { htmlLabels: false },
-    // Idem : une police externe ne se charge pas dans un SVG incorporé.
-    fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'
+    ...MERMAID_BASE_CONFIG,
+    theme: theme === 'dark' ? 'dark' : 'default'
   });
   appliedTheme = theme;
 }
