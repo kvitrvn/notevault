@@ -157,7 +157,7 @@ func TestPDFWorkerWithRealChromium(t *testing.T) {
 	if _, err := service.SaveNote(note); err != nil {
 		t.Fatal(err)
 	}
-	document, err := service.BuildNotePDFDocument(note.RelativePath, "classic", false)
+	document, err := service.BuildNotePDFDocument(note.RelativePath, "classic", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

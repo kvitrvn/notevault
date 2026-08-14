@@ -3234,6 +3234,7 @@
       open={exportOpen}
       notes={notes}
       activeNote={selected}
+      activeMarkdown={selected?.content ?? ''}
       encrypted={vaultStatus?.encryptionEnabled ?? false}
       defaultFilename={`notevault-${new Date().toISOString().slice(0, 10)}.zip`}
       onBeforePDFExport={flushSave}

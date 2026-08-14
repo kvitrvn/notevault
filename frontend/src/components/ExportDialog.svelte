@@ -9,6 +9,7 @@
     PDFExportOptions
   } from '../../wailsjs/go/main/App';
   import type { domain, vault } from '../../wailsjs/go/models';
+  import { renderMermaidDiagramsForExport } from '../lib/mermaid-export';
   import { canCloseExportDialog, pdfExportBlocker } from '../lib/pdf-export';
 
   type NoteSummary = domain.NoteSummary;
@@ -18,6 +19,8 @@
     open: boolean;
     notes: NoteSummary[];
     activeNote?: NoteSummary | null;
+    /** Markdown de la note active, pour pré-rendre ses diagrammes Mermaid. */
+    activeMarkdown?: string;
     defaultFilename: string;
     encrypted?: boolean;
     onBeforePDFExport?: () => Promise<boolean>;
@@ -29,6 +32,7 @@
     open,
     notes,
     activeNote = null,
+    activeMarkdown = '',
     defaultFilename,
     encrypted = false,
     onBeforePDFExport = async () => true,
@@ -164,10 +168,15 @@
         error = 'La note n’a pas pu être enregistrée avant l’export.';
         return;
       }
+      // Les diagrammes sont rendus après le flush : le Markdown en mémoire est
+      // alors celui que le backend va relire sur disque, donc les empreintes
+      // correspondent.
+      const diagrams = await renderMermaidDiagramsForExport(activeMarkdown);
       const destination = await ExportNotePDF(
         activeNote!.relativePath,
         pdfThemeID,
-        pdfPlaintextConfirmed
+        pdfPlaintextConfirmed,
+        diagrams
       );
       if (!destination) return;
       onSuccess(destination);

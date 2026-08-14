@@ -44,3 +44,14 @@ pipeline, and local or remote URL resolvers are not exposed to vault content.
 NoteVault uses go-keyring to create, read, replace, and delete remote chat API
 keys in the operating system credential store. Its Linux implementation uses
 the Secret Service API over D-Bus.
+
+## Mermaid
+
+- Project: <https://github.com/mermaid-js/mermaid>
+- Version: `11.16.1`
+- License: MIT
+
+NoteVault bundles Mermaid in the frontend to render diagrams declared in
+fenced ` ```mermaid ` code blocks: the preview inside the editor's code block,
+and the SVG embedded in a PDF export. It is loaded through a dynamic import,
+runs entirely in the application window, and performs no network access.

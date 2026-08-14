@@ -196,7 +196,7 @@ pre { background: #f6f8fb; }
 		"```",
 	}, "\n"))
 
-	document, err := service.BuildNotePDFDocument(note.RelativePath, "beewii", false)
+	document, err := service.BuildNotePDFDocument(note.RelativePath, "beewii", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestBuildNotePDFDocumentRendersGFMAndEscapesRawHTML(t *testing.T) {
 		"```",
 	}, "\n"))
 
-	document, err := service.BuildNotePDFDocument(note.RelativePath, "classic", false)
+	document, err := service.BuildNotePDFDocument(note.RelativePath, "classic", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +286,7 @@ func TestBuildNotePDFDocumentEmbedsOnlyValidatedRasterAssets(t *testing.T) {
 		"![Vecteur](assets/vector.svg)",
 	}, "\n\n"))
 
-	document, err := service.BuildNotePDFDocument(note.RelativePath, "classic", false)
+	document, err := service.BuildNotePDFDocument(note.RelativePath, "classic", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,10 +312,10 @@ func TestBuildNotePDFDocumentRequiresPlaintextConfirmationForEncryptedVault(t *t
 	if err := service.EnableEncryption("phrase secrète assez longue"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.BuildNotePDFDocument(note.RelativePath, "classic", false); err == nil {
+	if _, err := service.BuildNotePDFDocument(note.RelativePath, "classic", false, nil); err == nil {
 		t.Fatal("encrypted export succeeded without confirmation")
 	}
-	if _, err := service.BuildNotePDFDocument(note.RelativePath, "classic", true); err != nil {
+	if _, err := service.BuildNotePDFDocument(note.RelativePath, "classic", true, nil); err != nil {
 		t.Fatalf("confirmed encrypted export failed: %v", err)
 	}
 }

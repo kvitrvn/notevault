@@ -478,7 +478,15 @@ func (s *Service) pdfTheme(id string) (PDFTheme, error) {
 
 // BuildNotePDFDocument reads a note from the unlocked vault and builds a
 // self-contained HTML document. No remote or file URL is emitted.
-func (s *Service) BuildNotePDFDocument(relativePath, themeID string, plaintextConfirmed bool) (PDFDocument, error) {
+//
+// diagrams holds Mermaid diagrams already rendered to SVG by the frontend,
+// keyed by the hash of their source code (see pdf_mermaid.go). It may be nil:
+// the matching blocks then keep their code rendering.
+func (s *Service) BuildNotePDFDocument(
+	relativePath, themeID string,
+	plaintextConfirmed bool,
+	diagrams map[string]string,
+) (PDFDocument, error) {
 	if err := s.requireUnlocked(); err != nil {
 		return PDFDocument{}, err
 	}
@@ -505,7 +513,7 @@ func (s *Service) BuildNotePDFDocument(relativePath, themeID string, plaintextCo
 	if err != nil {
 		return PDFDocument{}, err
 	}
-	body, err := s.renderPDFMarkdown(note.Content)
+	body, err := s.renderPDFMarkdown(note.Content, diagrams)
 	if err != nil {
 		return PDFDocument{}, fmt.Errorf("rendre le Markdown : %w", err)
 	}
@@ -516,12 +524,15 @@ func (s *Service) BuildNotePDFDocument(relativePath, themeID string, plaintextCo
 	}, nil
 }
 
-func (s *Service) renderPDFMarkdown(markdown string) ([]byte, error) {
+func (s *Service) renderPDFMarkdown(markdown string, diagrams map[string]string) ([]byte, error) {
 	var output bytes.Buffer
 	md := goldmark.New(
 		goldmark.WithExtensions(extension.GFM),
 		goldmark.WithRendererOptions(renderer.WithNodeRenderers(
-			util.Prioritized(&pdfSafeNodeRenderer{service: s}, 500),
+			util.Prioritized(&pdfSafeNodeRenderer{
+				service:  s,
+				diagrams: prepareMermaidDiagrams(diagrams),
+			}, 500),
 		)),
 	)
 	if err := md.Convert([]byte(markdown), &output); err != nil {
@@ -532,12 +543,65 @@ func (s *Service) renderPDFMarkdown(markdown string) ([]byte, error) {
 
 type pdfSafeNodeRenderer struct {
 	service *Service
+	// Diagrammes Mermaid pré-rendus, indexés par empreinte du code source et
+	// déjà validés sous forme d'URI `data:` (cf. pdf_mermaid.go).
+	diagrams map[string]string
 }
 
 func (r *pdfSafeNodeRenderer) RegisterFuncs(register renderer.NodeRendererFuncRegisterer) {
 	register.Register(ast.KindImage, r.renderImage)
 	register.Register(ast.KindHTMLBlock, r.renderHTMLBlock)
 	register.Register(ast.KindRawHTML, r.renderRawHTML)
+	register.Register(ast.KindFencedCodeBlock, r.renderFencedCodeBlock)
+}
+
+// renderFencedCodeBlock swaps a ```mermaid block for its pre-rendered SVG when
+// one was supplied, and otherwise reproduces goldmark's own code rendering —
+// the prioritized registration above replaces the built-in renderer entirely,
+// so the fallback has to be written out here.
+func (r *pdfSafeNodeRenderer) renderFencedCodeBlock(
+	writer util.BufWriter,
+	source []byte,
+	node ast.Node,
+	entering bool,
+) (ast.WalkStatus, error) {
+	block := node.(*ast.FencedCodeBlock)
+	language := block.Language(source)
+	if strings.EqualFold(string(language), mermaidLanguage) {
+		if uri, ok := r.diagrams[mermaidCodeHash(fencedCodeBlockText(block, source))]; ok {
+			if entering {
+				_, _ = writer.WriteString(`<img class="mermaid-diagram" src="`)
+				_, _ = writer.WriteString(uri)
+				_, _ = writer.WriteString(`" alt="Diagramme Mermaid">`)
+			}
+			return ast.WalkSkipChildren, nil
+		}
+	}
+	if !entering {
+		_, _ = writer.WriteString("</code></pre>\n")
+		return ast.WalkContinue, nil
+	}
+	_, _ = writer.WriteString("<pre><code")
+	if language != nil {
+		_, _ = writer.WriteString(` class="language-`)
+		_, _ = writer.Write(util.EscapeHTML(language))
+		_, _ = writer.WriteString(`"`)
+	}
+	_ = writer.WriteByte('>')
+	for index := 0; index < block.Lines().Len(); index++ {
+		line := block.Lines().At(index)
+		_, _ = writer.Write(util.EscapeHTML(line.Value(source)))
+	}
+	return ast.WalkContinue, nil
+}
+
+func fencedCodeBlockText(block *ast.FencedCodeBlock, source []byte) string {
+	var text strings.Builder
+	for index := 0; index < block.Lines().Len(); index++ {
+		line := block.Lines().At(index)
+		text.Write(line.Value(source))
+	}
+	return text.String()
 }
 
 func (r *pdfSafeNodeRenderer) renderImage(
@@ -734,7 +798,7 @@ func buildPDFHTML(note domain.Note, theme PDFTheme, body []byte) []byte {
 	document.WriteString(theme.Colors.Accent)
 	document.WriteString(";color:")
 	document.WriteString(theme.Colors.Secondary)
-	document.WriteString("}img{display:block;max-width:100%;max-height:22cm;margin:10pt auto;object-fit:contain}.blocked-image{color:")
+	document.WriteString("}img{display:block;max-width:100%;max-height:22cm;margin:10pt auto;object-fit:contain}img.mermaid-diagram{break-inside:avoid}.blocked-image{color:")
 	document.WriteString(theme.Colors.Secondary)
 	document.WriteString(";font-style:italic}.document-title{margin:0 0 10pt}.title-page{display:grid;min-height:80vh;align-content:center;break-after:page}.metadata{color:")
 	document.WriteString(theme.Colors.Secondary)

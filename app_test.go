@@ -299,7 +299,7 @@ func TestAppExportNotePDFUsesNativeDialogAndWritesAtomically(t *testing.T) {
 		return []byte("%PDF-1.7\nrendered"), nil
 	}
 
-	got, err := app.ExportNotePDF(note.RelativePath, "classic", false)
+	got, err := app.ExportNotePDF(note.RelativePath, "classic", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ func TestAppExportNotePDFCancellationDoesNotRender(t *testing.T) {
 		t.Fatal("renderer called after dialog cancellation")
 		return nil, nil
 	}
-	destination, err := app.ExportNotePDF(note.RelativePath, "classic", false)
+	destination, err := app.ExportNotePDF(note.RelativePath, "classic", false, nil)
 	if err != nil || destination != "" {
 		t.Fatalf("destination=%q error=%v", destination, err)
 	}
@@ -363,7 +363,7 @@ func TestAppExportNotePDFDoesNotLeaveFileOnRendererFailureOrInvalidOutput(t *tes
 				return destination, nil
 			}
 			app.pdfRender = test.render
-			if _, err := app.ExportNotePDF(note.RelativePath, "classic", false); err == nil {
+			if _, err := app.ExportNotePDF(note.RelativePath, "classic", false, nil); err == nil {
 				t.Fatal("export succeeded")
 			}
 			if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
@@ -386,7 +386,7 @@ func TestAppExportNotePDFRequiresEncryptedPlaintextConfirmationBeforeDialog(t *t
 		t.Fatal("dialog opened without plaintext confirmation")
 		return "", nil
 	}
-	if _, err := app.ExportNotePDF(note.RelativePath, "classic", false); err == nil {
+	if _, err := app.ExportNotePDF(note.RelativePath, "classic", false, nil); err == nil {
 		t.Fatal("encrypted export succeeded without confirmation")
 	}
 }

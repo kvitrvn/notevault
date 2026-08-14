@@ -852,7 +852,15 @@ func (a *App) PDFExportOptions() (vault.PDFExportOptionsInfo, error) {
 
 // ExportNotePDF exports exactly one note. The destination comes exclusively
 // from the native save dialog; the frontend cannot provide an arbitrary path.
-func (a *App) ExportNotePDF(relativePath, themeID string, plaintextConfirmed bool) (string, error) {
+//
+// diagrams carries the Mermaid diagrams the frontend rendered to SVG, keyed by
+// the hash of their source code: the printed document forbids scripts, so no
+// diagram can be produced here. It may be nil.
+func (a *App) ExportNotePDF(
+	relativePath, themeID string,
+	plaintextConfirmed bool,
+	diagrams map[string]string,
+) (string, error) {
 	return withSession(a, func(session *vaultSession) (string, error) {
 		if runtime.GOOS != "linux" {
 			return "", errors.New("l’export PDF est disponible uniquement sous Linux")
@@ -890,7 +898,7 @@ func (a *App) ExportNotePDF(relativePath, themeID string, plaintextConfirmed boo
 		if !strings.EqualFold(filepath.Ext(destination), ".pdf") {
 			destination += ".pdf"
 		}
-		document, err := session.service.BuildNotePDFDocument(relativePath, themeID, plaintextConfirmed)
+		document, err := session.service.BuildNotePDFDocument(relativePath, themeID, plaintextConfirmed, diagrams)
 		if err != nil {
 			return "", err
 		}

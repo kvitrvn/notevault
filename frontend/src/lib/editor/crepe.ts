@@ -42,6 +42,12 @@ import { BLOCKED_IMAGE_SRC, isLocalAssetPath, isSafeEditorImageSource, withTimeo
 import { plaintextMarkdownFromClipboard } from '../markdown-paste';
 import { refreshWikiLinkDecorations, wikiLinkPlugin } from '../wiki-link';
 import { wikiLinkSuggestionPlugin } from '../wiki-link-suggestion';
+import {
+  MERMAID_LANGUAGE,
+  currentMermaidTheme,
+  mermaidLanguage,
+  renderMermaid
+} from './mermaid';
 import { MARKDOWN_STRINGIFY_OPTIONS, preserveWikiLinksTextHandler } from './wiki-link-escape';
 
 const ASSET_URL_TIMEOUT_MS = 5_000;
@@ -96,6 +102,33 @@ function createProxyDomURL(assetURL: NoteEditorOptions['assetURL']) {
       return BLOCKED_IMAGE_SRC;
     }
   };
+}
+
+// Aperçu d'un bloc ```mermaid sous le code source.
+//
+// Contrat de `renderPreview` (cf. `@milkdown/components/code-block`) :
+// retourner `null` masque le panneau, retourner une valeur l'affiche
+// directement, ne rien retourner signale un rendu asynchrone — le panneau
+// affiche alors `previewLoading` jusqu'à l'appel de `applyPreview`, qui doit
+// donc être appelé dans tous les cas, y compris en erreur.
+//
+// Pas de débounce : les rendus sont sérialisés côté `renderMermaid` et la file
+// est FIFO, donc c'est bien le dernier état saisi qui est appliqué en dernier.
+// Une syntaxe incomplète échoue au parse, ce qui est peu coûteux.
+function renderMermaidPreview(
+  language: string,
+  content: string,
+  applyPreview: (value: null | string | HTMLElement) => void
+): void | null {
+  if (language.toLowerCase() !== MERMAID_LANGUAGE || content.trim() === '') return null;
+  void renderMermaid(content, currentMermaidTheme())
+    .then((svg) => applyPreview(svg))
+    .catch((error) => {
+      const message = document.createElement('div');
+      message.className = 'mermaid-preview-error';
+      message.textContent = `Diagramme invalide : ${error instanceof Error ? error.message : String(error)}`;
+      applyPreview(message);
+    });
 }
 
 export async function createNoteEditor(options: NoteEditorOptions): Promise<NoteEditorHandle> {
@@ -163,8 +196,12 @@ export async function createNoteEditor(options: NoteEditorOptions): Promise<Note
     // inline de `defaultHighlightStyle` : la coloration suit ainsi le thème
     // du coffre via le CSS (cf. styles.css), sans reconfigurer CodeMirror.
     .addFeature(codeMirror, {
-      languages,
-      extensions: [Prec.highest(syntaxHighlighting(classHighlighter))]
+      languages: [...languages, mermaidLanguage],
+      extensions: [Prec.highest(syntaxHighlighting(classHighlighter))],
+      renderPreview: renderMermaidPreview,
+      previewLabel: 'Aperçu',
+      previewLoading: 'Rendu du diagramme…',
+      previewToggleText: (previewOnlyMode: boolean) => (previewOnlyMode ? 'Éditer' : 'Masquer')
     })
     .addFeature(table);
 
