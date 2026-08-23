@@ -153,7 +153,7 @@ vault/
 ├── templates/
 ├── themes/
 └── .notevault/
-    └── pdf-themes/       # optional local PDF themes (JSON and CSS)
+    └── pdf-themes/       # optional local PDF themes (flat JSON/CSS, or theme packages)
 ```
 
 Notes and their related data live in this local directory. The in-memory index
@@ -186,13 +186,22 @@ atomic writes.
 
 PDF export creates its HTML inside NoteVault, escapes raw HTML, embeds only
 validated raster assets from `assets/`, and applies a restrictive content
-security policy. It must not resolve remote or `file://` resources. Amatl is
-limited to HTML-to-PDF conversion inside a child worker; its templates,
-directives, Markdown processing, and URL resolvers are not exposed to notes or
-themes. Local PDF stylesheets are size-limited and validated before being added
-to this controlled HTML; imports, URLs, external fonts, CSS escapes, and HTML
-markup are rejected. A parent timeout terminates the worker and its Chromium
-process group.
+security policy. It must not resolve remote or `file://` resources. Amatl's
+Markdown processing, directives, and default URL resolvers are never exposed to
+notes or themes. Local PDF stylesheets are size-limited and validated before
+being added to this controlled HTML; imports, URLs, external fonts, CSS escapes,
+and HTML markup are rejected.
+
+A PDF theme package may supply an Amatl HTML layout that owns the whole
+document. Its template engine runs with sprig's environment and DNS functions
+removed, and with a resolver confined to the theme directory: no URL scheme is
+accepted and symlinks cannot escape, so a layout can only embed its own files,
+under per-file and per-document size budgets. The produced HTML is then
+sanitized — active elements, event handlers, and non-`data:` URL attributes are
+removed — and the content security policy is reinjected as the first child of
+`<head>` so a theme cannot weaken it. The printed document therefore stays
+offline and script-free whichever kind of theme produced it. A parent timeout
+terminates the worker and its Chromium process group.
 
 Packaged builds make one automatic, unauthenticated HTTPS request per process
 start to GitHub's fixed `kvitrvn/notevault/releases/latest` API endpoint. The

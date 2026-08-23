@@ -56,6 +56,11 @@ type PDFTheme struct {
 	Colors     PDFColorTheme      `json:"colors"`
 	Options    PDFThemeOptions    `json:"options"`
 	stylesheet string
+	// Renseignés uniquement pour un thème « package » (un dossier avec son
+	// manifeste). Non exportés : les internes d'un thème ne franchissent
+	// jamais la frontière Wails. Cf. pdf_layout.go.
+	layoutFile string
+	vars       map[string]any
 }
 
 type PDFPageTheme struct {
@@ -189,22 +194,39 @@ func (s *Service) ListPDFThemes() ([]PDFTheme, []string) {
 	defer themeRoot.Close()
 
 	filesByID := make(map[string]pdfThemeFiles)
+	packageIDs := make(map[string]struct{})
 	for _, entry := range entries {
 		extension := strings.ToLower(filepath.Ext(entry.Name()))
-		if entry.IsDir() || (extension != ".json" && extension != ".css") {
-			continue
-		}
 		if entry.Type()&os.ModeSymlink != 0 {
-			warnings = append(warnings, fmt.Sprintf("%s : les liens symboliques ne sont pas autorisés.", entry.Name()))
+			// Un dossier symlinké n'a en général pas d'extension : on avertit
+			// pour les candidats plausibles seulement, sans bruiter le dossier
+			// pour un fichier annexe quelconque.
+			if extension == "" || extension == ".json" || extension == ".css" {
+				warnings = append(warnings, fmt.Sprintf("%s : les liens symboliques ne sont pas autorisés.", entry.Name()))
+			}
 			continue
 		}
-		id := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+		if !entry.IsDir() && extension != ".json" && extension != ".css" {
+			continue
+		}
+		id := entry.Name()
+		if !entry.IsDir() {
+			id = strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+		}
 		if _, reserved := reservedIDs[id]; reserved {
 			warnings = append(warnings, fmt.Sprintf("%s : l’identifiant du thème intégré est réservé.", entry.Name()))
 			continue
 		}
 		if !pdfThemeIDPattern.MatchString(id) {
-			warnings = append(warnings, fmt.Sprintf("%s : nom de fichier invalide.", entry.Name()))
+			if entry.IsDir() {
+				warnings = append(warnings, fmt.Sprintf("%s : nom de dossier invalide.", entry.Name()))
+			} else {
+				warnings = append(warnings, fmt.Sprintf("%s : nom de fichier invalide.", entry.Name()))
+			}
+			continue
+		}
+		if entry.IsDir() {
+			packageIDs[id] = struct{}{}
 			continue
 		}
 		files := filesByID[id]
@@ -224,12 +246,30 @@ func (s *Service) ListPDFThemes() ([]PDFTheme, []string) {
 		filesByID[id] = files
 	}
 
-	ids := make([]string, 0, len(filesByID))
+	ids := make([]string, 0, len(filesByID)+len(packageIDs))
 	for id := range filesByID {
+		ids = append(ids, id)
+	}
+	for id := range packageIDs {
+		if _, flat := filesByID[id]; flat {
+			warnings = append(warnings, fmt.Sprintf("%s : un thème plat utilise déjà cet identifiant.", id))
+			continue
+		}
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
+		if _, isPackage := packageIDs[id]; isPackage {
+			if _, flat := filesByID[id]; !flat {
+				theme, parseErr := loadPDFThemePackage(themeRoot, id)
+				if parseErr != nil {
+					warnings = append(warnings, fmt.Sprintf("%s : %s", id, parseErr))
+					continue
+				}
+				themes = append(themes, theme)
+				continue
+			}
+		}
 		files := filesByID[id]
 		theme := stylesheetPDFTheme(id)
 		if files.json != "" {
@@ -415,25 +455,35 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 	return err
 }
 
-func validatePDFTheme(theme PDFTheme) error {
-	if theme.Version != 1 {
-		return errors.New("version non supportée")
-	}
-	if theme.Page.Size != "A4" && theme.Page.Size != "Letter" {
+// validatePDFPage est partagée par les thèmes plats (version 1) et les thèmes
+// package (version 2, cf. pdf_layout.go) : les marges partent au worker
+// Chromium en argument, elles doivent être bornées dans les deux cas.
+func validatePDFPage(page PDFPageTheme) error {
+	if page.Size != "A4" && page.Size != "Letter" {
 		return errors.New("format de page invalide")
 	}
-	if theme.Page.Orientation != "portrait" && theme.Page.Orientation != "landscape" {
+	if page.Orientation != "portrait" && page.Orientation != "landscape" {
 		return errors.New("orientation invalide")
 	}
 	for _, margin := range []float64{
-		theme.Page.Margins.Top,
-		theme.Page.Margins.Right,
-		theme.Page.Margins.Bottom,
-		theme.Page.Margins.Left,
+		page.Margins.Top,
+		page.Margins.Right,
+		page.Margins.Bottom,
+		page.Margins.Left,
 	} {
 		if margin < 5 || margin > 40 {
 			return errors.New("les marges doivent être comprises entre 5 et 40 mm")
 		}
+	}
+	return nil
+}
+
+func validatePDFTheme(theme PDFTheme) error {
+	if theme.Version != 1 {
+		return errors.New("version non supportée")
+	}
+	if err := validatePDFPage(theme.Page); err != nil {
+		return err
 	}
 	if theme.Typography.Family != "serif" && theme.Typography.Family != "sans-serif" {
 		return errors.New("famille de caractères invalide")
@@ -517,8 +567,16 @@ func (s *Service) BuildNotePDFDocument(
 	if err != nil {
 		return PDFDocument{}, fmt.Errorf("rendre le Markdown : %w", err)
 	}
+	document := buildPDFHTML(note, theme, body)
+	if theme.layoutFile != "" {
+		// Thème package : le layout possède tout le document, y compris son
+		// <head> et son style. Cf. pdf_layout.go.
+		if document, err = s.renderPDFLayout(theme, note, body); err != nil {
+			return PDFDocument{}, err
+		}
+	}
 	return PDFDocument{
-		HTML:        buildPDFHTML(note, theme, body),
+		HTML:        document,
 		Margins:     theme.Page.Margins,
 		PageNumbers: theme.Options.PageNumbers,
 	}, nil

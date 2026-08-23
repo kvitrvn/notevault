@@ -115,7 +115,7 @@ A vault has the following structure:
 └── .notevault/
     ├── config.json
     ├── pins.json
-    ├── pdf-themes/      # optional local PDF themes (JSON and CSS)
+    ├── pdf-themes/      # optional local PDF themes (flat JSON/CSS, or theme packages)
     └── chat/models/     # downloaded go-anon models; no note index
 ```
 
@@ -141,17 +141,16 @@ and uses an already installed Chrome or Chromium browser with its sandbox
 enabled. The generated HTML has a restrictive content security policy, embeds
 only validated raster images from `assets/` as data URLs, and does not load
 remote images, styles, fonts, scripts, or other network resources. Raw HTML in
-Markdown is displayed as escaped text; Mermaid remains a code block in this
-first version.
+Markdown is displayed as escaped text.
 
 **Classique** is the only PDF theme bundled with NoteVault. Local PDF themes are
 separate from interface themes and live in `<vault>/.notevault/pdf-themes/`.
 A stylesheet smaller than 64 KiB can stand alone; its filename becomes the
-theme identifier. For example, `beewii.css` adds the `beewii` theme and inherits
+theme identifier. For example, `dummy-theme.css` adds the `dummy-theme` theme and inherits
 the Classique page settings.
 
 An optional JSON file with the same basename controls the rendering options.
-For example, `beewii.css` and `beewii.json` form one theme. Existing JSON-only
+For example, `dummy-theme.css` and `dummy-theme.json` form one theme. Existing JSON-only
 themes remain supported. A complete version 1 JSON file looks like this:
 
 ```json
@@ -191,10 +190,92 @@ theme.
 
 Local stylesheets must be UTF-8 and cannot contain HTML, CSS escapes, imports,
 URLs, external fonts, or browser-specific executable constructs. An invalid
-stylesheet rejects the corresponding theme. NoteVault does not load `.html`
-layouts or execute Amatl templates: it continues to generate and sanitize the
-document HTML itself. A standalone Amatl HTML layout may be stored anywhere
-outside NoteVault and passed directly to the Amatl command line when needed.
+stylesheet rejects the corresponding theme.
+
+### Theme packages (HTML layout)
+
+A PDF theme can also be a **directory**, in which case it owns the whole
+document instead of layering CSS over the built-in one. The directory name is
+the theme identifier, and it must contain a `theme.json` manifest:
+
+```text
+<vault>/.notevault/pdf-themes/
+├── dummy-theme.css           # flat theme — still supported, unchanged
+└── dummy-package/            # theme package
+    ├── theme.json
+    ├── document.html
+    └── assets/
+        ├── logo.png
+        └── Geist.woff2
+```
+
+```json
+{
+  "version": 2,
+  "name": "Dummy Package",
+  "layout": "document.html",
+  "page": {
+    "size": "A4",
+    "orientation": "portrait",
+    "margins": {"top": 15, "right": 16, "bottom": 17, "left": 18}
+  },
+  "options": {"pageNumbers": true},
+  "vars": {"footerText": "Dummy"}
+}
+```
+
+Version 2 is reserved for theme packages, exactly as version 1 is reserved for
+flat themes. `page.margins` (5–40 mm) and `options.pageNumbers` are the only
+fields NoteVault acts on — they become arguments of the rendering worker.
+`typography` and `colors` do not exist in version 2: the layout owns the style.
+A flat theme and a package cannot share an identifier; the flat one wins and a
+warning is shown.
+
+The layout is an [Amatl](https://github.com/Bornholm/amatl) HTML layout of at
+most 256 KiB, executed with a hardened function set. It receives:
+
+| Field | Content |
+|---|---|
+| `.Body` | the rendered Markdown, with images and Mermaid diagrams already embedded as data URLs |
+| `.Meta` | `title`, `updatedAt`, `tags`, `path` |
+| `.Vars` | the manifest `vars`, plus the reserved `page` and `options` keys |
+
+```html
+<!doctype html>
+<html lang="fr">
+  <head>
+    <title>{{ default ( get .Vars "footerText" ) ( get .Meta "title" ) }}</title>
+    <style>
+      @page { size: A4 portrait; }
+      @font-face { font-family: Geist; src: url({{ resolve "assets/Geist.woff2" }}); }
+    </style>
+  </head>
+  <body class="markdown-body">
+    <img src="{{ resolve "assets/logo.png" }}" alt="">
+    {{ .Body }}
+  </body>
+</html>
+```
+
+`resolve` embeds a file from the theme directory as a data URL. It is confined
+to that directory — no scheme is accepted, so no `http://`, `file://` or
+`stdin://` resource can be reached, and symlinks cannot escape. Only
+`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.svg`, `.woff2`, `.woff`, `.ttf`,
+`.otf`, `.css` and `.html` are allowed; each file is capped at 5 MiB, the whole
+document at 24 MiB, and the content must match the extension.
+
+Because a layout writes its own CSS, a stylesheet grammar is no longer the
+control. Three layers apply instead: the confined resolver above; a sanitizing
+pass over the produced HTML that removes `<script>`, `<iframe>`, `<object>`,
+`<embed>`, `<base>`, `<link>`, `<form>`, `on*` handlers and every non-`data:`
+URL attribute; and a content security policy reinjected as the first child of
+`<head>`, which a theme cannot replace. A layout therefore cannot make a network
+request, execute a script, or read anything outside its own directory — the
+printed document remains fully offline. A layout that loops forever or produces
+more than 16 MiB is interrupted with an error.
+
+A flat `.html` file placed directly in `pdf-themes/` is still ignored: only a
+directory carries a layout.
 
 ## Update checks and network privacy
 

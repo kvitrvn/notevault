@@ -65,8 +65,8 @@ func TestListPDFThemesIncludesClassicAndWarnsForInvalidCustomThemes(t *testing.T
 func TestListPDFThemesSupportsStandaloneAndCompanionStylesheets(t *testing.T) {
 	service := newPDFTestService(t)
 	dir := filepath.Join(service.root, ".notevault", "pdf-themes")
-	writeTestFile(t, filepath.Join(dir, "beewii.css"), []byte(validPDFThemeStylesheet))
-	writeTestFile(t, filepath.Join(dir, "beewii.html"), []byte(`<script>alert("ignored")</script>`))
+	writeTestFile(t, filepath.Join(dir, "dummy-theme.css"), []byte(validPDFThemeStylesheet))
+	writeTestFile(t, filepath.Join(dir, "dummy-theme.html"), []byte(`<script>alert("ignored")</script>`))
 	writeTestFile(t, filepath.Join(dir, "report.json"), []byte(validPDFThemeJSON))
 	writeTestFile(t, filepath.Join(dir, "report.css"), []byte("main { max-width: 46rem; }"))
 
@@ -74,7 +74,7 @@ func TestListPDFThemesSupportsStandaloneAndCompanionStylesheets(t *testing.T) {
 	if len(warnings) != 0 {
 		t.Fatalf("warnings = %v", warnings)
 	}
-	if len(themes) != 3 || themes[0].ID != "classic" || themes[1].ID != "beewii" || themes[2].ID != "report" {
+	if len(themes) != 3 || themes[0].ID != "classic" || themes[1].ID != "dummy-theme" || themes[2].ID != "report" {
 		t.Fatalf("themes = %+v", themes)
 	}
 	if themes[1].Builtin || themes[1].stylesheet != validPDFThemeStylesheet {
@@ -181,7 +181,7 @@ func TestBuildNotePDFDocumentUsesLocalCSSTheme(t *testing.T) {
 header { background: linear-gradient(150deg, #062a78 0%, #0a49ab 45%, #0a6fde 100%); }
 pre { background: #f6f8fb; }
 `
-	writeTestFile(t, filepath.Join(dir, "beewii.css"), []byte(stylesheet))
+	writeTestFile(t, filepath.Join(dir, "dummy-theme.css"), []byte(stylesheet))
 	note := createPDFTestNote(t, service, "Audit de conformité", strings.Join([]string{
 		"## Synthèse",
 		"",
@@ -196,7 +196,7 @@ pre { background: #f6f8fb; }
 		"```",
 	}, "\n"))
 
-	document, err := service.BuildNotePDFDocument(note.RelativePath, "beewii", false, nil)
+	document, err := service.BuildNotePDFDocument(note.RelativePath, "dummy-theme", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
