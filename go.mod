@@ -11,10 +11,10 @@ require (
 	github.com/wailsapp/wails/v2 v2.12.0
 	github.com/yuin/goldmark v1.7.17
 	github.com/zalando/go-keyring v0.2.8
-	golang.org/x/crypto v0.50.0
-	golang.org/x/image v0.43.0
-	golang.org/x/net v0.52.0
-	golang.org/x/text v0.39.0
+	golang.org/x/crypto v0.51.0
+	golang.org/x/image v0.45.0
+	golang.org/x/net v0.55.0
+	golang.org/x/text v0.41.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
