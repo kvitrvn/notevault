@@ -107,7 +107,10 @@ func runInternalPDFWorker(args []string, input io.Reader, output io.Writer) erro
 		render.WithMarginBottom(*marginBottom),
 		render.WithMarginLeft(*marginLeft),
 		render.WithDisplayFooterHeader(*pageNumbers),
-		render.WithHeaderTemplate(""),
+		// Chromium replaces an empty header template with its own default
+		// (date + document title). An empty div suppresses it: the printed
+		// margin then carries only the page numbers below.
+		render.WithHeaderTemplate("<div></div>"),
 		render.WithFooterTemplate(footer),
 	))
 	payload := pipeline.NewPayload(html)
