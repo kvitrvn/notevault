@@ -70,7 +70,7 @@ vuln:
 check: frontend/node_modules/.package-lock.json frontend/wailsjs/go/models.ts
 	cd frontend && npm run check
 
-frontend-test: frontend/node_modules/.package-lock.json
+frontend-test: frontend/node_modules/.package-lock.json frontend/wailsjs/go/models.ts
 	cd frontend && npm test
 
 verify: fmt-check vet test-race frontend-test check
