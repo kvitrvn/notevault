@@ -204,7 +204,17 @@
     color: var(--color-accent-foreground);
   }
 
-  /* Images dans l'éditeur. */
+  /* Images dans l'éditeur.
+
+     `content-visibility` fait sauter la mise en page et le rendu des images
+     hors écran, et `contain-intrinsic-size` leur réserve une place en
+     attendant — sans quoi chaque image qui finit de charger reflow tout le
+     document en dessous d'elle, ce qui se voit directement au défilement d'une
+     note riche en images. Le mot-clé `auto` fait mémoriser la taille réelle
+     une fois l'image rendue une première fois : la barre de défilement se
+     stabilise dès le premier passage.
+
+     Non supporté = déclaration ignorée, la mise en page reste correcte. */
   .note-editor-content img {
     display: block;
     max-width: 100%;
@@ -213,10 +223,16 @@
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
     background: var(--color-panel-muted);
+    content-visibility: auto;
+    contain-intrinsic-size: auto 320px;
   }
 
+  /* Une image sélectionnée doit rester rendue : le nœud sélectionné peut être
+     hors du viewport au moment où la sélection y est posée (navigation au
+     clavier, restauration de position). */
   .note-editor-content img.ProseMirror-selectednode {
     outline: 2px solid var(--color-focus);
+    content-visibility: visible;
   }
 
   /* Variables de l'éditeur Crepe mappées sur les tokens NoteVault : les

@@ -2,6 +2,13 @@
   import { onDestroy, onMount, untrack } from 'svelte';
   import { createNoteEditor, type NoteEditorHandle } from '../lib/editor/crepe';
   import { isRemoteImageSource, withTimeout } from '../lib/assets';
+  import {
+    PERF_ENABLED,
+    createFrameMonitor,
+    formatFrameStats,
+    logProbeReport,
+    probe
+  } from '../lib/perf-probe';
 
   type Props = {
     markdown?: string;
@@ -52,7 +59,6 @@
   const MAX_ASSET_BYTES = 10 * 1024 * 1024;
   const UPLOAD_TIMEOUT_MS = 15_000;
   const ASSET_URL_TIMEOUT_MS = 5_000;
-  const isDev = Boolean((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV);
 
   let isUploading = $state(false);
   let uploadError = $state('');
@@ -63,12 +69,7 @@
   }
 
   function serializeMarkdown(ed: NoteEditorHandle): string {
-    if (isDev) console.time('NoteEditor:getMarkdown');
-    try {
-      return ed.getMarkdown();
-    } finally {
-      if (isDev) console.timeEnd('NoteEditor:getMarkdown');
-    }
+    return probe('getMarkdown', () => ed.getMarkdown());
   }
 
   function onDocChanged(): void {
@@ -151,9 +152,20 @@
     }
   }
 
+  // Le défilement se fait sur l'hôte, pas sur `.ProseMirror` : c'est donc là
+  // que se mesure la saccade réellement perçue.
+  const frameMonitor = createFrameMonitor({
+    onReport: (stats) => console.log(formatFrameStats('scroll', stats))
+  });
+
+  function onHostScroll(): void {
+    frameMonitor.ping();
+  }
+
   onMount(() => {
     if (!host) return;
     let disposed = false;
+    const createPerf = PERF_ENABLED ? performance.now() : 0;
 
     void createNoteEditor({
       root: host,
@@ -177,6 +189,17 @@
         }
         editor = handle;
         editorReady = true;
+        if (PERF_ENABLED) {
+          console.log(
+            `[perf] createNoteEditor — ${(performance.now() - createPerf).toFixed(1)} ms`
+          );
+          // Émis ici, pas dans `openNote` : le parse Markdown et le montage
+          // des blocs ont lieu après le retour de `openNote`, via le remontage
+          // du composant par `{#key}`. Le `setTimeout` laisse passer les effets
+          // Svelte du montage (dont le premier calcul des décorations
+          // wiki-link), qui font partie du coût d'ouverture.
+          setTimeout(() => logProbeReport('note ouverte'), 0);
+        }
         onReady({ isEditable: true, isFocused: false });
       })
       .catch((err) => {
@@ -239,6 +262,7 @@
   });
 
   onDestroy(() => {
+    frameMonitor.stop();
     if (pendingChangeTimer) {
       clearTimeout(pendingChangeTimer);
       pendingChangeTimer = null;
@@ -284,6 +308,7 @@
     ondragleave={onHostDragLeave}
     ondragover={onHostDragOver}
     ondrop={onHostDrop}
+    onscroll={PERF_ENABLED ? onHostScroll : undefined}
   >
     {#if dragOverCount > 0}
       <div class="pointer-events-none absolute inset-2 z-10 flex items-center justify-center rounded-lg border-2 border-dashed border-accent bg-accent/10 text-sm font-medium text-accent">

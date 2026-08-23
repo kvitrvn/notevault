@@ -53,7 +53,14 @@
   import type { SaveState } from './components/SaveIndicator.svelte';
   import { fileToBase64, isLocalAssetPath } from './lib/assets';
   import { createDebouncedTask } from './lib/debounce';
+  import {
+    noteIdentity,
+    noteMatchesIdentity,
+    sameTitleSet,
+    type NoteIdentity
+  } from './lib/note-dirty';
   import { normalizeNotesFolderPath } from './lib/note-paths';
+  import { PERF_ENABLED, resetProbes } from './lib/perf-probe';
   import { shouldShowVaultUnlock } from './lib/vault-manager';
   import { clickOutside } from './lib/actions';
   import { domain, vault } from '../wailsjs/go/models';
@@ -141,7 +148,9 @@
   let tags: TagCount[] = $state([]);
   let templates: Template[] = $state([]);
   let selected: Note | null = $state<Note | null>(null);
-  let lastSavedSnapshot = '';
+  // `null` = « forcer la prochaine sauvegarde » : aucune note ouverte ne peut
+  // correspondre à cette sentinelle.
+  let lastSavedIdentity: NoteIdentity | null = null;
   let vaultPath = $state('');
   let loading = $state(true);
   let saving = $state(false);
@@ -312,7 +321,7 @@
       pinned = pinned.filter((n) => !delSet.has(n.relativePath));
       if (selected && delSet.has(selected.relativePath)) {
         selected = null;
-        lastSavedSnapshot = '';
+        lastSavedIdentity = null;
         saveState = 'clean';
         lastSavedAt = null;
         isCurrentPinned = false;
@@ -335,7 +344,7 @@
             const note = (await OpenNote(openPath)) as Note;
             const content = note.content;
             selected = cloneNote(note, content);
-            lastSavedSnapshot = snapshot(selected!);
+            lastSavedIdentity = noteIdentity(selected!);
             saveState = 'clean';
           } catch (err) {
             console.warn('[vault:changed] open note reload failed', err);
@@ -398,8 +407,28 @@
   // Vault sync awareness
   let vaultIsSynced = $state(false);
 
-  // Known titles for wiki-link resolution
-  const knownTitles = $derived(new Set(notes.map((n) => n.title).filter(Boolean)));
+  // Known titles for wiki-link resolution.
+  //
+  // L'identité du Set est volontairement stable tant que les titres ne changent
+  // pas : NoteEditor s'en sert comme déclencheur de `refreshWikiLinks`, qui
+  // reconstruit les décorations sur le document ENTIER (~137 ms sur une note de
+  // 4 000 blocs). Sans cette mémoïsation, chaque rafraîchissement du coffre
+  // — watcher, sauvegarde, saisie dans le filtre — payait ce parcours complet
+  // alors que la liste des titres était inchangée.
+  //
+  // `knownTitlesCache` est un simple `let` (pas du `$state`) : c'est un cache
+  // de mémoïsation, pas un état réactif, et le muter depuis le dérivé ne crée
+  // donc aucune dépendance.
+  let knownTitlesCache = new Set<string>();
+  const knownTitles = $derived.by(() => {
+    const next = new Set<string>();
+    for (const note of notes) {
+      if (note.title) next.add(note.title);
+    }
+    if (sameTitleSet(next, knownTitlesCache)) return knownTitlesCache;
+    knownTitlesCache = next;
+    return next;
+  });
 
   // Pin state
   let isCurrentPinned = $state(false);
@@ -436,10 +465,10 @@
   const currentTitle = $derived(selected?.title?.trim() || 'Aucune note');
   const selectedPath = $derived(selected?.relativePath || '');
   const hasUnsavedChanges = $derived(
-    selected !== null && snapshot(selected) !== lastSavedSnapshot
+    selected !== null && !noteMatchesIdentity(selected, lastSavedIdentity)
   );
   const pinnedSet = $derived(new Set(pinned.map((p) => p.relativePath)));
-  const isDev = Boolean((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV);
+  const isDev = PERF_ENABLED;
   let refreshSeq = 0;
   let perfSeq = 0;
   // Taper dans le champ de filtre ne change pas la liste complète du coffre :
@@ -470,14 +499,6 @@
       return;
     }
     window.setTimeout(task, 0);
-  }
-
-  function snapshot(note: Note): string {
-    return JSON.stringify({
-      title: note.title,
-      content: note.content,
-      tags: note.tags ?? []
-    });
   }
 
   function formatDate(value: unknown): string {
@@ -676,6 +697,11 @@
   async function openNote(relativePath: string): Promise<void> {
     if (!(await flushSave())) return;
     error = '';
+    // Les sondes repartent de zéro à chaque ouverture : le rapport émis par
+    // NoteEditor une fois l'éditeur monté décrit alors le coût de CETTE note,
+    // pas un cumul depuis le démarrage de l'application.
+    resetProbes();
+    const openPerf = startPerf('openNote');
     try {
       const note = await safeCall('OpenNote', OpenNote(relativePath), null);
       if (!note) {
@@ -686,11 +712,13 @@
       // que l'éditeur Tiptap puisse les charger dans la webview.
       const content = note.content;
       selected = cloneNote(note, content);
-      lastSavedSnapshot = snapshot(selected!);
+      lastSavedIdentity = noteIdentity(selected!);
       saveState = 'clean';
       isCurrentPinned = await safeCall('IsNotePinned', IsNotePinned(relativePath), false);
     } catch (err) {
       error = String(err);
+    } finally {
+      endPerf(openPerf);
     }
   }
 
@@ -706,7 +734,7 @@
       const note = await CreateNote(pendingNoteParent, title, templateId);
       const content = note.content;
       selected = cloneNote(note, content);
-      lastSavedSnapshot = snapshot(selected!);
+      lastSavedIdentity = noteIdentity(selected!);
       saveState = 'clean';
       lastSavedAt = new Date();
       isCurrentPinned = false;
@@ -765,7 +793,7 @@
       const note = await OpenDailyNote();
       const content = note.content;
       selected = cloneNote(note, content);
-      lastSavedSnapshot = snapshot(selected!);
+      lastSavedIdentity = noteIdentity(selected!);
       saveState = 'clean';
       isCurrentPinned = await IsNotePinned(note.relativePath);
       invalidateFolders();
@@ -833,7 +861,7 @@
 
   function scheduleAutoSave(options: { compareSnapshot?: boolean } = {}): void {
     if (!selected) return;
-    if (options.compareSnapshot !== false && snapshot(selected) === lastSavedSnapshot) {
+    if (options.compareSnapshot !== false && noteMatchesIdentity(selected, lastSavedIdentity)) {
       saveState = 'clean';
       clearSaveTimers();
       return;
@@ -857,7 +885,7 @@
   async function persistDirtyBuffer(): Promise<void> {
     if (!selected) return;
     noteEditor?.flushPendingChange();
-    if (snapshot(selected) === lastSavedSnapshot) {
+    if (noteMatchesIdentity(selected, lastSavedIdentity)) {
       return;
     }
     try {
@@ -878,23 +906,25 @@
     noteEditor?.flushPendingChange();
     clearSaveTimers();
     if (!selected) return true;
-    if (snapshot(selected) === lastSavedSnapshot && saveState === 'clean') {
+    if (noteMatchesIdentity(selected, lastSavedIdentity) && saveState === 'clean') {
       return true;
     }
     saveState = 'saving';
     error = '';
     const noteToSave = domain.Note.createFrom({ ...selected });
-    const saveSnapshot = snapshot(noteToSave);
+    const saveIdentity = noteIdentity(noteToSave);
     const savePath = noteToSave.relativePath;
     try {
       const saved = await SaveNote(noteToSave);
-      const currentSnapshot = selected?.relativePath === savePath ? snapshot(selected) : '';
-      const changedDuringSave = currentSnapshot !== '' && currentSnapshot !== saveSnapshot;
+      // Une autre note ouverte pendant la sauvegarde n'est pas une modification
+      // de celle qu'on vient d'écrire : on ne compare que si le chemin colle.
+      const changedDuringSave =
+        selected?.relativePath === savePath && !noteMatchesIdentity(selected, saveIdentity);
 
       if (!changedDuringSave) {
         selected = saved;
       }
-      lastSavedSnapshot = snapshot(saved);
+      lastSavedIdentity = noteIdentity(saved);
       saveState = changedDuringSave ? 'dirty' : 'clean';
       lastSavedAt = new Date();
       if (changedDuringSave) {
@@ -943,7 +973,7 @@
     try {
       const updated = await RenameTitle(selected.relativePath, next);
       selected = updated;
-      lastSavedSnapshot = snapshot(updated);
+      lastSavedIdentity = noteIdentity(updated);
       saveState = 'clean';
       lastSavedAt = new Date();
       await refresh();
@@ -1291,7 +1321,7 @@
       await DeleteNote(relativePath);
       if (selected?.relativePath === relativePath) {
         selected = null;
-        lastSavedSnapshot = '';
+        lastSavedIdentity = null;
         saveState = 'clean';
         lastSavedAt = null;
         isCurrentPinned = false;
@@ -1762,7 +1792,7 @@
       const restored = await RestoreFromHistory(selected.relativePath, versionID);
       const content = restored.content;
       selected = cloneNote(restored, content);
-      lastSavedSnapshot = snapshot(selected!);
+      lastSavedIdentity = noteIdentity(selected!);
       saveState = 'clean';
       lastSavedAt = new Date();
       historyOpen = false;
@@ -1841,7 +1871,7 @@
     tags = [];
     templates = [];
     selected = null;
-    lastSavedSnapshot = '';
+    lastSavedIdentity = null;
     saveState = 'clean';
     lastSavedAt = null;
     activeFilter = '';
@@ -2092,7 +2122,7 @@
     selected!.content = buffer;
     selected = selected;
     saveState = 'dirty';
-    lastSavedSnapshot = ''; // force la prochaine save à persister
+    lastSavedIdentity = null; // force la prochaine save à persister
     recoveryOpen = false;
     try {
       await ClearDirtyBuffer();

@@ -13,6 +13,8 @@
 import { LanguageDescription, LanguageSupport, StreamLanguage } from '@codemirror/language';
 import type { StreamParser } from '@codemirror/language';
 
+import { PERF_ENABLED } from '../perf-probe';
+
 /** Info string reconnue sur les blocs de code fencés. */
 export const MERMAID_LANGUAGE = 'mermaid';
 
@@ -24,6 +26,8 @@ let modulePromise: Promise<MermaidAPI> | null = null;
 let appliedTheme: MermaidTheme | null = null;
 let queue: Promise<unknown> = Promise.resolve();
 let sequence = 0;
+/** Rendus demandés et pas encore terminés — mesure uniquement. */
+let pending = 0;
 
 async function loadMermaid(): Promise<MermaidAPI> {
   modulePromise ??= import('mermaid').then((module) => module.default);
@@ -88,12 +92,26 @@ export function currentMermaidTheme(): MermaidTheme {
  * cours (aperçu de l'éditeur).
  */
 export async function renderMermaid(code: string, theme: MermaidTheme): Promise<string> {
+  // La profondeur de file est la mesure qui compte ici : elle dit combien de
+  // rendus obsolètes restent à traiter avant celui que l'utilisateur attend.
+  if (PERF_ENABLED) pending += 1;
   const run = queue.then(async () => {
     const mermaid = await loadMermaid();
     initialize(mermaid, theme);
     sequence += 1;
-    const { svg } = await mermaid.render(`notevault-mermaid-${sequence}`, code);
-    return svg;
+    const start = PERF_ENABLED ? performance.now() : 0;
+    try {
+      const { svg } = await mermaid.render(`notevault-mermaid-${sequence}`, code);
+      return svg;
+    } finally {
+      if (PERF_ENABLED) {
+        pending -= 1;
+        console.log(
+          `[perf] mermaid:render — ${(performance.now() - start).toFixed(1)} ms, ` +
+            `${pending} rendu(s) encore en file`
+        );
+      }
+    }
   });
   queue = run.catch(() => undefined);
   return run;

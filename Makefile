@@ -8,6 +8,15 @@ WAILS_BUILD_FLAGS ?= -trimpath
 APP_VERSION ?= $(shell ./scripts/build-version.sh)
 WAILS_LDFLAGS ?= -X main.buildVersion=$(APP_VERSION)
 
+# Le CLI Wails v2.12.0 embarque golang.org/x/tools v0.30.0, dont le lecteur de
+# données d'export ne comprend pas celles produites par Go >= 1.27 : go/packages
+# charge alors « time » sans types et la génération échoue sur
+# `internal error: package "time" without types was imported from ...`.
+# On épingle donc le toolchain sur la version déclarée dans go.mod pour tout ce
+# qui passe par le CLI. À retirer quand Wails relèvera x/tools.
+GO_TOOLCHAIN ?= $(shell awk '$$1 == "go" { print "go" $$2; exit }' go.mod)
+WAILS_GO_ENV := GOTOOLCHAIN=$(GO_TOOLCHAIN)
+
 .PHONY: dev regen build test test-race test-pdf-integration frontend-test fmt fmt-check vet vuln check verify patch-models frontend-install
 
 # Workflow dev : `wails dev` régénère les bindings à chaque démarrage,
@@ -15,16 +24,16 @@ WAILS_LDFLAGS ?= -X main.buildVersion=$(APP_VERSION)
 # dans wails.json (scripts/with-patch-dev.sh) ré-applique le patch juste
 # avant de lancer Vite, donc les éditions TypeScript voient la bonne classe.
 dev: $(WAILS)
-	$(WAILS) dev $(WAILS_TAG_ARGS) -ldflags "$(WAILS_LDFLAGS)"
+	$(WAILS_GO_ENV) $(WAILS) dev $(WAILS_TAG_ARGS) -ldflags "$(WAILS_LDFLAGS)"
 
 # À utiliser après avoir modifié du code Go exposé : régénère les
 # bindings puis applique le patch.
 regen: $(WAILS)
-	$(WAILS) generate module
+	$(WAILS_GO_ENV) $(WAILS) generate module
 	./scripts/patch-models.sh
 
 build: $(WAILS)
-	$(WAILS) build $(WAILS_TAG_ARGS) $(WAILS_BUILD_FLAGS) -ldflags "$(WAILS_LDFLAGS)"
+	$(WAILS_GO_ENV) $(WAILS) build $(WAILS_TAG_ARGS) $(WAILS_BUILD_FLAGS) -ldflags "$(WAILS_LDFLAGS)"
 
 test:
 	go test ./...
@@ -73,7 +82,7 @@ frontend/node_modules/.package-lock.json: frontend/package.json frontend/package
 	cd frontend && npm ci
 
 frontend/wailsjs/go/models.ts: $(WAILS) *.go internal/chat/*.go internal/domain/*.go internal/vault/*.go internal/config/*.go
-	$(WAILS) generate module
+	$(WAILS_GO_ENV) $(WAILS) generate module
 	./scripts/patch-models.sh
 
 # Patch le fichier wailsjs/go/models.ts généré. Le générateur Wails
@@ -86,4 +95,4 @@ patch-models:
 
 $(WAILS):
 	mkdir -p tools/wails/bin
-	GOBIN=$(PWD)/tools/wails/bin go install github.com/wailsapp/wails/v2/cmd/wails@$(WAILS_VERSION)
+	$(WAILS_GO_ENV) GOBIN=$(PWD)/tools/wails/bin go install github.com/wailsapp/wails/v2/cmd/wails@$(WAILS_VERSION)

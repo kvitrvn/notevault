@@ -42,12 +42,8 @@ import { BLOCKED_IMAGE_SRC, isLocalAssetPath, isSafeEditorImageSource, withTimeo
 import { plaintextMarkdownFromClipboard } from '../markdown-paste';
 import { refreshWikiLinkDecorations, wikiLinkPlugin } from '../wiki-link';
 import { wikiLinkSuggestionPlugin } from '../wiki-link-suggestion';
-import {
-  MERMAID_LANGUAGE,
-  currentMermaidTheme,
-  mermaidLanguage,
-  renderMermaid
-} from './mermaid';
+import { currentMermaidTheme, mermaidLanguage, renderMermaid } from './mermaid';
+import { createMermaidPreviewRenderer } from './mermaid-preview';
 import { MARKDOWN_STRINGIFY_OPTIONS, preserveWikiLinksTextHandler } from './wiki-link-escape';
 
 const ASSET_URL_TIMEOUT_MS = 5_000;
@@ -104,6 +100,23 @@ function createProxyDomURL(assetURL: NoteEditorOptions['assetURL']) {
   };
 }
 
+const CODE_BLOCK_SELECTOR = '.milkdown-code-block';
+
+// Identité de bloc pour l'ordonnanceur d'aperçus. Crepe ne dit pas de quel
+// bloc vient la demande ; pendant la frappe, le focus est dans le CodeMirror
+// du bloc édité, et l'élément du bloc est stable pour toute sa durée de vie.
+function focusedCodeBlock(): Element | null {
+  const active = document.activeElement;
+  return active instanceof Element ? active.closest(CODE_BLOCK_SELECTOR) : null;
+}
+
+function mermaidPreviewError(error: unknown): HTMLElement {
+  const message = document.createElement('div');
+  message.className = 'mermaid-preview-error';
+  message.textContent = `Diagramme invalide : ${error instanceof Error ? error.message : String(error)}`;
+  return message;
+}
+
 // Aperçu d'un bloc ```mermaid sous le code source.
 //
 // Contrat de `renderPreview` (cf. `@milkdown/components/code-block`) :
@@ -112,24 +125,13 @@ function createProxyDomURL(assetURL: NoteEditorOptions['assetURL']) {
 // affiche alors `previewLoading` jusqu'à l'appel de `applyPreview`, qui doit
 // donc être appelé dans tous les cas, y compris en erreur.
 //
-// Pas de débounce : les rendus sont sérialisés côté `renderMermaid` et la file
-// est FIFO, donc c'est bien le dernier état saisi qui est appliqué en dernier.
-// Une syntaxe incomplète échoue au parse, ce qui est peu coûteux.
-function renderMermaidPreview(
-  language: string,
-  content: string,
-  applyPreview: (value: null | string | HTMLElement) => void
-): void | null {
-  if (language.toLowerCase() !== MERMAID_LANGUAGE || content.trim() === '') return null;
-  void renderMermaid(content, currentMermaidTheme())
-    .then((svg) => applyPreview(svg))
-    .catch((error) => {
-      const message = document.createElement('div');
-      message.className = 'mermaid-preview-error';
-      message.textContent = `Diagramme invalide : ${error instanceof Error ? error.message : String(error)}`;
-      applyPreview(message);
-    });
-}
+// L'ordonnancement — débounce de la frappe, abandon des rendus périmés,
+// réaffichage d'un état déjà rendu — vit dans `mermaid-preview.ts`.
+const renderMermaidPreview = createMermaidPreviewRenderer({
+  render: (code) => renderMermaid(code, currentMermaidTheme()),
+  renderError: mermaidPreviewError,
+  focusedBlock: focusedCodeBlock
+});
 
 export async function createNoteEditor(options: NoteEditorOptions): Promise<NoteEditorHandle> {
   const crepe = new CrepeBuilder({ root: options.root, defaultValue: options.markdown });
